@@ -1,0 +1,79 @@
+kind: Job
+apiVersion: batch/v1
+metadata:
+  name: customer-profile-migrate
+  namespace: aizt01-pro
+  labels:
+    app: customer-profile-migrate
+  annotations:
+    lke.io/creator: p886702
+    revisions: '{"1":{"status":"running","desire":1,"uid":"1f0fe026-d47a-4300-9ec6-14208a665114","start-time":"2026-07-08T19:29:21+08:00","completion-time":"0001-01-01T00:00:00Z"}}'
+spec:
+  parallelism: 1
+  completions: 1
+  backoffLimit: 6
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: customer-profile-migrate
+      annotations:
+        lke.io/creator: p886702
+        lke.io/imagepullsecrets: '{}'
+    spec:
+      containers:
+      - name: container-f0got3
+        image: registry.dfmc.com.cn/mhero-ai/customer-profile-backend:arm64-latest
+        command:
+        - customer-profile-migrate
+        ports:
+        - name: tcp-0
+          containerPort: 18008
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 200m
+            memory: 250Mi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: APP_ENV
+          value: prod
+        - name: LOG_LEVEL
+          value: INFO
+        - name: WORKFLOW_PLATFORM
+          value: qingtian
+        - name: QINGTIAN_BASE_URL
+          value: https://qingtian.dfmc.com.cn/api/proxy/api/v1
+        - name: QINGTIAN_API_KEY_TEST
+          value: d8tl0t5888rrg8klcn3g
+        - name: QINGTIAN_API_KEY_PRODUCTION
+          value: d8tl0t5888rrg8klcn3g
+        - name: QINGTIAN_INVITATION_STRATEGY_API_KEY
+          value: d8tl0t5888rrg8klcn3g
+        - name: QINGTIAN_USER_ID
+          value: klh
+        - name: MYSQL_HOST
+          value: 10.81.67.146
+        - name: MYSQL_PORT
+          value: '13306'
+        - name: MYSQL_DATABASE
+          value: customer_profile
+        - name: MYSQL_USER
+          value: ai_app
+        - name: MYSQL_PASSWORD
+          value: Kbd*e5E09N
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      serviceAccountName: default
+      serviceAccount: default
+      securityContext: {}
+      schedulerName: default-scheduler
+  completionMode: NonIndexed
+  suspend: false
+  podReplacementPolicy: TerminatingOrFailed

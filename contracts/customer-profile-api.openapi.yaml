@@ -1,0 +1,385 @@
+openapi: 3.0.3
+info:
+  title: Customer Profile Backend API
+  version: 1.0.0
+  description: |
+    API contract for customer profile analysis task submission, list query, and result query.
+servers:
+  - url: https://api.example.com
+tags:
+  - name: CustomerProfileTasks
+    description: Customer profile task lifecycle APIs
+paths:
+  /v1/customer-profile/tasks:
+    post:
+      tags:
+        - CustomerProfileTasks
+      summary: Submit customer profile analysis task
+      description: |
+        Accepts a new task for a phone number. This endpoint is asynchronous and does not
+        wait for Dify final output.
+      operationId: submitCustomerProfileTask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitTaskRequest'
+      responses:
+        '202':
+          description: Task accepted and queued for processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskAcceptedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    get:
+      tags:
+        - CustomerProfileTasks
+      summary: List tasks by phone prefix
+      description: Returns tasks where customer_phonenumber starts with given prefix.
+      operationId: listCustomerProfileTasks
+      parameters:
+        - in: query
+          name: phone_prefix
+          required: true
+          description: Prefix of customer phone number, e.g. "138".
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 32
+            pattern: '^[0-9+]+$'
+        - in: query
+          name: page
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - in: query
+          name: page_size
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Task list returned successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /v1/customer-profile/tasks/{customer_phonenumber}/result:
+    get:
+      tags:
+        - CustomerProfileTasks
+      summary: Get task result by full phone number
+      description: |
+        Returns final output when task has succeeded. For processing or failed tasks,
+        returns explicit business status and error code instead of empty payload.
+      operationId: getCustomerProfileTaskResult
+      parameters:
+        - in: path
+          name: customer_phonenumber
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 32
+            pattern: '^[0-9+]+$'
+      responses:
+        '200':
+          description: Task succeeded and output is available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResultSucceededResponse'
+        '202':
+          description: Task exists but still in progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResultInProgressResponse'
+        '422':
+          description: Task finished with failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResultFailedResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+components:
+  schemas:
+    SubmitTaskRequest:
+      type: object
+      required:
+        - customer_phonenumber
+      properties:
+        customer_phonenumber:
+          type: string
+          minLength: 1
+          maxLength: 32
+          pattern: '^[0-9+]+$'
+        wechat_homepage_image:
+          type: string
+          nullable: true
+          description: Optional image reference. Can be file_id or URL based on integration mode.
+        wechat_moments_image:
+          type: string
+          nullable: true
+          description: Optional image reference. Can be file_id or URL based on integration mode.
+    TaskAcceptedResponse:
+      type: object
+      required:
+        - code
+        - message
+        - customer_phonenumber
+        - status
+      properties:
+        code:
+          type: string
+          example: TASK_ACCEPTED
+        message:
+          type: string
+          example: task accepted
+        customer_phonenumber:
+          type: string
+        status:
+          type: string
+          enum: [queued, processing]
+    TaskListItem:
+      type: object
+      required:
+        - customer_phonenumber
+        - status
+        - updated_at
+      properties:
+        customer_phonenumber:
+          type: string
+        card_id:
+          type: string
+          nullable: true
+        nickname:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [queued, processing, succeeded, failed]
+        updated_at:
+          type: string
+          format: date-time
+    TaskListResponse:
+      type: object
+      required:
+        - code
+        - message
+        - items
+        - page
+        - page_size
+        - total
+      properties:
+        code:
+          type: string
+          example: OK
+        message:
+          type: string
+          example: success
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskListItem'
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+    TaskResultSucceededResponse:
+      type: object
+      required:
+        - code
+        - message
+        - customer_phonenumber
+        - status
+        - output
+      properties:
+        code:
+          type: string
+          example: TASK_SUCCEEDED
+        message:
+          type: string
+          example: task succeeded
+        customer_phonenumber:
+          type: string
+        status:
+          type: string
+          enum: [succeeded]
+        output:
+          $ref: 'customer-profile-output.schema.json'
+        card_id:
+          type: string
+          nullable: true
+        nickname:
+          type: string
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+    TaskResultInProgressResponse:
+      type: object
+      required:
+        - code
+        - message
+        - customer_phonenumber
+        - status
+      properties:
+        code:
+          type: string
+          enum:
+            - TASK_QUEUED
+            - TASK_PROCESSING
+        message:
+          type: string
+          example: task is still running
+        customer_phonenumber:
+          type: string
+        status:
+          type: string
+          enum: [queued, processing]
+        updated_at:
+          type: string
+          format: date-time
+    TaskResultFailedResponse:
+      type: object
+      required:
+        - code
+        - message
+        - customer_phonenumber
+        - status
+      properties:
+        code:
+          type: string
+          enum:
+            - TASK_FAILED
+            - DIFY_REQUEST_FAILED
+            - DIFY_TIMEOUT
+            - DIFY_OUTPUT_INVALID_JSON
+            - DIFY_OUTPUT_SCHEMA_MISMATCH
+        message:
+          type: string
+          example: task failed
+        customer_phonenumber:
+          type: string
+        status:
+          type: string
+          enum: [failed]
+        error_message:
+          type: string
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+    ErrorResponse:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          example: INVALID_ARGUMENT
+        message:
+          type: string
+          example: phone_prefix is required
+        details:
+          type: object
+          additionalProperties: true
+          nullable: true
+  responses:
+    BadRequest:
+      description: Invalid request arguments
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            invalidArgument:
+              value:
+                code: INVALID_ARGUMENT
+                message: customer_phonenumber format is invalid
+    NotFound:
+      description: Task not found by full phone number
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            notFound:
+              value:
+                code: TASK_NOT_FOUND
+                message: task for this phone number does not exist
+    Conflict:
+      description: Request conflicts with current task state
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            duplicateRunningTask:
+              value:
+                code: TASK_ALREADY_RUNNING
+                message: task is already running for this phone number
+    UnprocessableEntity:
+      description: Business rule validation or execution failure
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            outputSchemaMismatch:
+              value:
+                code: DIFY_OUTPUT_SCHEMA_MISMATCH
+                message: output missing required fields card_id or nickname
+    TooManyRequests:
+      description: Request is throttled by server
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            throttled:
+              value:
+                code: RATE_LIMITED
+                message: too many requests, please retry later
+    InternalServerError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            internalError:
+              value:
+                code: INTERNAL_ERROR
+                message: unexpected error

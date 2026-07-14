@@ -1,0 +1,22 @@
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: customer-profile-task-uploads
+  namespace: aizt01-pro
+  annotations:
+    lke.io/creator: p886702
+    pv.kubernetes.io/bind-completed: 'yes'
+    pv.kubernetes.io/bound-by-controller: 'yes'
+    volume.beta.kubernetes.io/storage-provisioner: com.nfs.csi.xsky
+    volume.kubernetes.io/storage-provisioner: com.nfs.csi.xsky
+  finalizers:
+    - kubernetes.io/pvc-protection
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  volumeName: pvc-4969f695-86af-4326-8d99-914330d9b7b4
+  storageClassName: lke-arm-csi-nfs-prod
+  volumeMode: Filesystem

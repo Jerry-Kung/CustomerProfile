@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer-profile-worker
+  namespace: aizt01-pro
+  labels:
+    app: customer-profile-worker
+    app.kubernetes.io/name: customer-profile-backend
+    app.kubernetes.io/component: worker
+  annotations:
+    lke.io/creator: lirui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: customer-profile-worker
+  template:
+    metadata:
+      labels:
+        app: customer-profile-worker
+        app.kubernetes.io/name: customer-profile-backend
+        app.kubernetes.io/component: worker
+      annotations:
+        lke.io/creator: lirui
+        lke.io/imagepullsecrets: '{}'
+    spec:
+      containers:
+      - name: container-customer-profile-worker
+        image: registry.dfmc.com.cn/mhero-ai/customer-profile-backend:arm64-latest
+        imagePullPolicy: Always
+        command:
+        - customer-profile-worker
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: '2'
+            memory: 1Gi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - name: task-uploads
+          mountPath: /var/lib/customer-profile/task-uploads
+        env:
+        - name: APP_ENV
+          value: prod
+        - name: LOG_LEVEL
+          value: INFO
+        - name: WORKFLOW_PLATFORM
+          value: qingtian
+        - name: QINGTIAN_BASE_URL
+          value: https://qingtian.dfmc.com.cn/api/proxy/api/v1
+        - name: QINGTIAN_API_KEY_TEST
+          value: d985kb79vlnv8q4p7fo0
+        - name: QINGTIAN_API_KEY_PRODUCTION
+          value: d985kb79vlnv8q4p7fo0
+        - name: QINGTIAN_INVITATION_STRATEGY_API_KEY
+          value: d985kb79vlnv8q4p7fo0
+        - name: QINGTIAN_USER_ID
+          value: sys_prod
+        - name: QINGTIAN_POLL_INTERVAL_MS
+          value: '2000'
+        - name: QINGTIAN_POLL_TIMEOUT_MS
+          value: '2400000'
+        - name: MYSQL_HOST
+          value: 10.81.67.146
+        - name: MYSQL_PORT
+          value: '13306'
+        - name: MYSQL_DATABASE
+          value: customer_profile
+        - name: MYSQL_USER
+          value: ai_app
+        - name: MYSQL_PASSWORD
+          value: Kbd*e5E09N
+        - name: WORKER_CONCURRENCY
+          value: '2'
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 60
+      dnsPolicy: ClusterFirst
+      serviceAccountName: default
+      serviceAccount: default
+      securityContext: {}
+      schedulerName: default-scheduler
+      volumes:
+      - name: task-uploads
+        persistentVolumeClaim:
+          claimName: customer-profile-task-uploads
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600

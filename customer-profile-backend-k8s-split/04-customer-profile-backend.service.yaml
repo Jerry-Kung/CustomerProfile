@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer-profile-backend
+  namespace: aizt01-pro
+  labels:
+    app: customer-profile-backend
+  annotations:
+    deployment.kubernetes.io/revision: '1'
+    lke.io/creator: p886702
+spec:
+  type: ClusterIP
+  selector:
+    app: customer-profile-backend
+  ports:
+  - name: http-api
+    port: 18008
+    targetPort: http-api
+    protocol: TCP

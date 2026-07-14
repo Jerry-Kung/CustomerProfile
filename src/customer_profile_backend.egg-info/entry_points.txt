@@ -1,0 +1,5 @@
+[console_scripts]
+customer-profile-api = src.app.run_api:main
+customer-profile-check-contracts = src.contracts.validate_contracts:main
+customer-profile-migrate = src.app.run_migration:main
+customer-profile-worker = src.app.run_worker:main

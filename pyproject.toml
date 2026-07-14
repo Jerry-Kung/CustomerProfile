@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "customer-profile-backend"
+version = "0.1.0"
+description = "Phase-00 config and contract baseline for customer_profile backend"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "httpx>=0.28.0",
+  "mysql-connector-python>=9.4.0",
+  "PyYAML>=6.0.1",
+  "python-multipart>=0.0.9",
+  "uvicorn>=0.31.0",
+  "python-dotenv>=1.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.2",
+]
+
+[project.scripts]
+customer-profile-api = "src.app.run_api:main"
+customer-profile-worker = "src.app.run_worker:main"
+customer-profile-migrate = "src.app.run_migration:main"
+customer-profile-check-contracts = "src.contracts.validate_contracts:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+  "integration: real external integration tests",
+  "mysql_integration: real MySQL connectivity tests",
+  "dify_integration: real Dify connectivity tests",
+  "api_http_e2e: HTTP API tests against a running server (curl)",
+]

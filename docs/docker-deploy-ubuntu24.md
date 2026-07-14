@@ -1,0 +1,301 @@
+# Ubuntu 24.04 上使用 Docker 部署本服务（详细指南）
+
+本文面向**首次**在 Linux 上用 Docker 部署 Python 微服务的同学，环境以 **Ubuntu 24.04 LTS** 为例，覆盖：安装 Docker、配置环境、改端口、防火墙放通、以及**前端如何填写后端 Base URL**。
+
+> 通用说明仍见：[deploy-and-run.md](deploy-and-run.md)  
+> 接口路径与轮询见：[frontend-api-guide.md](frontend-api-guide.md)
+
+---
+
+## 1. 架构说明（部署前要清楚）
+
+| 组件 | 运行方式 | 是否进 Docker |
+|------|----------|----------------|
+| **本仓库 API** | `docker compose` 中的 `api` 服务 | ✅ |
+| **本仓库 Worker** | `docker compose` 中的 `worker` 服务 | ✅ |
+| **MySQL** | 业务数据库 | ❌ 默认**外部**（云 RDS 或自建机上的 MySQL） |
+| **Dify** | 工作流引擎 | ❌ 默认**外部** |
+
+容器内的 **Worker** 需要能访问：
+
+- `MYSQL_HOST`（若 MySQL 在宿主机上，见下文「宿主机 MySQL」）
+- Dify 的 `DIFY_BASE_URL`（一般为内网或公网 URL）
+
+---
+
+## 2. 在 Ubuntu 24.04 上安装 Docker
+
+### 2.1 卸载旧包（若有）
+
+```bash
+sudo apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc 2>/dev/null || true
+```
+
+### 2.2 使用官方仓库安装 Docker Engine（推荐）
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "${VERSION_CODENAME:-$VERSION_ID}") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+### 2.3 验证
+
+```bash
+sudo docker run --rm hello-world
+docker compose version
+```
+
+### 2.4 当前用户免 sudo（可选）
+
+```bash
+sudo usermod -aG docker "$USER"
+# 重新登录 SSH 会话后生效
+newgrp docker   # 或退出 SSH 再登录
+```
+
+---
+
+## 3. 获取项目代码与配置 `.env`
+
+```bash
+cd /opt   # 或你喜欢的目录
+# 若使用 git：
+# git clone <你的仓库地址> customer_profile_backend
+cd customer_profile_backend
+
+cp .env.example .env
+nano .env   # 或用 vim
+```
+
+**必填**（与本地运行一致）：
+
+- `DIFY_BASE_URL`、`DIFY_RUN_URL`、`DIFY_API_KEY`、`DIFY_USER_ID`
+- `MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE`
+
+**Docker 下建议同时检查**：
+
+- `LOG_LEVEL=INFO`（默认即可）
+- 若 MySQL 跑在**同一台 Ubuntu 宿主机**上、且监听 `127.0.0.1`：
+  - 容器里 **不能** 用 `MYSQL_HOST=127.0.0.1`（那会指向容器自己）。
+  - 应使用 **宿主机在 Docker 网桥上的地址**，常用写法：
+    - `MYSQL_HOST=host.docker.internal`（需较新 Docker 且已启用，见下）
+    - 或 `MYSQL_HOST=172.17.0.1`（默认 `docker0` 网关，部分环境适用）
+    - 或把 MySQL 绑定到 `0.0.0.0` 并使用**宿主机局域网 IP**
+  - 在 `docker-compose.yml` 的 `api` / `worker` 下可增加（按需）：
+
+```yaml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
+
+  然后在 `.env` 里设 `MYSQL_HOST=host.docker.internal`。
+
+---
+
+## 4. 数据库迁移（在容器外执行一次即可）
+
+在**能连上 MySQL 的机器**上执行 SQL（示例用本机 `mysql` 客户端）：
+
+```bash
+mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" < db/migrations/001_create_customer_profile_tasks.sql
+mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" < db/migrations/002_add_task_image_columns.sql
+```
+
+（密码含特殊字符时建议交互式 `-p` 不要跟在同一参数里。）
+
+---
+
+## 5. 构建并启动服务
+
+```bash
+cd /opt/customer_profile_backend   # 项目根目录，含 Dockerfile 与 docker-compose.yml
+
+docker compose build
+docker compose up -d
+```
+
+查看状态与日志：
+
+```bash
+docker compose ps
+docker compose logs -f api
+docker compose logs -f worker
+```
+
+健康检查（默认映射宿主机 **8000** 时）：
+
+```bash
+curl -sS http://127.0.0.1:8000/health
+```
+
+---
+
+## 6. 端口冲突：如何修改对外端口
+
+对外访问的是 **宿主机端口 → 容器内 8000** 的映射，由环境变量 **`HOST_API_PORT`** 控制（见 `docker-compose.yml`）。
+
+### 6.1 写入 `.env`（推荐，便于记住）
+
+在 `.env` 中增加或修改：
+
+```env
+HOST_API_PORT=18080
+```
+
+然后重建并启动：
+
+```bash
+docker compose up -d --build
+```
+
+此时本机访问：
+
+```bash
+curl -sS http://127.0.0.1:18080/health
+```
+
+### 6.2 仅当前 shell 临时指定
+
+```bash
+export HOST_API_PORT=18080
+docker compose up -d
+```
+
+### 6.3 说明：`API_PORT` vs `HOST_API_PORT`
+
+| 变量 | 含义 |
+|------|------|
+| `HOST_API_PORT` | **宿主机**上对外监听的端口（给浏览器 / 前端 / 公网访问） |
+| `API_PORT`（容器内） | 进程在**容器内**监听端口；`docker-compose.yml` 已固定为 `8000`，一般**不要改** compose 里的映射右侧 |
+
+---
+
+## 7. 防火墙与安全组：放通端口
+
+### 7.1 Ubuntu 本机防火墙 UFW
+
+若已启用 UFW：
+
+```bash
+sudo ufw status
+```
+
+放通你实际使用的宿主机端口（与 `HOST_API_PORT` 一致），例如 **18080**：
+
+```bash
+sudo ufw allow 18080/tcp comment 'customer-profile-api'
+sudo ufw reload
+sudo ufw status numbered
+```
+
+**仅内网访问**时，可限制来源（示例：仅某网段）：
+
+```bash
+sudo ufw allow from 10.0.0.0/8 to any port 18080 proto tcp
+```
+
+### 7.2 云服务器安全组（阿里云 / 腾讯云 / AWS 等）
+
+在控制台为实例绑定安全组，**入站规则**增加：
+
+- 协议：TCP  
+- 端口：`HOST_API_PORT`（如 `18080`）  
+- 来源：你的办公网 / `0.0.0.0/0`（演示环境；生产建议收紧）
+
+**UFW 与云安全组都要放行**时，两者需一致，否则仍无法从外网访问。
+
+### 7.3 确认监听地址
+
+容器内服务监听 `0.0.0.0:8000`，映射到宿主机后，应可通过 **服务器公网 IP + 端口** 访问（在安全组与 UFW 均允许的前提下）。
+
+---
+
+## 8. 部署后：前端如何配置 Base URL
+
+前端所有接口都相对于**同一个 HTTP(S) 根地址**，例如：
+
+```text
+http://<服务器IP或域名>:<HOST_API_PORT>
+```
+
+### 8.1 示例
+
+- 服务器公网 IP：`203.0.113.50`  
+- `HOST_API_PORT=18080`  
+
+则前端环境变量可设为：
+
+```text
+VITE_API_BASE_URL=http://203.0.113.50:18080
+# 或 axios baseURL 同上
+```
+
+具体请求示例：
+
+- `GET  http://203.0.113.50:18080/health`
+- `POST http://203.0.113.50:18080/v1/customer-profile/tasks`
+- `GET  http://203.0.113.50:18080/v1/customer-profile/tasks?phone_prefix=131&page=1&page_size=20`
+- `GET  http://203.0.113.50:18080/v1/customer-profile/tasks/13129509529/result`
+
+（路径中的手机号需 URL 编码若含特殊字符。）
+
+### 8.2 使用域名 + HTTPS（推荐生产）
+
+前面板用户浏览器通常要求 **HTTPS**。做法之一：
+
+1. 在同一台机或另一台机用 **Nginx / Caddy** 做反向代理：  
+   `https://api.example.com` → `http://127.0.0.1:18080`
+2. 前端 Base URL 设为：`https://api.example.com`（**不带**末尾路径 `/v1/...`，由前端拼接）。
+
+### 8.3 跨域（CORS）说明
+
+当前后端**未内置 CORS 中间件**。若前端页面域名是 `https://app.example.com`，接口是 `http://IP:端口`，浏览器可能拦截跨域请求。
+
+常见处理方式（二选一）：
+
+- **推荐**：前端与 API 同域（反向代理把 `/api` 转到后端），或给后端增加 CORS（后续迭代）。
+- 演示期：用浏览器插件临时关闭 CORS（**仅限本机调试，勿用于生产**）。
+
+### 8.4 图片字段与 Docker
+
+若前端传 `wechat_homepage_image` / `wechat_moments_image` 为**服务器本地路径**，该路径必须对 **Worker 容器**可见（一般要挂载卷或改用 **URL**）。演示联调建议传 **可公网或可内网访问的图片 URL**，与 [frontend-api-guide.md](frontend-api-guide.md) 一致。
+
+---
+
+## 9. 常用运维命令
+
+```bash
+# 停止
+docker compose down
+
+# 更新代码后重新构建并启动
+docker compose build --no-cache
+docker compose up -d
+
+# 查看资源占用
+docker stats
+```
+
+---
+
+## 10. 快速检查清单
+
+- [ ] Docker 与 `docker compose` 可用  
+- [ ] `.env` 中 Dify、MySQL 对 **容器内** 可达（注意 `127.0.0.1` 陷阱）  
+- [ ] 已执行 `001` / `002` 迁移  
+- [ ] `HOST_API_PORT` 无冲突，且 **UFW + 云安全组** 已放通  
+- [ ] `curl http://127.0.0.1:<HOST_API_PORT>/health` 返回 `ok`  
+- [ ] 前端 Base URL = `http(s)://<主机>:<HOST_API_PORT>`（或反代后的域名）
+
+按上述配置后，前端即可用该 Base URL 调用 [frontend-api-guide.md](frontend-api-guide.md) 中的三个业务接口。

@@ -1,0 +1,44 @@
+# MVP: API + Worker as two containers. MySQL/Dify are external (configure via .env).
+# Shared volume: API saves multipart uploads here; worker reads paths for DIFY_IMAGE_MODE=file_id.
+services:
+  migrate:
+    build: .
+    command: ["customer-profile-migrate"]
+    env_file:
+      - .env
+    restart: "no"
+
+  api:
+    build: .
+    ports:
+      # Host port (container listens on 18008)
+      - "${HOST_API_PORT:-18008}:18008"
+    env_file:
+      - .env
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: "18008"
+      TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
+    volumes:
+      - task_uploads:/var/lib/customer-profile/task-uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["customer-profile-worker"]
+    env_file:
+      - .env
+    environment:
+      TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
+    volumes:
+      - task_uploads:/var/lib/customer-profile/task-uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  task_uploads:

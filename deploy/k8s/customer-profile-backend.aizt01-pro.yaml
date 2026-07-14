@@ -1,0 +1,304 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aizt01-pro
+  labels:
+    app.kubernetes.io/name: customer-profile-backend
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: customer-profile-config
+  namespace: aizt01-pro
+  labels:
+    app.kubernetes.io/name: customer-profile-backend
+data:
+  APP_ENV: local
+  LOG_LEVEL: INFO
+  API_HOST: 0.0.0.0
+  API_PORT: '18008'
+  WORKFLOW_PLATFORM: qingtian
+  DIFY_BASE_URL: http://118.145.238.55
+  DIFY_RUN_URL: http://118.145.238.55/v1/workflows/run
+  DIFY_IMAGE_MODE: file_id
+  DIFY_STREAM_INIT_TIMEOUT_MS: '30000'
+  DIFY_POLL_INTERVAL_MS: '2000'
+  DIFY_POLL_TIMEOUT_MS: '900000'
+  QINGTIAN_BASE_URL: https://qingtian.dfmc.com.cn/api/proxy/api/v1
+  QINGTIAN_POLL_INTERVAL_MS: '2000'
+  QINGTIAN_POLL_TIMEOUT_MS: '2400000'
+  MYSQL_HOST: 10.81.67.146
+  MYSQL_PORT: '13306'
+  MYSQL_DATABASE: lead_lean
+  WORKER_CONCURRENCY: '2'
+  TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: customer-profile-secret
+  namespace: aizt01-pro
+  labels:
+    app.kubernetes.io/name: customer-profile-backend
+type: Opaque
+stringData:
+  MYSQL_USER: ai_app
+  MYSQL_PASSWORD: Kbd*e5E09N
+  DIFY_API_KEY: app-uDv2z8nsENOcDwWRqlE8TTJ1
+  DIFY_API_KEY_TEST: app-uDv2z8nsENOcDwWRqlE8TTJ1
+  DIFY_API_KEY_PRODUCTION: app-4tkMWaWMbeOc7c4reJ4N907s
+  DIFY_INVITATION_STRATEGY_API_KEY: app-Lm1JRKXZgCasRvhlU6jaSd3C
+  DIFY_USER_ID: klh
+  QINGTIAN_API_KEY_TEST: d8tl0t5888rrg8klcn3g
+  QINGTIAN_API_KEY_PRODUCTION: d8tl0t5888rrg8klcn3g
+  QINGTIAN_INVITATION_STRATEGY_API_KEY: d8tl0t5888rrg8klcn3g
+  QINGTIAN_USER_ID: klh
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: customer-profile-task-uploads
+  namespace: aizt01-pro
+  labels:
+    app.kubernetes.io/name: customer-profile-backend
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: customer-profile-migrate
+  namespace: aizt01-pro
+  labels:
+    app: customer-profile-migrate
+    app.kubernetes.io/name: customer-profile-backend
+    app.kubernetes.io/component: migration
+  annotations:
+    lke.io/creator: lirui
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: customer-profile-migrate
+        app.kubernetes.io/name: customer-profile-backend
+        app.kubernetes.io/component: migration
+      annotations:
+        lke.io/creator: lirui
+    spec:
+      containers:
+      - name: container-customer-profile-migrate
+        image: registry.dfmc.com.cn/mhero-ai/customer-profile-backend:arm64-latest
+        imagePullPolicy: Always
+        command:
+        - customer-profile-migrate
+        envFrom:
+        - configMapRef:
+            name: customer-profile-config
+        - secretRef:
+            name: customer-profile-secret
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: '2'
+            memory: 1Gi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - name: task-uploads
+          mountPath: /var/lib/customer-profile/task-uploads
+      restartPolicy: OnFailure
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      serviceAccountName: default
+      serviceAccount: default
+      securityContext: {}
+      schedulerName: default-scheduler
+      volumes:
+      - name: task-uploads
+        persistentVolumeClaim:
+          claimName: customer-profile-task-uploads
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer-profile-api
+  namespace: aizt01-pro
+  labels:
+    app: customer-profile-api
+    app.kubernetes.io/name: customer-profile-backend
+    app.kubernetes.io/component: api
+  annotations:
+    lke.io/creator: lirui
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: customer-profile-api
+  template:
+    metadata:
+      labels:
+        app: customer-profile-api
+        app.kubernetes.io/name: customer-profile-backend
+        app.kubernetes.io/component: api
+      annotations:
+        lke.io/creator: lirui
+        lke.io/imagepullsecrets: '{}'
+    spec:
+      containers:
+      - name: container-customer-profile-api
+        image: registry.dfmc.com.cn/mhero-ai/customer-profile-backend:arm64-latest
+        imagePullPolicy: Always
+        command:
+        - customer-profile-api
+        envFrom:
+        - configMapRef:
+            name: customer-profile-config
+        - secretRef:
+            name: customer-profile-secret
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: '2'
+            memory: 1Gi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - name: task-uploads
+          mountPath: /var/lib/customer-profile/task-uploads
+        ports:
+        - name: http-api
+          containerPort: 18008
+          protocol: TCP
+        readinessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - import json,sys,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:18008/health',
+              timeout=3)); sys.exit(0 if data.get('status') == 'ok' and data.get('db_status')
+              == 'up' else 1)
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 12
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: http-api
+          initialDelaySeconds: 30
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      serviceAccountName: default
+      serviceAccount: default
+      securityContext: {}
+      schedulerName: default-scheduler
+      volumes:
+      - name: task-uploads
+        persistentVolumeClaim:
+          claimName: customer-profile-task-uploads
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer-profile-api
+  namespace: aizt01-pro
+  labels:
+    app: customer-profile-api
+    app.kubernetes.io/name: customer-profile-backend
+    app.kubernetes.io/component: api
+  annotations:
+    lke.io/creator: lirui
+spec:
+  type: ClusterIP
+  selector:
+    app: customer-profile-api
+  ports:
+  - name: http-api
+    port: 80
+    targetPort: http-api
+    protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer-profile-worker
+  namespace: aizt01-pro
+  labels:
+    app: customer-profile-worker
+    app.kubernetes.io/name: customer-profile-backend
+    app.kubernetes.io/component: worker
+  annotations:
+    lke.io/creator: lirui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: customer-profile-worker
+  template:
+    metadata:
+      labels:
+        app: customer-profile-worker
+        app.kubernetes.io/name: customer-profile-backend
+        app.kubernetes.io/component: worker
+      annotations:
+        lke.io/creator: lirui
+        lke.io/imagepullsecrets: '{}'
+    spec:
+      containers:
+      - name: container-customer-profile-worker
+        image: registry.dfmc.com.cn/mhero-ai/customer-profile-backend:arm64-latest
+        imagePullPolicy: Always
+        command:
+        - customer-profile-worker
+        envFrom:
+        - configMapRef:
+            name: customer-profile-config
+        - secretRef:
+            name: customer-profile-secret
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: '2'
+            memory: 1Gi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - name: task-uploads
+          mountPath: /var/lib/customer-profile/task-uploads
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 60
+      dnsPolicy: ClusterFirst
+      serviceAccountName: default
+      serviceAccount: default
+      securityContext: {}
+      schedulerName: default-scheduler
+      volumes:
+      - name: task-uploads
+        persistentVolumeClaim:
+          claimName: customer-profile-task-uploads
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
