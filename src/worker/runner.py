@@ -92,7 +92,7 @@ class WorkerRunner:
             except Exception:
                 self._logger.exception("worker_operational_snapshot_failed")
         self._logger.info(
-            "worker_runtime_summary interval_seconds=%s inflight=%s idle_polls=%s succeeded=%s failed=%s errors=%s average_execute_elapsed_ms=%s queue_depth=%s processing_count=%s oldest_queued_age_seconds=%s",
+            "worker_runtime_summary 说明=Worker队列运行概览 interval_seconds=%s inflight_threads=%s idle_polls=%s cycle_succeeded=%s cycle_failed=%s cycle_errors=%s average_execute_elapsed_ms=%s queued_count=%s processing_count=%s total_succeeded=%s total_failed=%s oldest_queued_age_seconds=%s oldest_processing_age_seconds=%s processing_over_40m_count=%s",
             interval_seconds,
             inflight,
             stats.get("idle", 0),
@@ -106,7 +106,11 @@ class WorkerRunner:
             ),
             snapshot.get("queue_depth"),
             snapshot.get("processing_count"),
+            snapshot.get("succeeded_count"),
+            snapshot.get("failed_count"),
             snapshot.get("oldest_queued_age_seconds"),
+            snapshot.get("oldest_processing_age_seconds"),
+            snapshot.get("processing_over_40m_count"),
         )
 
     def _loop(self, thread_name: str = "worker") -> None:
@@ -138,6 +142,7 @@ class WorkerRunner:
                 return
             try:
                 self._check_and_respawn()
+                self._maybe_log_summary()
             except Exception:
                 self._logger.exception("worker_supervisor_check_failed")
 
@@ -187,6 +192,7 @@ class WorkerRunner:
 
     def run_forever(self) -> None:
         self._logger.info("worker_started concurrency=%s", self._concurrency)
+        self._maybe_log_summary(force=True)
         self._threads = [self._spawn_worker(i) for i in range(self._concurrency)]
         self._supervisor_thread = threading.Thread(
             target=self._supervisor_loop,

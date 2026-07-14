@@ -85,7 +85,7 @@ class QingTianClient:
                 if not run_id:
                     raise QingTianRequestFailed("runId missing from /run_app_workflow response")
                 _log.info(
-                    "qingtian_workflow_submitted run_id=%s submit_elapsed_ms=%s",
+                    "qingtian_workflow_submitted 说明=擎天任务提交成功，开始轮询同一个运行ID run_id=%s submit_elapsed_ms=%s",
                     run_id,
                     elapsed_ms(submit_start),
                 )
@@ -198,12 +198,13 @@ class QingTianClient:
             status = self._extract_status(body)
             if status != previous_status:
                 _log.info(
-                    "qingtian_poll_status_changed run_id=%s previous_status=%s status=%s poll_count=%s elapsed_ms=%s",
+                    "qingtian_poll_status_changed 说明=擎天任务状态发生变化 run_id=%s previous_status=%s status=%s poll_count=%s elapsed_ms=%s response_summary=%s",
                     run_id,
                     previous_status,
                     status,
                     poll_count,
                     elapsed_ms(poll_start),
+                    json.dumps(self._response_summary(body), ensure_ascii=False, default=str),
                 )
                 previous_status = status
             if status == _SUCCESS_STATUS:
@@ -234,19 +235,20 @@ class QingTianClient:
                 if status not in self._unknown_status_seen:
                     self._unknown_status_seen.add(status)
                     _log.warning(
-                        "qingtian_unknown_status runId=%s status=%s body_keys=%s",
+                        "qingtian_unknown_status 说明=后端无法识别该擎天状态，将继续轮询直到成功、失败或超时 run_id=%s status=%s response_summary=%s",
                         run_id,
                         status,
-                        list(body.keys()),
+                        json.dumps(self._response_summary(body), ensure_ascii=False, default=str),
                     )
 
             if time.monotonic() >= deadline:
                 _log.warning(
-                    "qingtian_poll_timeout run_id=%s last_status=%s poll_count=%s elapsed_ms=%s",
+                    "qingtian_poll_timeout 说明=轮询擎天超过最大等待时间，任务将进入失败处理 run_id=%s last_status=%s poll_count=%s elapsed_ms=%s last_response_summary=%s",
                     run_id,
                     status,
                     poll_count,
                     elapsed_ms(poll_start),
+                    json.dumps(self._response_summary(body), ensure_ascii=False, default=str),
                 )
                 raise QingTianTimeout("polling qingtian workflow result timed out")
             time.sleep(interval_sec)
@@ -257,6 +259,42 @@ class QingTianClient:
         return value if isinstance(value, str) else ""
 
     @staticmethod
+    def _response_summary(body: dict[str, Any]) -> dict[str, Any]:
+        """Describe response shape without printing profile contents or credentials."""
+        data = body.get("data") if isinstance(body.get("data"), dict) else None
+        output = body.get("output")
+        summary: dict[str, Any] = {
+            "body_keys": sorted(body.keys()),
+            "status": body.get("status"),
+            "nested_status": data.get("status") if data else None,
+            "code": body.get("code"),
+            "message": safe_text(body.get("message") or body.get("msg") or "", 200),
+            "data_keys": sorted(data.keys()) if data else None,
+            "output_type": type(output).__name__,
+            "output_size_bytes": len(output.encode("utf-8")) if isinstance(output, str) else None,
+        }
+        if isinstance(output, str) and output.strip():
+            try:
+                parsed = json.loads(output)
+            except json.JSONDecodeError as exc:
+                summary["output_json_valid"] = False
+                summary["output_json_error_position"] = exc.pos
+            else:
+                summary["output_json_valid"] = True
+                summary["output_json_type"] = type(parsed).__name__
+                if isinstance(parsed, dict):
+                    customer = parsed.get("customer") if isinstance(parsed.get("customer"), dict) else None
+                    summary.update(
+                        {
+                            "output_keys": sorted(parsed.keys()),
+                            "has_card_id": bool(parsed.get("card_id")),
+                            "has_nickname": bool(parsed.get("nickname")),
+                            "has_customer_nickname": bool(customer and customer.get("nickname")),
+                        }
+                    )
+        return summary
+
+    @staticmethod
     def _log_terminal_response(*, run_id: str, status: str, body: dict[str, Any]) -> None:
         """Structural diagnostics on terminal QingTian responses (mirrors DifyClient._log_terminal_response)."""
         try:
@@ -264,9 +302,9 @@ class QingTianClient:
             steps = body.get("steps") if isinstance(body.get("steps"), list) else None
             body_json = json.dumps(body, ensure_ascii=False, default=str)
             _log.info(
-                "qingtian_poll_terminal_response runId=%s status=%s "
+                "qingtian_poll_terminal_response 说明=收到擎天终态响应 run_id=%s status=%s "
                 "body_keys=%s node_count=%s steps_count=%s cost_ms=%s "
-                "has_output=%s body_size_bytes=%s",
+                "has_output=%s body_size_bytes=%s response_summary=%s",
                 run_id,
                 status,
                 list(body.keys()),
@@ -275,6 +313,7 @@ class QingTianClient:
                 body.get("costMs"),
                 isinstance(body.get("output"), str),
                 len(body_json),
+                json.dumps(QingTianClient._response_summary(body), ensure_ascii=False, default=str),
             )
         except Exception:
             _log.exception("qingtian_poll_terminal_response_log_failed runId=%s", run_id)

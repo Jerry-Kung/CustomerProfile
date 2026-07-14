@@ -110,7 +110,7 @@ class MySQLTaskRepository:
                 raise RuntimeError("upsert succeeded but row not found")
             record = self._to_record(row)
             self._logger.info(
-                "db_task_upsert_completed task_id=%s customer_phone_masked=%s previous_status=%s new_status=%s queued_count_before=%s elapsed_ms=%s",
+                "db_task_upsert_completed 说明=任务提交或重复提交已写入队列，previous_status非空时表示覆盖了已有任务 task_id=%s customer_phone_masked=%s previous_status=%s new_status=%s queued_count_before=%s elapsed_ms=%s",
                 record.id,
                 mask_phone(customer_phonenumber),
                 existed_status,
@@ -222,10 +222,17 @@ class MySQLTaskRepository:
             conn.commit()
             row["status"] = "processing"
             record = self._to_record(row)
+            queued_at = row.get("updated_at")
+            queue_wait_seconds = (
+                max(0, int((datetime.now() - queued_at).total_seconds()))
+                if isinstance(queued_at, datetime)
+                else None
+            )
             self._logger.info(
-                "db_task_state_changed task_id=%s transition=queued_to_processing customer_phone_masked=%s elapsed_ms=%s",
+                "db_task_state_changed 说明=Worker从队列领取任务 task_id=%s transition=queued_to_processing customer_phone_masked=%s queue_wait_seconds=%s elapsed_ms=%s",
                 record.id,
                 mask_phone(record.customer_phonenumber),
+                queue_wait_seconds,
                 elapsed_ms(start),
             )
             return record
@@ -345,7 +352,7 @@ class MySQLTaskRepository:
                     cursor.rowcount,
                 )
             self._logger.info(
-                "db_task_state_changed task_id=%s transition=processing_to_succeeded affected_rows=%s output_size_bytes=%s elapsed_ms=%s",
+                "db_task_state_changed 说明=任务结果校验通过并成功回写任务表 task_id=%s transition=processing_to_succeeded affected_rows=%s output_size_bytes=%s elapsed_ms=%s",
                 task_id,
                 cursor.rowcount,
                 len(json.dumps(output, ensure_ascii=False).encode("utf-8")),
@@ -388,7 +395,7 @@ class MySQLTaskRepository:
                     cursor.rowcount,
                 )
             self._logger.info(
-                "db_task_state_changed task_id=%s transition=processing_to_failed affected_rows=%s elapsed_ms=%s",
+                "db_task_state_changed 说明=任务调用或结果校验失败并回写任务表 task_id=%s transition=processing_to_failed affected_rows=%s elapsed_ms=%s",
                 task_id,
                 cursor.rowcount,
                 elapsed_ms(start),
@@ -461,11 +468,22 @@ class MySQLTaskRepository:
                 SELECT
                     SUM(status = 'queued') AS queue_depth,
                     SUM(status = 'processing') AS processing_count,
+                    SUM(status = 'succeeded') AS succeeded_count,
+                    SUM(status = 'failed') AS failed_count,
+                    SUM(
+                        status = 'processing'
+                        AND updated_at < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 40 MINUTE)
+                    ) AS processing_over_40m_count,
                     TIMESTAMPDIFF(
                         SECOND,
                         MIN(CASE WHEN status = 'queued' THEN updated_at END),
                         CURRENT_TIMESTAMP
-                    ) AS oldest_queued_age_seconds
+                    ) AS oldest_queued_age_seconds,
+                    TIMESTAMPDIFF(
+                        SECOND,
+                        MIN(CASE WHEN status = 'processing' THEN updated_at END),
+                        CURRENT_TIMESTAMP
+                    ) AS oldest_processing_age_seconds
                 FROM customer_profile_tasks
                 """
             )
@@ -473,9 +491,17 @@ class MySQLTaskRepository:
             return {
                 "queue_depth": int(row.get("queue_depth") or 0),
                 "processing_count": int(row.get("processing_count") or 0),
+                "succeeded_count": int(row.get("succeeded_count") or 0),
+                "failed_count": int(row.get("failed_count") or 0),
+                "processing_over_40m_count": int(row.get("processing_over_40m_count") or 0),
                 "oldest_queued_age_seconds": (
                     int(row["oldest_queued_age_seconds"])
                     if row.get("oldest_queued_age_seconds") is not None
+                    else None
+                ),
+                "oldest_processing_age_seconds": (
+                    int(row["oldest_processing_age_seconds"])
+                    if row.get("oldest_processing_age_seconds") is not None
                     else None
                 ),
             }

@@ -219,3 +219,38 @@ def test_unknown_status_keeps_polling_until_terminal(monkeypatch):
     # Should not raise — unknown statuses are treated as non-terminal.
     result = client.run_workflow(customer_phonenumber="13800138000")
     assert result == '{"card_id":"c","nickname":"n"}'
+
+
+def test_response_summary_reports_output_shape_without_values():
+    summary = QingTianClient._response_summary(
+        {
+            "status": "success",
+            "code": 0,
+            "output": json.dumps(
+                {
+                    "card_id": "secret-card-id",
+                    "customer": {"nickname": "private-nickname"},
+                }
+            ),
+        }
+    )
+
+    assert summary["status"] == "success"
+    assert summary["output_json_valid"] is True
+    assert summary["output_keys"] == ["card_id", "customer"]
+    assert summary["has_card_id"] is True
+    assert summary["has_nickname"] is False
+    assert summary["has_customer_nickname"] is True
+    assert "secret-card-id" not in json.dumps(summary, ensure_ascii=False)
+    assert "private-nickname" not in json.dumps(summary, ensure_ascii=False)
+
+
+def test_response_summary_exposes_nested_status_and_invalid_output_position():
+    summary = QingTianClient._response_summary(
+        {"data": {"status": "completed"}, "output": "{bad-json}"}
+    )
+
+    assert summary["status"] is None
+    assert summary["nested_status"] == "completed"
+    assert summary["output_json_valid"] is False
+    assert isinstance(summary["output_json_error_position"], int)

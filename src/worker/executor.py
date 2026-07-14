@@ -77,7 +77,7 @@ class WorkerExecutor:
         ):
             try:
                 self._logger.info(
-                    "worker_task_started customer_phone_masked=%s claim_elapsed_ms=%s",
+                    "worker_task_started 说明=Worker开始处理已领取任务 customer_phone_masked=%s claim_elapsed_ms=%s",
                     mask_phone(phone),
                     elapsed_ms(claim_start),
                 )
@@ -115,7 +115,7 @@ class WorkerExecutor:
                     elapsed_ms(db_start),
                 )
                 self._logger.info(
-                    "worker_task_completed status=succeeded customer_phone_masked=%s workflow_elapsed_ms=%s total_elapsed_ms=%s",
+                    "worker_task_completed 说明=任务处理完成并已成功回写任务表 status=succeeded customer_phone_masked=%s workflow_elapsed_ms=%s total_elapsed_ms=%s",
                     mask_phone(phone),
                     elapsed_ms(workflow_start),
                     elapsed_ms(execute_start),
@@ -124,7 +124,7 @@ class WorkerExecutor:
             except (WorkflowTimeout, WorkflowRequestFailed, WorkflowOutputInvalidJson, WorkflowOutputSchemaMismatch) as exc:
                 self._safe_mark_failed(task_id, f"{exc.code}: {str(exc)}")
                 self._logger.warning(
-                    "worker_task_completed status=failed customer_phone_masked=%s error_code=%s detail=%s total_elapsed_ms=%s",
+                    "worker_task_completed 说明=任务处理失败，错误信息已回写任务表 status=failed customer_phone_masked=%s error_code=%s detail=%s total_elapsed_ms=%s",
                     mask_phone(phone),
                     exc.code,
                     safe_text(exc, 800),
@@ -134,7 +134,7 @@ class WorkerExecutor:
             except WorkflowError as exc:
                 self._safe_mark_failed(task_id, f"{exc.code}: {str(exc)}")
                 self._logger.warning(
-                    "worker_task_completed status=failed customer_phone_masked=%s error_code=%s detail=%s total_elapsed_ms=%s",
+                    "worker_task_completed 说明=任务处理失败，错误信息已回写任务表 status=failed customer_phone_masked=%s error_code=%s detail=%s total_elapsed_ms=%s",
                     mask_phone(phone),
                     exc.code,
                     safe_text(exc, 800),
