@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from datetime import datetime
 
+from src.config.observability import elapsed_ms, mask_phone
 from src.domain.task.errors import TaskQueueFullError
 from src.domain.task.models import TaskRecord
 from src.infrastructure.db.client import MySQLClient
@@ -12,9 +15,16 @@ _DEFAULT_TASK_TYPE = "customer_profile"
 
 
 class MySQLTaskRepository:
-    def __init__(self, db_client: MySQLClient, *, queue_max_waiting: int = 500):
+    def __init__(
+        self,
+        db_client: MySQLClient,
+        *,
+        queue_max_waiting: int = 500,
+        logger: logging.Logger | None = None,
+    ):
         self._db_client = db_client
         self._queue_max_waiting = queue_max_waiting
+        self._logger = logger or logging.getLogger(__name__)
         self._has_work_env_column_cache: bool | None = None
         self._has_batch_id_column_cache: bool | None = None
         self._has_task_type_column_cache: bool | None = None
@@ -27,6 +37,7 @@ class MySQLTaskRepository:
         batch_id: str | None = None,
         task_type: str = _DEFAULT_TASK_TYPE,
     ) -> TaskRecord:
+        start = time.perf_counter()
         conn = self._db_client.connect()
         lock_acquired = False
         try:
@@ -38,6 +49,12 @@ class MySQLTaskRepository:
             lock_row = cursor.fetchone() or {}
             lock_acquired = int(lock_row.get("acquired") or 0) == 1
             if not lock_acquired:
+                self._logger.warning(
+                    "db_queue_admission_lock_timeout customer_phone_masked=%s lock_name=%s elapsed_ms=%s",
+                    mask_phone(customer_phonenumber),
+                    _QUEUE_ADMIT_LOCK_NAME,
+                    elapsed_ms(start),
+                )
                 raise RuntimeError("failed to acquire queue admission lock")
             cursor.execute("START TRANSACTION")
             if has_task_type:
@@ -65,6 +82,13 @@ class MySQLTaskRepository:
             queued_count = self.count_queued(conn=conn)
             if existed_status != "queued" and queued_count >= self._queue_max_waiting:
                 conn.rollback()
+                self._logger.warning(
+                    "db_queue_capacity_rejected customer_phone_masked=%s queued_count=%s max_waiting=%s existed_status=%s",
+                    mask_phone(customer_phonenumber),
+                    queued_count,
+                    self._queue_max_waiting,
+                    existed_status,
+                )
                 raise TaskQueueFullError(max_waiting=self._queue_max_waiting, queued_count=queued_count)
             self._execute_upsert(
                 cursor=cursor,
@@ -84,12 +108,29 @@ class MySQLTaskRepository:
             row = cursor.fetchone()
             if row is None:
                 raise RuntimeError("upsert succeeded but row not found")
-            return self._to_record(row)
+            record = self._to_record(row)
+            self._logger.info(
+                "db_task_upsert_completed task_id=%s customer_phone_masked=%s previous_status=%s new_status=%s queued_count_before=%s elapsed_ms=%s",
+                record.id,
+                mask_phone(customer_phonenumber),
+                existed_status,
+                record.status,
+                queued_count,
+                elapsed_ms(start),
+            )
+            return record
+        except TaskQueueFullError:
+            raise
         except Exception:
             try:
                 conn.rollback()
             except Exception:
                 pass
+            self._logger.exception(
+                "db_task_upsert_failed operation=upsert_queued customer_phone_masked=%s elapsed_ms=%s",
+                mask_phone(customer_phonenumber),
+                elapsed_ms(start),
+            )
             raise
         finally:
             if lock_acquired:
@@ -146,6 +187,7 @@ class MySQLTaskRepository:
         cursor.execute(sql, tuple(params))
 
     def claim_next_queued(self) -> TaskRecord | None:
+        start = time.perf_counter()
         conn = self._db_client.connect()
         try:
             has_work_env = self._has_work_env_column(conn)
@@ -170,10 +212,33 @@ class MySQLTaskRepository:
             )
             if cursor.rowcount != 1:
                 conn.commit()
+                self._logger.warning(
+                    "db_task_claim_conflict task_id=%s affected_rows=%s elapsed_ms=%s",
+                    row.get("id"),
+                    cursor.rowcount,
+                    elapsed_ms(start),
+                )
                 return None
             conn.commit()
             row["status"] = "processing"
-            return self._to_record(row)
+            record = self._to_record(row)
+            self._logger.info(
+                "db_task_state_changed task_id=%s transition=queued_to_processing customer_phone_masked=%s elapsed_ms=%s",
+                record.id,
+                mask_phone(record.customer_phonenumber),
+                elapsed_ms(start),
+            )
+            return record
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            self._logger.exception(
+                "db_task_claim_failed operation=claim_next_queued elapsed_ms=%s",
+                elapsed_ms(start),
+            )
+            raise
         finally:
             conn.close()
 
@@ -255,6 +320,7 @@ class MySQLTaskRepository:
             conn.close()
 
     def mark_succeeded(self, *, task_id: int, output: dict, card_id: str, nickname: str) -> None:
+        start = time.perf_counter()
         conn = self._db_client.connect()
         try:
             cursor = conn.cursor()
@@ -272,10 +338,35 @@ class MySQLTaskRepository:
                 (json.dumps(output, ensure_ascii=False), card_id, nickname, task_id),
             )
             conn.commit()
+            if cursor.rowcount != 1:
+                self._logger.warning(
+                    "db_task_state_change_unexpected task_id=%s transition=processing_to_succeeded affected_rows=%s",
+                    task_id,
+                    cursor.rowcount,
+                )
+            self._logger.info(
+                "db_task_state_changed task_id=%s transition=processing_to_succeeded affected_rows=%s output_size_bytes=%s elapsed_ms=%s",
+                task_id,
+                cursor.rowcount,
+                len(json.dumps(output, ensure_ascii=False).encode("utf-8")),
+                elapsed_ms(start),
+            )
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            self._logger.exception(
+                "db_task_state_change_failed task_id=%s transition=processing_to_succeeded elapsed_ms=%s",
+                task_id,
+                elapsed_ms(start),
+            )
+            raise
         finally:
             conn.close()
 
     def mark_failed(self, *, task_id: int, error_message: str) -> None:
+        start = time.perf_counter()
         conn = self._db_client.connect()
         try:
             cursor = conn.cursor()
@@ -290,10 +381,34 @@ class MySQLTaskRepository:
                 (error_message[:1000], task_id),
             )
             conn.commit()
+            if cursor.rowcount != 1:
+                self._logger.warning(
+                    "db_task_state_change_unexpected task_id=%s transition=processing_to_failed affected_rows=%s",
+                    task_id,
+                    cursor.rowcount,
+                )
+            self._logger.info(
+                "db_task_state_changed task_id=%s transition=processing_to_failed affected_rows=%s elapsed_ms=%s",
+                task_id,
+                cursor.rowcount,
+                elapsed_ms(start),
+            )
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            self._logger.exception(
+                "db_task_state_change_failed task_id=%s transition=processing_to_failed elapsed_ms=%s",
+                task_id,
+                elapsed_ms(start),
+            )
+            raise
         finally:
             conn.close()
 
     def requeue_stale_processing(self, *, timeout_seconds: int, limit: int) -> int:
+        start = time.perf_counter()
         conn = self._db_client.connect()
         try:
             cursor = conn.cursor()
@@ -311,7 +426,65 @@ class MySQLTaskRepository:
                 (timeout_seconds, limit),
             )
             conn.commit()
-            return int(cursor.rowcount)
+            affected = int(cursor.rowcount)
+            if affected:
+                self._logger.warning(
+                    "db_stale_tasks_requeued affected=%s timeout_seconds=%s limit=%s elapsed_ms=%s",
+                    affected,
+                    timeout_seconds,
+                    limit,
+                    elapsed_ms(start),
+                )
+            return affected
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            self._logger.exception(
+                "db_stale_tasks_requeue_failed timeout_seconds=%s limit=%s elapsed_ms=%s",
+                timeout_seconds,
+                limit,
+                elapsed_ms(start),
+            )
+            raise
+        finally:
+            conn.close()
+
+    def get_queue_stats(self) -> dict[str, object]:
+        start = time.perf_counter()
+        conn = self._db_client.connect()
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    SUM(status = 'queued') AS queue_depth,
+                    SUM(status = 'processing') AS processing_count,
+                    TIMESTAMPDIFF(
+                        SECOND,
+                        MIN(CASE WHEN status = 'queued' THEN updated_at END),
+                        CURRENT_TIMESTAMP
+                    ) AS oldest_queued_age_seconds
+                FROM customer_profile_tasks
+                """
+            )
+            row = cursor.fetchone() or {}
+            return {
+                "queue_depth": int(row.get("queue_depth") or 0),
+                "processing_count": int(row.get("processing_count") or 0),
+                "oldest_queued_age_seconds": (
+                    int(row["oldest_queued_age_seconds"])
+                    if row.get("oldest_queued_age_seconds") is not None
+                    else None
+                ),
+            }
+        except Exception:
+            self._logger.exception(
+                "db_queue_stats_failed elapsed_ms=%s",
+                elapsed_ms(start),
+            )
+            raise
         finally:
             conn.close()
 

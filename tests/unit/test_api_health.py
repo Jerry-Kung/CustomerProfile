@@ -32,6 +32,7 @@ def test_health_check_up():
     client = TestClient(app)
     response = client.get("/health")
     assert response.status_code == 200
+    assert response.headers.get("x-request-id")
     assert response.json() == {"status": "ok", "db_status": "up"}
 
 
@@ -40,5 +41,6 @@ def test_health_check_down():
     client = TestClient(app)
     response = client.get("/health")
     assert response.status_code == 200
+    assert response.headers.get("x-request-id")
     assert response.json() == {"status": "ok", "db_status": "down"}
 

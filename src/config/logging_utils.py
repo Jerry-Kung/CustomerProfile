@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import platform
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 from src.config.settings import AppConfig
+from src.config.observability import LogContextFilter
 
 
 def _mask_secret(value: str) -> str:
@@ -103,9 +106,15 @@ def configure_root_logging() -> None:
         if getattr(existing, "_customer_profile_root", False):
             return
     handler = logging.StreamHandler()
+    handler.addFilter(LogContextFilter())
     handler.setFormatter(
         logging.Formatter(
-            fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
+            fmt=(
+                "%(asctime)s %(levelname)s %(name)s "
+                "request_id=%(request_id)s task_id=%(task_id)s batch_id=%(batch_id)s "
+                "task_type=%(task_type)s work_env=%(work_env)s "
+                "workflow_platform=%(workflow_platform)s %(message)s"
+            ),
             datefmt="%Y-%m-%dT%H:%M:%S",
         )
     )
@@ -115,3 +124,21 @@ def configure_root_logging() -> None:
 
 def log_config_summary(logger: logging.Logger, config: AppConfig) -> None:
     logger.info("config_loaded %s", json.dumps(redact_config(config), ensure_ascii=True))
+
+
+def log_runtime_identity(logger: logging.Logger, *, component: str, app_env: str) -> None:
+    try:
+        package_version = version("customer-profile-backend")
+    except PackageNotFoundError:
+        package_version = "unknown"
+    logger.info(
+        "component_ready component=%s version=%s git_commit=%s app_env=%s pod_name=%s namespace=%s node_name=%s python_version=%s",
+        component,
+        package_version,
+        os.getenv("GIT_COMMIT", os.getenv("IMAGE_TAG", "unknown")),
+        app_env,
+        os.getenv("HOSTNAME", "unknown"),
+        os.getenv("POD_NAMESPACE", "unknown"),
+        os.getenv("NODE_NAME", "unknown"),
+        platform.python_version(),
+    )

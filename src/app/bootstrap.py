@@ -3,7 +3,12 @@ from __future__ import annotations
 import logging
 
 from src.api.app import create_api_app
-from src.config.logging_utils import configure_root_logging, get_logger, log_config_summary
+from src.config.logging_utils import (
+    configure_root_logging,
+    get_logger,
+    log_config_summary,
+    log_runtime_identity,
+)
 from src.config.settings import AppConfig, load_config
 from src.domain.task.service import TaskService
 from src.contracts.registry import default_contract_paths
@@ -25,7 +30,11 @@ def bootstrap() -> tuple[AppConfig, MySQLClient, TaskService, WorkerExecutor, Ta
     logger = get_logger("bootstrap")
     log_config_summary(logger, config)
     db_client = MySQLClient(config.mysql)
-    repository = MySQLTaskRepository(db_client, queue_max_waiting=config.task_queue_max_waiting)
+    repository = MySQLTaskRepository(
+        db_client,
+        queue_max_waiting=config.task_queue_max_waiting,
+        logger=get_logger("task_repository"),
+    )
     _warn_if_task_type_column_missing(logger, db_client, repository)
     task_service = TaskService(
         repository=repository,
@@ -73,5 +82,7 @@ def _warn_if_task_type_column_missing(logger, db_client, repository) -> None:
 
 
 def create_application():
-    _, db_client, task_service, _, upload_store = bootstrap()
-    return create_api_app(db_client=db_client, task_service=task_service, upload_store=upload_store)
+    config, db_client, task_service, _, upload_store = bootstrap()
+    app = create_api_app(db_client=db_client, task_service=task_service, upload_store=upload_store)
+    log_runtime_identity(get_logger("api"), component="api", app_env=config.app_env)
+    return app

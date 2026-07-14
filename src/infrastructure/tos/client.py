@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
 from src.config.settings import TosConfig
+from src.config.observability import elapsed_ms
 
 _log = logging.getLogger(__name__)
 
@@ -79,11 +82,15 @@ class TosClient:
         """
         import tos
 
+        start = time.perf_counter()
+        object_key_hash = hashlib.sha256(object_key.encode("utf-8")).hexdigest()[:12]
+        file_size = file_path.stat().st_size if file_path.exists() else None
         _log.info(
-            "tos_upload_start bucket=%s object_key=%s file_path=%s",
+            "tos_upload_started bucket=%s object_key_hash=%s file_size_bytes=%s content_type=%s",
             self.config.bucket,
-            object_key,
-            file_path,
+            object_key_hash,
+            file_size,
+            content_type,
         )
 
         try:
@@ -93,28 +100,32 @@ class TosClient:
                 file_path=str(file_path),
             )
             _log.info(
-                "tos_upload_success bucket=%s object_key=%s",
+                "tos_upload_succeeded bucket=%s object_key_hash=%s file_size_bytes=%s elapsed_ms=%s",
                 self.config.bucket,
-                object_key,
+                object_key_hash,
+                file_size,
+                elapsed_ms(start),
             )
             return object_key
         except tos.exceptions.TosClientError as e:
             _log.error(
-                "tos_upload_client_error bucket=%s object_key=%s message=%s cause=%s",
+                "tos_upload_client_error bucket=%s object_key_hash=%s message=%s cause=%s elapsed_ms=%s",
                 self.config.bucket,
-                object_key,
+                object_key_hash,
                 e.message,
                 e.cause,
+                elapsed_ms(start),
             )
             raise
         except tos.exceptions.TosServerError as e:
             _log.error(
-                "tos_upload_server_error bucket=%s object_key=%s code=%s request_id=%s message=%s",
+                "tos_upload_server_error bucket=%s object_key_hash=%s code=%s request_id=%s message=%s elapsed_ms=%s",
                 self.config.bucket,
-                object_key,
+                object_key_hash,
                 e.code,
                 e.request_id,
                 e.message,
+                elapsed_ms(start),
             )
             raise
 
@@ -141,11 +152,13 @@ class TosClient:
         import tos
 
         expires = expires_in_seconds or self.config.presigned_url_expires_seconds
+        start = time.perf_counter()
+        object_key_hash = hashlib.sha256(object_key.encode("utf-8")).hexdigest()[:12]
 
         _log.info(
-            "tos_presigned_url_start bucket=%s object_key=%s expires=%d",
+            "tos_presigned_url_started bucket=%s object_key_hash=%s expires=%d",
             self.config.bucket,
-            object_key,
+            object_key_hash,
             expires,
         )
 
@@ -157,28 +170,31 @@ class TosClient:
                 expires=expires,
             )
             _log.info(
-                "tos_presigned_url_success bucket=%s object_key=%s",
+                "tos_presigned_url_succeeded bucket=%s object_key_hash=%s elapsed_ms=%s",
                 self.config.bucket,
-                object_key,
+                object_key_hash,
+                elapsed_ms(start),
             )
             return out.signed_url
         except tos.exceptions.TosClientError as e:
             _log.error(
-                "tos_presigned_url_client_error bucket=%s object_key=%s message=%s cause=%s",
+                "tos_presigned_url_client_error bucket=%s object_key_hash=%s message=%s cause=%s elapsed_ms=%s",
                 self.config.bucket,
-                object_key,
+                object_key_hash,
                 e.message,
                 e.cause,
+                elapsed_ms(start),
             )
             raise
         except tos.exceptions.TosServerError as e:
             _log.error(
-                "tos_presigned_url_server_error bucket=%s object_key=%s code=%s request_id=%s message=%s",
+                "tos_presigned_url_server_error bucket=%s object_key_hash=%s code=%s request_id=%s message=%s elapsed_ms=%s",
                 self.config.bucket,
-                object_key,
+                object_key_hash,
                 e.code,
                 e.request_id,
                 e.message,
+                elapsed_ms(start),
             )
             raise
 

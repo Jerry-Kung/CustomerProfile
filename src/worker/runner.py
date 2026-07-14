@@ -15,6 +15,7 @@ class WorkerRunner:
         *,
         concurrency: int = 1,
         supervisor_interval_seconds: float = 60.0,
+        summary_interval_seconds: float = 300.0,
     ):
         self._executor = executor
         self._interval_seconds = interval_seconds
@@ -22,20 +23,91 @@ class WorkerRunner:
             raise ValueError("concurrency must be >= 1")
         self._concurrency = concurrency
         self._supervisor_interval_seconds = supervisor_interval_seconds
+        self._summary_interval_seconds = summary_interval_seconds
         self._stop_event = threading.Event()
         self._logger = get_logger("worker")
         self._threads: list[threading.Thread] = []
         self._heartbeats: dict[str, float] = {}
         self._heartbeats_lock = threading.Lock()
         self._supervisor_thread: threading.Thread | None = None
+        self._stats_lock = threading.Lock()
+        self._stats = {
+            "idle": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "error": 0,
+            "execute_count": 0,
+            "execute_elapsed_ms": 0,
+        }
+        self._inflight = 0
+        self._last_summary = time.monotonic()
 
     def run_once(self) -> None:
-        status = self._executor.execute_once()
+        start = time.perf_counter()
+        with self._stats_lock:
+            self._inflight += 1
+        try:
+            status = self._executor.execute_once()
+        except Exception:
+            with self._stats_lock:
+                self._inflight -= 1
+                self._stats["error"] += 1
+                self._stats["execute_count"] += 1
+                self._stats["execute_elapsed_ms"] += int((time.perf_counter() - start) * 1000)
+            raise
+        with self._stats_lock:
+            self._inflight -= 1
+            self._stats[status] = self._stats.get(status, 0) + 1
+            self._stats["execute_count"] += 1
+            self._stats["execute_elapsed_ms"] += int((time.perf_counter() - start) * 1000)
         # Avoid INFO spam every poll interval when there is no queued work.
         if status == "idle":
             self._logger.debug("worker_tick status=idle")
         else:
             self._logger.info("worker_tick status=%s", status)
+        self._maybe_log_summary()
+
+    def _maybe_log_summary(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        with self._stats_lock:
+            if not force and now - self._last_summary < self._summary_interval_seconds:
+                return
+            stats = dict(self._stats)
+            inflight = self._inflight
+            self._stats = {
+                "idle": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "error": 0,
+                "execute_count": 0,
+                "execute_elapsed_ms": 0,
+            }
+            interval_seconds = int(now - self._last_summary)
+            self._last_summary = now
+        snapshot = {}
+        snapshot_fn = getattr(self._executor, "operational_snapshot", None)
+        if callable(snapshot_fn):
+            try:
+                snapshot = snapshot_fn()
+            except Exception:
+                self._logger.exception("worker_operational_snapshot_failed")
+        self._logger.info(
+            "worker_runtime_summary interval_seconds=%s inflight=%s idle_polls=%s succeeded=%s failed=%s errors=%s average_execute_elapsed_ms=%s queue_depth=%s processing_count=%s oldest_queued_age_seconds=%s",
+            interval_seconds,
+            inflight,
+            stats.get("idle", 0),
+            stats.get("succeeded", 0),
+            stats.get("failed", 0),
+            stats.get("error", 0),
+            (
+                int(stats.get("execute_elapsed_ms", 0) / stats.get("execute_count", 1))
+                if stats.get("execute_count", 0)
+                else None
+            ),
+            snapshot.get("queue_depth"),
+            snapshot.get("processing_count"),
+            snapshot.get("oldest_queued_age_seconds"),
+        )
 
     def _loop(self, thread_name: str = "worker") -> None:
         while not self._stop_event.is_set():
@@ -135,6 +207,7 @@ class WorkerRunner:
                 t.join(timeout=30.0)
             if self._supervisor_thread is not None:
                 self._supervisor_thread.join(timeout=10.0)
+            self._maybe_log_summary(force=True)
             self._logger.info("worker_stopped")
 
     def stop(self) -> None:

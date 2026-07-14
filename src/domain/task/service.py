@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import time
 
+from src.config.observability import elapsed_ms, log_context, mask_phone
 from src.domain.task.models import TaskRecord
 from src.domain.task.repository import TaskRepository
 
@@ -20,32 +22,45 @@ class TaskService:
         batch_id: str | None = None,
         task_type: str = "customer_profile",
     ) -> TaskRecord:
-        record = self.repository.upsert_queued(
-            customer_phonenumber,
-            work_env=work_env,
-            batch_id=batch_id,
-            task_type=task_type,
-        )
-        self.logger.info(
-            "task_submitted customer_phonenumber=%s task_type=%s work_env=%s batch_id=%s status=%s",
-            customer_phonenumber,
-            task_type,
-            work_env,
-            batch_id,
-            record.status,
-        )
+        start = time.perf_counter()
+        with log_context(batch_id=batch_id, task_type=task_type, work_env=work_env):
+            try:
+                record = self.repository.upsert_queued(
+                    customer_phonenumber,
+                    work_env=work_env,
+                    batch_id=batch_id,
+                    task_type=task_type,
+                )
+            except Exception:
+                self.logger.exception(
+                    "task_submit_failed customer_phone_masked=%s elapsed_ms=%s",
+                    mask_phone(customer_phonenumber),
+                    elapsed_ms(start),
+                )
+                raise
+            with log_context(task_id=record.id):
+                self.logger.info(
+                    "task_submitted customer_phone_masked=%s status=%s elapsed_ms=%s",
+                    mask_phone(customer_phonenumber),
+                    record.status,
+                    elapsed_ms(start),
+                )
         return record
 
     def claim_next_task(self) -> TaskRecord | None:
         record = self.repository.claim_next_queued()
         if record:
-            self.logger.info(
-                "task_claimed id=%s customer_phonenumber=%s task_type=%s status=%s",
-                record.id,
-                record.customer_phonenumber,
-                record.task_type,
-                record.status,
-            )
+            with log_context(
+                task_id=record.id,
+                batch_id=record.batch_id,
+                task_type=record.task_type,
+                work_env=record.work_env,
+            ):
+                self.logger.info(
+                    "task_claimed customer_phone_masked=%s status=%s",
+                    mask_phone(record.customer_phonenumber),
+                    record.status,
+                )
         return record
 
     def list_tasks(
@@ -63,8 +78,8 @@ class TaskService:
             task_type=task_type,
         )
         self.logger.info(
-            "task_listed prefix=%s task_type=%s page=%s page_size=%s total=%s",
-            phone_prefix,
+            "task_listed phone_prefix_masked=%s task_type=%s page=%s page_size=%s total=%s",
+            mask_phone(phone_prefix),
             task_type,
             page,
             page_size,
@@ -81,15 +96,16 @@ class TaskService:
         record = self.repository.get_by_phone(customer_phonenumber, task_type=task_type)
         if record:
             self.logger.info(
-                "task_fetched customer_phonenumber=%s task_type=%s status=%s",
-                customer_phonenumber,
+                "task_fetched task_id=%s customer_phone_masked=%s task_type=%s status=%s",
+                record.id,
+                mask_phone(customer_phonenumber),
                 task_type,
                 record.status,
             )
         else:
             self.logger.info(
-                "task_not_found customer_phonenumber=%s task_type=%s",
-                customer_phonenumber,
+                "task_not_found customer_phone_masked=%s task_type=%s",
+                mask_phone(customer_phonenumber),
                 task_type,
             )
         return record

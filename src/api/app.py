@@ -19,6 +19,17 @@ from src.infrastructure.db.client import MySQLClient
 from src.infrastructure.storage.task_upload_store import TaskUploadStore
 
 
+def _safe_validation_errors(exc) -> list[dict[str, object]]:
+    return [
+        {
+            "loc": list(item.get("loc", ())),
+            "type": item.get("type"),
+            "msg": item.get("msg"),
+        }
+        for item in exc.errors()
+    ]
+
+
 def create_api_app(
     db_client: MySQLClient,
     task_service: TaskService,
@@ -48,7 +59,15 @@ def create_api_app(
         return await request_log_middleware(request, call_next)
 
     @app.exception_handler(AppError)
-    async def _app_error_handler(_: Request, exc: AppError):
+    async def _app_error_handler(request: Request, exc: AppError):
+        app.state.logger.warning(
+            "http_application_error method=%s path=%s status=%s error_code=%s detail_keys=%s",
+            request.method,
+            request.url.path,
+            exc.status_code,
+            exc.code,
+            sorted(exc.details.keys()) if isinstance(exc.details, dict) else None,
+        )
         return JSONResponse(
             status_code=exc.status_code,
             content={"code": exc.code, "message": exc.message, "details": exc.details},
@@ -65,13 +84,20 @@ def create_api_app(
                 "x_request_id": request.headers.get("x-request-id"),
             }
             app.state.logger.warning(
-                "submit_task_invalid_request method=%s path=%s query=%s headers=%s body=%s validation_errors=%s",
+                "submit_task_invalid_request method=%s path=%s query_keys=%s headers=%s body_size_bytes=%s validation_errors=%s",
                 request.method,
                 request.url.path,
-                dict(request.query_params),
+                sorted(request.query_params.keys()),
                 json.dumps(request_headers, ensure_ascii=True),
-                json.dumps(jsonable_encoder(getattr(exc, "body", None)), ensure_ascii=True),
-                json.dumps(jsonable_encoder(exc.errors()), ensure_ascii=True),
+                len(getattr(request.state, "raw_body", None) or b""),
+                json.dumps(_safe_validation_errors(exc), ensure_ascii=True),
+            )
+        else:
+            app.state.logger.warning(
+                "http_request_validation_failed method=%s path=%s errors=%s",
+                request.method,
+                request.url.path,
+                json.dumps(_safe_validation_errors(exc), ensure_ascii=True),
             )
         return JSONResponse(
             status_code=400,
@@ -83,7 +109,13 @@ def create_api_app(
         )
 
     @app.exception_handler(ValidationError)
-    async def _pydantic_validation_error_handler(_: Request, exc: ValidationError):
+    async def _pydantic_validation_error_handler(request: Request, exc: ValidationError):
+        app.state.logger.warning(
+            "pydantic_validation_failed method=%s path=%s errors=%s",
+            request.method,
+            request.url.path,
+            json.dumps(_safe_validation_errors(exc), ensure_ascii=True),
+        )
         return JSONResponse(
             status_code=400,
             content={

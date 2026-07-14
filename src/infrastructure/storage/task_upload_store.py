@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import re
 import uuid
+import logging
+import time
 from pathlib import Path
 
 from fastapi import UploadFile
 
 from src.config.settings import UploadConfig
+from src.config.observability import elapsed_ms, mask_phone
+
+
+_log = logging.getLogger(__name__)
 
 _ALLOWED_EXT = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif"})
 
@@ -83,22 +89,65 @@ class TaskUploadStore:
     ) -> str | None:
         if upload is None:
             return None
+        start = time.perf_counter()
         data = await upload.read()
         if not data:
+            _log.info(
+                "task_upload_skipped reason=empty customer_phone_masked=%s slot=%s",
+                mask_phone(customer_phonenumber),
+                slot,
+            )
             return None
         if len(data) > self._max:
+            _log.warning(
+                "task_upload_rejected reason=payload_too_large customer_phone_masked=%s slot=%s size_bytes=%s max_bytes=%s",
+                mask_phone(customer_phonenumber),
+                slot,
+                len(data),
+                self._max,
+            )
             raise TaskUploadRejected(
                 code="PAYLOAD_TOO_LARGE",
                 message=f"file exceeds TASK_UPLOAD_MAX_BYTES_PER_FILE ({self._max})",
                 status_code=413,
             )
-        ext = _pick_extension(
-            filename=upload.filename,
-            content_type=upload.content_type,
-            head=data[:32],
-        )
+        try:
+            ext = _pick_extension(
+                filename=upload.filename,
+                content_type=upload.content_type,
+                head=data[:32],
+            )
+        except TaskUploadRejected:
+            _log.warning(
+                "task_upload_rejected reason=unsupported_media_type customer_phone_masked=%s slot=%s content_type=%s size_bytes=%s",
+                mask_phone(customer_phonenumber),
+                slot,
+                upload.content_type,
+                len(data),
+            )
+            raise
         safe_phone = re.sub(r"[^0-9+]", "_", customer_phonenumber)[:40] or "phone"
         fname = f"{safe_phone}_{slot}_{uuid.uuid4().hex}{ext}"
         dest = (self._base.resolve() / fname).resolve()
-        dest.write_bytes(data)
+        try:
+            dest.write_bytes(data)
+        except Exception:
+            _log.exception(
+                "task_upload_write_failed customer_phone_masked=%s slot=%s extension=%s size_bytes=%s elapsed_ms=%s",
+                mask_phone(customer_phonenumber),
+                slot,
+                ext,
+                len(data),
+                elapsed_ms(start),
+            )
+            raise
+        _log.info(
+            "task_upload_saved customer_phone_masked=%s slot=%s extension=%s content_type=%s size_bytes=%s elapsed_ms=%s",
+            mask_phone(customer_phonenumber),
+            slot,
+            ext,
+            upload.content_type,
+            len(data),
+            elapsed_ms(start),
+        )
         return str(dest)

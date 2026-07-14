@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import httpx
 
 from src.config.settings import DifyConfig
+from src.config.observability import elapsed_ms, mask_phone, safe_text
 from src.infrastructure.dify.errors import DifyOutputInvalidJson, DifyRequestFailed, DifyTimeout
 
 _log = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class DifyClient:
         batch_id: str | None = None,
         task_type: str = "customer_profile",
     ) -> str:
+        workflow_start = time.perf_counter()
         payload = {
             "inputs": self._build_inputs(
                 customer_phonenumber=customer_phonenumber,
@@ -40,11 +42,13 @@ class DifyClient:
             "Authorization": f"Bearer {self._pick_api_key(task_type=task_type, work_env=work_env)}",
             "Content-Type": "application/json",
         }
+        run_parts = urlparse(self.config.run_url)
         _log.info(
-            "dify_run_workflow_start image_mode=%s task_type=%s work_env=%s",
+            "dify_run_workflow_started customer_phone_masked=%s image_mode=%s endpoint_host=%s endpoint_path=%s",
+            mask_phone(customer_phonenumber),
             self.config.image_mode,
-            task_type,
-            work_env,
+            run_parts.netloc,
+            run_parts.path,
         )
         stream_init_timeout_sec = max(5.0, self.config.stream_init_timeout_ms / 1000)
         poll_timeout_sec = max(10.0, self.config.poll_timeout_ms / 1000)
@@ -72,10 +76,7 @@ class DifyClient:
                     self.config.image_mode,
                     sorted(inputs.keys()),
                 )
-                _log.info(
-                    "dify_full_request_payload: %s",
-                    json.dumps(payload, ensure_ascii=False, indent=2)
-                )
+                submit_start = time.perf_counter()
                 workflow_run_id = self._start_workflow_and_get_run_id(
                     client=client,
                     payload=payload,
@@ -86,6 +87,11 @@ class DifyClient:
                 )
                 if not workflow_run_id:
                     raise DifyRequestFailed("workflow_run_id not found in streaming response")
+                _log.info(
+                    "dify_workflow_submitted workflow_run_id=%s submit_elapsed_ms=%s",
+                    workflow_run_id,
+                    elapsed_ms(submit_start),
+                )
                 response_body = self._poll_run_result(
                     client=client,
                     workflow_run_id=workflow_run_id,
@@ -93,8 +99,20 @@ class DifyClient:
                     poll_timeout_sec=poll_timeout_sec,
                     timeout_poll=timeout_poll,
                 )
-                return extract_output_string(response_body)
+                output = extract_output_string(response_body)
+                _log.info(
+                    "dify_run_workflow_completed workflow_run_id=%s total_elapsed_ms=%s output_size_bytes=%s",
+                    workflow_run_id,
+                    elapsed_ms(workflow_start),
+                    len(output.encode("utf-8")),
+                )
+                return output
         except httpx.TimeoutException as exc:
+            _log.warning(
+                "dify_http_timeout phase=request error_type=%s total_elapsed_ms=%s",
+                type(exc).__name__,
+                elapsed_ms(workflow_start),
+            )
             raise DifyTimeout("dify request timed out") from exc
         except httpx.HTTPStatusError as exc:
             body_preview = ""
@@ -102,10 +120,25 @@ class DifyClient:
                 body_preview = (exc.response.text or "")[:800]
             except Exception:
                 pass
+            _log.warning(
+                "dify_http_error status=%s endpoint_host=%s endpoint_path=%s response_request_id=%s detail=%s total_elapsed_ms=%s",
+                exc.response.status_code,
+                exc.request.url.host,
+                exc.request.url.path,
+                exc.response.headers.get("x-request-id") or exc.response.headers.get("request-id"),
+                safe_text(body_preview or exc, 800),
+                elapsed_ms(workflow_start),
+            )
             raise DifyRequestFailed(
                 f"dify HTTP {exc.response.status_code} {exc.request.url}: {body_preview or str(exc)}"
             ) from exc
         except httpx.HTTPError as exc:
+            _log.warning(
+                "dify_transport_error error_type=%s detail=%s total_elapsed_ms=%s",
+                type(exc).__name__,
+                safe_text(exc, 800),
+                elapsed_ms(workflow_start),
+            )
             raise DifyRequestFailed(f"dify request failed: {exc}") from exc
 
     def _start_workflow_and_get_run_id(
@@ -135,10 +168,13 @@ class DifyClient:
                 response.raise_for_status()
                 workflow_run_id = self._extract_workflow_run_id(response, timeout_sec=stream_init_timeout_sec)
                 if workflow_run_id:
+                    _log.info("dify_submit_mode_selected mode=sse workflow_run_id=%s", workflow_run_id)
                     return workflow_run_id
         except httpx.ReadTimeout:
             # Some Dify deployments may not flush early SSE events.
-            pass
+            _log.warning(
+                "dify_submit_mode_fallback from_mode=sse to_mode=blocking reason=stream_read_timeout"
+            )
 
         # Non-SSE POST with response_mode=streaming is unreliable; use blocking to obtain workflow_run_id JSON.
         blocking_payload = dict(payload)
@@ -160,19 +196,47 @@ class DifyClient:
         poll_url = f"{self.config.base_url.rstrip('/')}/v1/workflows/run/{workflow_run_id}"
         interval_sec = max(0.2, self.config.poll_interval_ms / 1000)
         deadline = time.monotonic() + max(1.0, poll_timeout_sec)
+        poll_start = time.perf_counter()
+        poll_count = 0
+        previous_status: str | None = None
         while True:
+            poll_count += 1
             response = client.get(poll_url, headers=headers, timeout=timeout_poll)
             response.raise_for_status()
             body = response.json()
             if not isinstance(body, dict):
                 raise DifyRequestFailed("poll response is not a JSON object")
             status = self._extract_status(body)
+            if status != previous_status:
+                _log.info(
+                    "dify_poll_status_changed workflow_run_id=%s previous_status=%s status=%s poll_count=%s elapsed_ms=%s",
+                    workflow_run_id,
+                    previous_status,
+                    status,
+                    poll_count,
+                    elapsed_ms(poll_start),
+                )
+                previous_status = status
             if status in {"succeeded", "failed", "stopped"}:
                 self._log_terminal_response(
                     workflow_run_id=workflow_run_id, status=status, body=body
                 )
+                _log.info(
+                    "dify_poll_completed workflow_run_id=%s status=%s poll_count=%s elapsed_ms=%s",
+                    workflow_run_id,
+                    status,
+                    poll_count,
+                    elapsed_ms(poll_start),
+                )
                 return body
             if time.monotonic() >= deadline:
+                _log.warning(
+                    "dify_poll_timeout workflow_run_id=%s last_status=%s poll_count=%s elapsed_ms=%s",
+                    workflow_run_id,
+                    status,
+                    poll_count,
+                    elapsed_ms(poll_start),
+                )
                 raise DifyTimeout("polling workflow result timed out")
             time.sleep(interval_sec)
 
@@ -209,11 +273,6 @@ class DifyClient:
                 isinstance(outputs.get("output"), str) if outputs is not None else False,
                 isinstance(data_outputs.get("output"), str) if data_outputs is not None else False,
                 len(body_json),
-            )
-            _log.debug(
-                "dify_poll_terminal_response_body workflow_run_id=%s body_preview=%s",
-                workflow_run_id,
-                body_json[:2000],
             )
         except Exception:
             _log.exception(
@@ -305,8 +364,16 @@ class DifyClient:
         timeout: httpx.Timeout,
     ) -> dict[str, Any]:
         resolved = dict(raw_inputs)
-        _log.info("dify_resolve_image_inputs_start image_mode=%s raw_inputs=%s", self.config.image_mode, raw_inputs)
-        _log.info("dify_resolve_image_inputs_complete resolved=%s", resolved)
+        _log.info(
+            "dify_resolve_image_inputs_started image_mode=%s input_keys=%s",
+            self.config.image_mode,
+            sorted(raw_inputs.keys()),
+        )
+        _log.info(
+            "dify_resolve_image_inputs_completed image_mode=%s resolved_keys=%s",
+            self.config.image_mode,
+            sorted(resolved.keys()),
+        )
         return resolved
 
     def _start_streaming_without_sse(
@@ -322,7 +389,10 @@ class DifyClient:
         body = response.json()
         if not isinstance(body, dict):
             return None
-        return self._pick_run_id(body)
+        run_id = self._pick_run_id(body)
+        if run_id:
+            _log.info("dify_submit_mode_selected mode=blocking workflow_run_id=%s", run_id)
+        return run_id
 
 
 def extract_output_string(response_body: dict[str, Any]) -> str:
@@ -368,14 +438,14 @@ def _log_missing_output_diagnostic(response_body: Any) -> None:
         _log.warning(
             "dify_output_missing_diagnostic root_type=%s body_top_keys=%s "
             "data_top_keys=%s outputs_top_keys=%s data_outputs_top_keys=%s "
-            "candidates_types=%s body_preview=%s",
+            "candidates_types=%s body_size_bytes=%s",
             type(response_body).__name__,
             list(body.keys()),
             list(data.keys()) if data is not None else None,
             list(outputs.keys()) if outputs is not None else None,
             list(data_outputs.keys()) if data_outputs is not None else None,
             candidates_types,
-            json.dumps(body, ensure_ascii=False, default=str)[:2000],
+            len(json.dumps(body, ensure_ascii=False, default=str).encode("utf-8")),
         )
     except Exception:
         pass
