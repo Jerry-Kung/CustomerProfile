@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: customer-profile-logs
+  namespace: aizt01-pro
+  labels:
+    app.kubernetes.io/name: customer-profile-backend
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: lke-arm-csi-nfs-prod
+  volumeMode: Filesystem

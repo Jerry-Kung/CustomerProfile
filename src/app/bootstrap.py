@@ -22,11 +22,11 @@ from src.infrastructure.workflow.protocol import WorkflowClient
 from src.worker.executor import WorkerExecutor
 
 
-def bootstrap() -> tuple[AppConfig, MySQLClient, TaskService, WorkerExecutor, TaskUploadStore]:
+def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskService, WorkerExecutor, TaskUploadStore]:
     config = load_config()
     # Configure root logging FIRST so any logging.getLogger(__name__) call in dify/tos/output_parser
     # modules emits to stderr instead of being swallowed by a handler-less root logger.
-    configure_root_logging()
+    configure_root_logging(component)
     logger = get_logger("bootstrap")
     log_config_summary(logger, config)
     db_client = MySQLClient(config.mysql)
@@ -82,7 +82,7 @@ def _warn_if_task_type_column_missing(logger, db_client, repository) -> None:
 
 
 def create_application():
-    config, db_client, task_service, _, upload_store = bootstrap()
+    config, db_client, task_service, _, upload_store = bootstrap("api")
     app = create_api_app(db_client=db_client, task_service=task_service, upload_store=upload_store)
     log_runtime_identity(get_logger("api"), component="api", app_env=config.app_env)
     return app

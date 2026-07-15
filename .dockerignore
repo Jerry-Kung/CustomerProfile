@@ -9,5 +9,6 @@ venv
 tests
 docs
 .env
+logs
 *.md
 !README.md

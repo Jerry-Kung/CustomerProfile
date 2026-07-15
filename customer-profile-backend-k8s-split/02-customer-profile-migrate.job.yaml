@@ -45,6 +45,12 @@ spec:
           value: prod
         - name: LOG_LEVEL
           value: INFO
+        - name: LOG_DIR
+          value: /app/logs
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
         - name: API_HOST
           value: 0.0.0.0
         - name: API_PORT
@@ -101,6 +107,9 @@ spec:
           value: Kbd*e5E09N
         - name: WORKER_CONCURRENCY
           value: '2'
+        volumeMounts:
+        - name: logs
+          mountPath: /app/logs
       restartPolicy: Never
       terminationGracePeriodSeconds: 30
       dnsPolicy: ClusterFirst
@@ -108,6 +117,10 @@ spec:
       serviceAccount: default
       securityContext: {}
       schedulerName: default-scheduler
+      volumes:
+      - name: logs
+        persistentVolumeClaim:
+          claimName: customer-profile-logs
   completionMode: NonIndexed
   suspend: false
   podReplacementPolicy: TerminatingOrFailed

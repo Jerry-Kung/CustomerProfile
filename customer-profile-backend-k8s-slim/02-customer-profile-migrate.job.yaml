@@ -45,6 +45,12 @@ spec:
           value: prod
         - name: LOG_LEVEL
           value: INFO
+        - name: LOG_DIR
+          value: /app/logs
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
         - name: WORKFLOW_PLATFORM
           value: qingtian
         - name: QINGTIAN_BASE_URL
@@ -67,6 +73,9 @@ spec:
           value: ai_app
         - name: MYSQL_PASSWORD
           value: Kbd*e5E09N
+        volumeMounts:
+        - name: logs
+          mountPath: /app/logs
       restartPolicy: Never
       terminationGracePeriodSeconds: 30
       dnsPolicy: ClusterFirst
@@ -74,6 +83,10 @@ spec:
       serviceAccount: default
       securityContext: {}
       schedulerName: default-scheduler
+      volumes:
+      - name: logs
+        persistentVolumeClaim:
+          claimName: customer-profile-logs
   completionMode: NonIndexed
   suspend: false
   podReplacementPolicy: TerminatingOrFailed

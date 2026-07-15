@@ -6,7 +6,7 @@ from src.worker.runner import WorkerRunner
 
 
 def main() -> int:
-    config, _, _, executor, _ = bootstrap()
+    config, _, _, executor, _ = bootstrap("worker")
     log_runtime_identity(get_logger("worker"), component="worker", app_env=config.app_env)
     runner = WorkerRunner(
         executor=executor,

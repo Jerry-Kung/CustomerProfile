@@ -15,6 +15,9 @@ metadata:
 data:
   APP_ENV: local
   LOG_LEVEL: INFO
+  LOG_DIR: /app/logs
+  LOG_ROTATION: 00:00
+  LOG_RETENTION: 30 days
   API_HOST: 0.0.0.0
   API_PORT: '18008'
   WORKFLOW_PLATFORM: qingtian
@@ -91,6 +94,11 @@ spec:
             name: customer-profile-config
         - secretRef:
             name: customer-profile-secret
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
         resources:
           requests:
             cpu: 500m
@@ -103,6 +111,8 @@ spec:
         volumeMounts:
         - name: task-uploads
           mountPath: /var/lib/customer-profile/task-uploads
+        - name: logs
+          mountPath: /app/logs
         ports:
         - name: http-api
           containerPort: 18008
@@ -130,6 +140,8 @@ spec:
       schedulerName: default-scheduler
       volumes:
       - name: task-uploads
+        emptyDir: {}
+      - name: logs
         emptyDir: {}
   strategy:
     type: RollingUpdate

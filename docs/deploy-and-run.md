@@ -29,6 +29,10 @@ cp .env.example .env
 | `API_PORT` | API 监听端口 | `8000` |
 | `APP_ENV` | 环境标识 | `local` |
 | `LOG_LEVEL` | 日志级别 | `INFO` |
+| `HTTP_LOG_LEVEL` | httpx/httpcore 日志级别 | `WARNING` |
+| `LOG_DIR` | Loguru 文件日志目录 | `logs` |
+| `LOG_ROTATION` | 文件轮转策略 | `00:00` |
+| `LOG_RETENTION` | 文件保留时间 | `30 days` |
 | `WORKER_CONCURRENCY` | Worker 并发线程数 | `8` |
 | `WORKFLOW_PLATFORM` | 工作流平台选择：`dify` 或 `qingtian` | `dify` |
 
@@ -138,6 +142,8 @@ docker compose up -d
 docker compose logs -f api
 docker compose logs -f worker
 ```
+
+同一份 Loguru 日志也会按服务写入宿主机 `./logs/`。文件名包含组件、Pod 名（非 K8s 环境为 `local`）和日期；stderr 与文件使用相同格式。
 
 停止：
 

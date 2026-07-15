@@ -24,7 +24,11 @@
 | Env | 默认 | 说明 |
 |---|---|---|
 | `APP_ENV` | `local` | 仅打日志 |
-| `LOG_LEVEL` | `INFO` | 直接传给 stdlib logging |
+| `LOG_LEVEL` | `INFO` | Loguru stderr 与文件 sink 的最低级别 |
+| `HTTP_LOG_LEVEL` | `WARNING` | `httpx` / `httpcore` 标准日志拦截级别 |
+| `LOG_DIR` | `logs` | Loguru 文件日志目录 |
+| `LOG_ROTATION` | `00:00` | 文件轮转策略 |
+| `LOG_RETENTION` | `30 days` | 文件保留时间 |
 | `API_HOST` | `0.0.0.0` | uvicorn bind |
 | `API_PORT` | `8000` | **本地默认**；Docker 里 compose 覆盖为 `18008` |
 | `MYSQL_PORT` | `3306` | |

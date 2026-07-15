@@ -2,14 +2,13 @@
 
 ## 日志格式
 
-`src/config/logging_utils.get_logger()`：
+业务代码继续使用 `logging.Logger`，由 `InterceptHandler` 统一转交 Loguru sink：
 
 ```
-%(asctime)s %(levelname)s %(name)s %(message)s
-2026-05-18T20:10:00 INFO worker_executor worker_dify_invoke_begin task_id=42 work_env=test
+2026-07-15 14:00:17.185 | INFO     | src.worker.executor:execute_once:79 | component=worker request_id=- task_id=42 batch_id=- task_type=customer_profile work_env=test workflow_platform=qingtian - worker_workflow_invoke_started
 ```
 
-所有 logger 共用 stdout 流，没有 JSON 化、没有 trace id 自动注入。`x-request-id` 头由调用方传，被 `submit_task` 显式记录但不会自动透传到 Worker（因为 Worker 不知道是哪个 HTTP 请求触发的）。
+所有 logger 同时写入 stderr 和按日轮转文件。API 请求及 Worker 任务通过 contextvars 自动附带 request/task/batch 等上下文；HTTP request id 不会跨数据库队列自动透传到 Worker。
 
 ## 关键日志锚点（grep 用）
 

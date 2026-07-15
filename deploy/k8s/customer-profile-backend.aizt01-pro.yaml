@@ -15,6 +15,9 @@ metadata:
 data:
   APP_ENV: local
   LOG_LEVEL: INFO
+  LOG_DIR: /app/logs
+  LOG_ROTATION: 00:00
+  LOG_RETENTION: 30 days
   API_HOST: 0.0.0.0
   API_PORT: '18008'
   WORKFLOW_PLATFORM: qingtian
@@ -58,6 +61,20 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: customer-profile-task-uploads
+  namespace: aizt01-pro
+  labels:
+    app.kubernetes.io/name: customer-profile-backend
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: customer-profile-logs
   namespace: aizt01-pro
   labels:
     app.kubernetes.io/name: customer-profile-backend
@@ -114,6 +131,13 @@ spec:
         volumeMounts:
         - name: task-uploads
           mountPath: /var/lib/customer-profile/task-uploads
+        - name: logs
+          mountPath: /app/logs
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
       restartPolicy: OnFailure
       terminationGracePeriodSeconds: 30
       dnsPolicy: ClusterFirst
@@ -125,6 +149,9 @@ spec:
       - name: task-uploads
         persistentVolumeClaim:
           claimName: customer-profile-task-uploads
+      - name: logs
+        persistentVolumeClaim:
+          claimName: customer-profile-logs
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -175,6 +202,13 @@ spec:
         volumeMounts:
         - name: task-uploads
           mountPath: /var/lib/customer-profile/task-uploads
+        - name: logs
+          mountPath: /app/logs
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
         ports:
         - name: http-api
           containerPort: 18008
@@ -209,6 +243,9 @@ spec:
       - name: task-uploads
         persistentVolumeClaim:
           claimName: customer-profile-task-uploads
+      - name: logs
+        persistentVolumeClaim:
+          claimName: customer-profile-logs
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -287,6 +324,13 @@ spec:
         volumeMounts:
         - name: task-uploads
           mountPath: /var/lib/customer-profile/task-uploads
+        - name: logs
+          mountPath: /app/logs
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
       restartPolicy: Always
       terminationGracePeriodSeconds: 60
       dnsPolicy: ClusterFirst
@@ -298,6 +342,9 @@ spec:
       - name: task-uploads
         persistentVolumeClaim:
           claimName: customer-profile-task-uploads
+      - name: logs
+        persistentVolumeClaim:
+          claimName: customer-profile-logs
   strategy:
     type: Recreate
   revisionHistoryLimit: 10

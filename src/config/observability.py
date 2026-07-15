@@ -44,6 +44,11 @@ def log_context(**values: object) -> Iterator[None]:
             variable.reset(token)
 
 
+def current_log_context() -> dict[str, str]:
+    """Return the correlation fields for the current thread or async task."""
+    return {name: variable.get() for name, variable in _context.items()}
+
+
 def mask_phone(value: str | None) -> str:
     """Retain enough shape for support diagnostics without logging the full phone number."""
     if not value:

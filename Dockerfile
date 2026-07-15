@@ -21,6 +21,7 @@ RUN pip install --no-cache-dir --upgrade pip --index-url "${PIP_INDEX_URL}" \
     && pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" \
         "fastapi>=0.115.0" \
         "httpx>=0.28.0" \
+        "loguru>=0.7.3" \
         "mysql-connector-python>=9.4.0" \
         "PyYAML>=6.0.1" \
         "python-multipart>=0.0.9" \
@@ -31,6 +32,8 @@ RUN pip install --no-cache-dir --upgrade pip --index-url "${PIP_INDEX_URL}" \
 COPY src ./src
 COPY contracts ./contracts
 COPY db ./db
+
+RUN mkdir -p /app/logs
 
 # 安装项目本身（不重新安装依赖）
 RUN pip install --no-cache-dir --no-deps . --index-url "${PIP_INDEX_URL}"

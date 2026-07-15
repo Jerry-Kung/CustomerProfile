@@ -65,11 +65,19 @@ spec:
         volumeMounts:
         - name: task-uploads
           mountPath: /var/lib/customer-profile/task-uploads
+        - name: logs
+          mountPath: /app/logs
         env:
         - name: APP_ENV
           value: prod
         - name: LOG_LEVEL
           value: INFO
+        - name: LOG_DIR
+          value: /app/logs
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
         - name: API_HOST
           value: 0.0.0.0
         - name: API_PORT
@@ -137,6 +145,9 @@ spec:
       - name: task-uploads
         persistentVolumeClaim:
           claimName: customer-profile-task-uploads
+      - name: logs
+        persistentVolumeClaim:
+          claimName: customer-profile-logs
   strategy:
     type: RollingUpdate
     rollingUpdate:

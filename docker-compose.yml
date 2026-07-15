@@ -6,6 +6,8 @@ services:
     command: ["customer-profile-migrate"]
     env_file:
       - .env
+    volumes:
+      - ./logs:/app/logs
     restart: "no"
 
   api:
@@ -21,6 +23,7 @@ services:
       TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
     volumes:
       - task_uploads:/var/lib/customer-profile/task-uploads
+      - ./logs:/app/logs
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -35,6 +38,7 @@ services:
       TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
     volumes:
       - task_uploads:/var/lib/customer-profile/task-uploads
+      - ./logs:/app/logs
     depends_on:
       migrate:
         condition: service_completed_successfully

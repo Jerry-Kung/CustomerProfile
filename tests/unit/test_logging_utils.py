@@ -3,7 +3,15 @@ from __future__ import annotations
 import json
 import logging
 
-from src.config.logging_utils import get_logger, log_config_summary, redact_config
+from loguru import logger as loguru_logger
+
+from src.config.logging_utils import (
+    configure_root_logging,
+    get_logger,
+    log_config_summary,
+    redact_config,
+)
+from src.config.observability import log_context
 from src.config.settings import (
     AppConfig,
     DifyConfig,
@@ -95,3 +103,26 @@ def test_log_config_summary_does_not_leak_secret(caplog):
     data = json.loads(payload)
     assert data["dify"]["api_key_test"].endswith(")")
     assert data["dify"]["invitation_strategy_api_key"].endswith(")")
+
+
+def test_standard_logging_is_formatted_and_written_by_loguru(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+    monkeypatch.setenv("POD_NAME", "pod-a")
+
+    configure_root_logging("unit-test")
+    with log_context(request_id="req-1", task_id=42, workflow_platform="qingtian"):
+        get_logger("test.bridge").info("bridge_message value=%s", "ok")
+    loguru_logger.complete()
+
+    stderr = capsys.readouterr().err
+    assert "| INFO" in stderr
+    assert "component=unit-test" in stderr
+    assert "request_id=req-1 task_id=42" in stderr
+    assert "bridge_message value=ok" in stderr
+
+    matches = list(tmp_path.glob("customer-profile-unit-test_pod-a_*.log"))
+    assert len(matches) == 1
+    content = matches[0].read_text(encoding="utf-8")
+    assert "request_id=req-1 task_id=42" in content
+    assert "bridge_message value=ok" in content

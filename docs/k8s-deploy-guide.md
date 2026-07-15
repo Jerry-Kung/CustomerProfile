@@ -9,6 +9,7 @@
 - `ConfigMap/customer-profile-config`：非敏感配置与常用调参项。
 - `Secret/customer-profile-secret`：MySQL 密码、工作流 API Key 等敏感配置。
 - `PVC/customer-profile-task-uploads`：API 与 Worker 共享上传目录。
+- `PVC/customer-profile-logs`：API、Worker 与迁移任务共享持久化日志目录。
 
 ## 1. 前置条件
 
@@ -18,7 +19,7 @@
 - MySQL 数据库已创建，例如 `customer_profile`。
 - 集群存在可用 StorageClass，并支持 `ReadWriteMany` PVC。
 
-> 如果集群没有 `ReadWriteMany` 存储，`customer-profile-task-uploads` 会一直 Pending。生产建议准备共享文件存储；如果确认不依赖上传文件共享，可再按实际情况改为 `emptyDir` 或 `ReadWriteOnce`。
+> 如果集群没有 `ReadWriteMany` 存储，`customer-profile-task-uploads` 和 `customer-profile-logs` 会一直 Pending。生产建议准备共享文件存储；如果确认不依赖共享，可再按实际情况改为每 Pod 独立存储。
 
 ## 2. 文件说明
 
@@ -219,6 +220,9 @@ kubectl -n aizt01-pro logs job/customer-profile-migrate
 | `WORKER_CONCURRENCY` | worker | 单个 worker 进程内并发数。调大提升吞吐，也会增加 MySQL 和工作流平台压力。 |
 | `TASK_QUEUE_MAX_WAITING` | api | 队列最大等待任务数，超过后提交接口返回队列满。 |
 | `LOG_LEVEL` | api / worker | 日志级别，排查问题时可临时调为 `DEBUG`。 |
+| `LOG_DIR` | api / worker / migrate | Loguru 文件目录，K8s 中为 `/app/logs`。 |
+| `LOG_ROTATION` | api / worker / migrate | 文件轮转策略，默认每天零点。 |
+| `LOG_RETENTION` | api / worker / migrate | 日志保留时间，默认 30 天。 |
 | `DIFY_POLL_TIMEOUT_MS` | worker | 等待 Dify 工作流完成的超时。 |
 | `QINGTIAN_POLL_TIMEOUT_MS` | worker | 等待 QingTian 工作流完成的超时。 |
 | `MIGRATION_DB_WAIT_MAX_TRIES` | migrate | 迁移等待 MySQL 可用的重试次数。 |
