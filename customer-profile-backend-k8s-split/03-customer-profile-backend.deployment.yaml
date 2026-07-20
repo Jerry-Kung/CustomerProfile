@@ -115,7 +115,7 @@ spec:
         - name: QINGTIAN_API_KEY_PRODUCTION
           value: d985kb79vlnv8q4p7fo0
         - name: QINGTIAN_INVITATION_STRATEGY_API_KEY
-          value: d985kb79vlnv8q4p7fo0
+          value: d9b0iun9vlnv8q50kh1g
         - name: QINGTIAN_USER_ID
           value: sys_prod
         - name: QINGTIAN_POLL_INTERVAL_MS
@@ -133,7 +133,7 @@ spec:
         - name: MYSQL_PASSWORD
           value: Kbd*e5E09N
         - name: WORKER_CONCURRENCY
-          value: '2'
+          value: '5'
       restartPolicy: Always
       terminationGracePeriodSeconds: 30
       dnsPolicy: ClusterFirst

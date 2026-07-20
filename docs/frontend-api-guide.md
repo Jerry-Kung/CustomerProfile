@@ -216,7 +216,8 @@ GET /v1/customer-profile/tasks/13129509529/result?task_type=invitation_strategy
 ```
 
 - `output`：Dify 解析并落库后的完整对象（除 `card_id` / `nickname` 外可能包含 `confidence` / `summary` / `tags` 等扩展字段，详见 `contracts/customer-profile-output.schema.json`）
-- 顶层 `card_id` / `nickname` 是冗余的快捷字段，与 `output.card_id` / `output.nickname` 一致
+- 顶层 `card_id` / `nickname` 是可选的冗余快捷字段；源值为非空字符串时与
+  `output.card_id` / `output.nickname` 一致，否则返回 `null`，但不影响任务成功
 
 #### 6.2 处理中（202，`status=queued` 或 `processing`）
 

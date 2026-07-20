@@ -326,7 +326,14 @@ class MySQLTaskRepository:
         finally:
             conn.close()
 
-    def mark_succeeded(self, *, task_id: int, output: dict, card_id: str, nickname: str) -> None:
+    def mark_succeeded(
+        self,
+        *,
+        task_id: int,
+        output: dict,
+        card_id: str | None,
+        nickname: str | None,
+    ) -> None:
         start = time.perf_counter()
         conn = self._db_client.connect()
         try:

@@ -49,9 +49,12 @@ def validate_contract_baseline(paths: ContractPaths) -> None:
         raise ValueError("missing submit/list path in OpenAPI contract")
 
     schema = load_output_schema(paths)
-    required = schema.get("required", [])
-    if "card_id" not in required or "nickname" not in required:
-        raise ValueError("output schema missing required fields card_id/nickname")
+    properties = schema.get("properties", {})
+    if "card_id" not in properties or "nickname" not in properties:
+        raise ValueError("output schema missing optional fields card_id/nickname")
+    required = set(schema.get("required", []))
+    if required & {"card_id", "nickname"}:
+        raise ValueError("output schema must keep card_id/nickname optional")
 
     migration = load_migration_sql(paths)
     if "CREATE TABLE IF NOT EXISTS customer_profile_tasks" not in migration:

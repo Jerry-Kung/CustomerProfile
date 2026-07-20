@@ -102,6 +102,8 @@ def test_log_config_summary_does_not_leak_secret(caplog):
     payload = message.split("config_loaded ", 1)[1]
     data = json.loads(payload)
     assert data["dify"]["api_key_test"].endswith(")")
+    assert data["worker"]["role"] == "local"
+    assert data["burst"]["queue_high_watermark"] == 10
     assert data["dify"]["invitation_strategy_api_key"].endswith(")")
 
 

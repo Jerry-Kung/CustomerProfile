@@ -92,7 +92,7 @@ spec:
         - name: QINGTIAN_API_KEY_PRODUCTION
           value: d985kb79vlnv8q4p7fo0
         - name: QINGTIAN_INVITATION_STRATEGY_API_KEY
-          value: d985kb79vlnv8q4p7fo0
+          value: d9b0iun9vlnv8q50kh1g
         - name: QINGTIAN_USER_ID
           value: sys_prod
         - name: QINGTIAN_POLL_INTERVAL_MS
@@ -110,7 +110,19 @@ spec:
         - name: MYSQL_PASSWORD
           value: Kbd*e5E09N
         - name: WORKER_CONCURRENCY
-          value: '2'
+          value: '5'
+        - name: WORKER_ROLE
+          value: local
+        - name: BURST_ENABLED
+          value: 'false'
+        - name: BURST_QUEUE_HIGH_WATERMARK
+          value: '10'
+        - name: BURST_QUEUE_LOW_WATERMARK
+          value: '3'
+        - name: BURST_OLDEST_WAIT_SECONDS
+          value: '600'
+        - name: BURST_OLDEST_RECOVER_SECONDS
+          value: '120'
       restartPolicy: Always
       terminationGracePeriodSeconds: 60
       dnsPolicy: ClusterFirst

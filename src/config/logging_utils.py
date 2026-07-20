@@ -63,6 +63,14 @@ def redact_config(config: AppConfig) -> dict[str, Any]:
         "worker": {
             "concurrency": config.worker.concurrency,
             "poll_interval_seconds": config.worker.poll_interval_seconds,
+            "role": config.worker.role,
+        },
+        "burst": {
+            "enabled": config.burst.enabled,
+            "queue_high_watermark": config.burst.queue_high_watermark,
+            "queue_low_watermark": config.burst.queue_low_watermark,
+            "oldest_wait_seconds": config.burst.oldest_wait_seconds,
+            "oldest_recover_seconds": config.burst.oldest_recover_seconds,
         },
     }
 

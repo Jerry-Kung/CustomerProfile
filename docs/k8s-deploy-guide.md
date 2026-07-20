@@ -218,6 +218,8 @@ kubectl -n aizt01-pro logs job/customer-profile-migrate
 | 参数 | 影响范围 | 说明 |
 |---|---|---|
 | `WORKER_CONCURRENCY` | worker | 单个 worker 进程内并发数。调大提升吞吐，也会增加 MySQL 和工作流平台压力。 |
+| `WORKER_ROLE` | worker | `local` 或 `commercial`，决定普通任务领取策略和执行来源 |
+| `BURST_*` | commercial worker | 商用模型高低水位和最老等待时间阈值 |
 | `TASK_QUEUE_MAX_WAITING` | api | 队列最大等待任务数，超过后提交接口返回队列满。 |
 | `LOG_LEVEL` | api / worker | 日志级别，排查问题时可临时调为 `DEBUG`。 |
 | `LOG_DIR` | api / worker / migrate | Loguru 文件目录，K8s 中为 `/app/logs`。 |
@@ -253,7 +255,10 @@ API 副本数可以直接扩容：
 kubectl -n aizt01-pro scale deployment/customer-profile-api --replicas=3
 ```
 
-Worker 默认固定 `replicas: 1`，不要水平扩容。它会从 MySQL 队列表中领取任务，虽然代码使用 `SKIP LOCKED` 支持并发抢占，但当前部署约定是通过 `WORKER_CONCURRENCY` 调吞吐，不通过增加 worker Pod 调吞吐。
+每个 Worker 角色默认固定 `replicas: 1`。`customer-profile-worker` 是本地角色，
+`customer-profile-worker-secondary` 是商用突发角色。两者通过 MySQL
+`SKIP LOCKED` 安全竞争。商用突发门控的高低水位状态保存在进程内，初期保持
+商用角色单副本，并优先通过 `WORKER_CONCURRENCY` 调整吞吐。
 
 ## 9. 回滚
 

@@ -35,7 +35,14 @@ class TaskRepository(Protocol):
     def get_by_phone(self, customer_phonenumber: str, *, task_type: str) -> TaskRecord | None:
         ...
 
-    def mark_succeeded(self, *, task_id: int, output: dict, card_id: str, nickname: str) -> None:
+    def mark_succeeded(
+        self,
+        *,
+        task_id: int,
+        output: dict,
+        card_id: str | None,
+        nickname: str | None,
+    ) -> None:
         ...
 
     def mark_failed(self, *, task_id: int, error_message: str) -> None:

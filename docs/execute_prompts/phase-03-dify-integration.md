@@ -26,7 +26,7 @@
 
 - 输入上下文：
   - Dify 输出以 `output` 字段为权威载体
-  - `card_id` 与 `nickname` 为最低必填字段
+  - `card_id` 与 `nickname` 为可选快捷字段，缺失或类型不匹配时提取为 `NULL`
   - 错误码需覆盖：`DIFY_REQUEST_FAILED`、`DIFY_TIMEOUT`、`DIFY_OUTPUT_INVALID_JSON`、`DIFY_OUTPUT_SCHEMA_MISMATCH`
 - 实施约束：
   - 输出解析流程固定：字符串反序列化 -> schema 校验 -> 字段提取
@@ -45,7 +45,7 @@
 
 - Dify 成功返回后，任务状态变为 `succeeded` 并写入 `output/card_id/nickname`
 - output 非法 JSON 时写 `failed` + `DIFY_OUTPUT_INVALID_JSON`
-- output 缺失必填字段时写 `failed` + `DIFY_OUTPUT_SCHEMA_MISMATCH`
+- output JSON 根节点不是对象时写 `failed` + `DIFY_OUTPUT_SCHEMA_MISMATCH`
 - Dify 请求失败或超时时写对应失败码与错误信息
 - 结果字段与 OpenAPI `TaskResult*` 响应模型可一致映射
 
@@ -53,7 +53,7 @@
 
 - [ ] 成功链路可完整从 `processing` 到 `succeeded`
 - [ ] 四类 Dify 失败码都可复现并正确落库
-- [ ] `card_id`、`nickname` 提取逻辑与 schema 一致
+- [ ] `card_id`、`nickname` 缺失或异常时任务仍可成功，快捷列写 `NULL`
 - [ ] 日志无敏感信息泄漏
 
 ## 输出格式要求（执行后汇报）

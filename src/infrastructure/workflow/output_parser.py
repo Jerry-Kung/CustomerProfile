@@ -38,20 +38,13 @@ def normalize_profile_output_dict(data: dict[str, Any]) -> dict[str, Any]:
 @dataclass
 class ParsedOutput:
     output: dict[str, Any]
-    card_id: str
-    nickname: str
+    card_id: str | None
+    nickname: str | None
 
 
 class WorkflowOutputParser:
     def __init__(self, schema_path: Path):
         self._schema_path = schema_path
-        self._required_fields = self._load_required_fields(schema_path)
-
-    @staticmethod
-    def _load_required_fields(schema_path: Path) -> set[str]:
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        required = schema.get("required", [])
-        return set(required if isinstance(required, list) else [])
 
     def parse(self, output_raw: str) -> ParsedOutput:
         start = time.perf_counter()
@@ -75,32 +68,8 @@ class WorkflowOutputParser:
 
         parsed = normalize_profile_output_dict(parsed)
 
-        missing = [name for name in self._required_fields if not parsed.get(name)]
-        if missing:
-            _log.warning(
-                "workflow_output_schema_mismatch reason=missing_required_fields missing=%s output_keys=%s elapsed_ms=%s",
-                sorted(missing),
-                sorted(parsed.keys()),
-                elapsed_ms(start),
-            )
-            raise WorkflowOutputSchemaMismatch(f"output missing required fields: {', '.join(missing)}")
-
-        card_id = parsed.get("card_id")
-        nickname = parsed.get("nickname")
-        if not isinstance(card_id, str) or not card_id.strip():
-            _log.warning(
-                "workflow_output_schema_mismatch reason=invalid_card_id value_type=%s elapsed_ms=%s",
-                type(card_id).__name__,
-                elapsed_ms(start),
-            )
-            raise WorkflowOutputSchemaMismatch("card_id must be non-empty string")
-        if not isinstance(nickname, str) or not nickname.strip():
-            _log.warning(
-                "workflow_output_schema_mismatch reason=invalid_nickname value_type=%s elapsed_ms=%s",
-                type(nickname).__name__,
-                elapsed_ms(start),
-            )
-            raise WorkflowOutputSchemaMismatch("nickname must be non-empty string")
+        card_id = _optional_non_empty_string(parsed.get("card_id"))
+        nickname = _optional_non_empty_string(parsed.get("nickname"))
 
         _log.info(
             "workflow_output_validated output_keys=%s output_size_bytes=%s elapsed_ms=%s",
@@ -109,3 +78,9 @@ class WorkflowOutputParser:
             elapsed_ms(start),
         )
         return ParsedOutput(output=parsed, card_id=card_id, nickname=nickname)
+
+
+def _optional_non_empty_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value if value.strip() else None

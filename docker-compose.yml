@@ -36,6 +36,30 @@ services:
       - .env
     environment:
       TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
+      WORKER_ROLE: local
+      BURST_ENABLED: "false"
+    volumes:
+      - task_uploads:/var/lib/customer-profile/task-uploads
+      - ./logs:/app/logs
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  commercial-worker:
+    profiles: ["commercial"]
+    build: .
+    command: ["customer-profile-worker"]
+    env_file:
+      - .env
+    environment:
+      TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
+      WORKER_ROLE: commercial
+      WORKER_CONCURRENCY: "${COMMERCIAL_WORKER_CONCURRENCY:-1}"
+      BURST_ENABLED: "true"
+      QINGTIAN_API_KEY_TEST: "${QINGTIAN_COMMERCIAL_API_KEY_TEST:-}"
+      QINGTIAN_API_KEY_PRODUCTION: "${QINGTIAN_COMMERCIAL_API_KEY_PRODUCTION:-}"
+      QINGTIAN_INVITATION_STRATEGY_API_KEY: "${QINGTIAN_COMMERCIAL_INVITATION_STRATEGY_API_KEY:-}"
     volumes:
       - task_uploads:/var/lib/customer-profile/task-uploads
       - ./logs:/app/logs

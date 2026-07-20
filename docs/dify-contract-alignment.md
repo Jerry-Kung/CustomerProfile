@@ -23,7 +23,7 @@
 - 以 Dify 返回中的 `output` 字段作为权威结果载体（JSON 字符串）。
 - 后端需执行两层处理：
   1. 反序列化 `output` 字符串为对象；
-  2. **规范化**：若根级缺少 `nickname` 但存在 `customer.nickname`（字符串），则提升到根级 `nickname`，再按 `contracts/customer-profile-output.schema.json` 校验并提取：
+  2. **规范化**：若根级缺少 `nickname` 但存在 `customer.nickname`（字符串），则提升到根级 `nickname`，再提取两个可选快捷字段：
      - `card_id`
      - `nickname`
 - 落库原则：
@@ -33,12 +33,12 @@
 ## 2) output JSON Schema
 
 - 文件：`contracts/customer-profile-output.schema.json`
-- 最低强约束字段：
-  - `card_id: string, minLength=1`
-  - `nickname: string, minLength=1`
+- `card_id`、`nickname` 都是可选快捷字段，不参与任务成功判定。
+- 字段存在且为非空字符串时冗余写入对应数据库列；缺失、空值或其他类型时列值写
+  `NULL`，完整值仍保留在 `output` 中。
 - 兼容策略：`additionalProperties: true`
   - 允许 Dify 增量输出其他字段，不阻塞主流程
-  - 仅当必填字段缺失时判定为“业务解析失败”
+  - 只有 `output` 不是合法 JSON 对象时才判定为解析失败
 
 ## 3) 图片上传方式对齐
 
@@ -104,7 +104,7 @@
 - `DIFY_REQUEST_FAILED`：请求失败/鉴权失败/网络失败
 - `DIFY_TIMEOUT`：Dify 长时间未完成
 - `DIFY_OUTPUT_INVALID_JSON`：`output` 非法 JSON
-- `DIFY_OUTPUT_SCHEMA_MISMATCH`：缺失 `card_id` 或 `nickname`
+- `DIFY_OUTPUT_SCHEMA_MISMATCH`：`output` JSON 根节点不是对象
 
 ## 6) 验收清单（本待办完成标准）
 

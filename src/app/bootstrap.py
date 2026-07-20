@@ -20,6 +20,7 @@ from src.infrastructure.storage.task_upload_store import TaskUploadStore
 from src.infrastructure.workflow.output_parser import WorkflowOutputParser
 from src.infrastructure.workflow.protocol import WorkflowClient
 from src.worker.executor import WorkerExecutor
+from src.worker.routing import BurstGate, BurstThresholds
 
 
 def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskService, WorkerExecutor, TaskUploadStore]:
@@ -43,12 +44,23 @@ def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskServi
     upload_store = TaskUploadStore(config.upload)
     contracts = default_contract_paths()
     workflow_client = _build_workflow_client(config, logger)
+    burst = config.burst
     executor = WorkerExecutor(
         task_service=task_service,
         workflow_client=workflow_client,
         output_parser=WorkflowOutputParser(schema_path=contracts.output_schema_path),
         logger=get_logger("worker_executor"),
         platform_name=config.workflow_platform,
+        worker_role=config.worker.role,
+        burst_gate=BurstGate(
+            BurstThresholds(
+                enabled=burst.enabled,
+                high_watermark=burst.queue_high_watermark,
+                low_watermark=burst.queue_low_watermark,
+                oldest_trigger_seconds=burst.oldest_wait_seconds,
+                oldest_recover_seconds=burst.oldest_recover_seconds,
+            )
+        ),
     )
     return config, db_client, task_service, executor, upload_store
 

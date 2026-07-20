@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 _DOTENV_LOADED = False
@@ -40,6 +40,15 @@ def _env_int(key: str, default: int) -> int:
 
 def _env_str(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    raw = os.getenv(key, "true" if default else "false").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"invalid boolean value for {key}: {raw}")
 
 
 @dataclass(frozen=True)
@@ -92,6 +101,16 @@ class WorkerConfig:
 
     concurrency: int
     poll_interval_seconds: float
+    role: str = "local"
+
+
+@dataclass(frozen=True)
+class BurstConfig:
+    enabled: bool = False
+    queue_high_watermark: int = 10
+    queue_low_watermark: int = 3
+    oldest_wait_seconds: int = 600
+    oldest_recover_seconds: int = 120
 
 
 @dataclass(frozen=True)
@@ -127,6 +146,7 @@ class AppConfig:
     tos: TosConfig
     migration: MigrationConfig
     task_queue_max_waiting: int = 500
+    burst: BurstConfig = field(default_factory=BurstConfig)
 
 
 def _default_task_upload_dir() -> Path:
@@ -153,6 +173,8 @@ def load_config() -> AppConfig:
 
     dify_required = workflow_platform == "dify"
     qingtian_required = workflow_platform == "qingtian"
+    worker_role = _worker_role()
+    burst_config = _burst_config()
 
     legacy_dify_api_key = os.getenv("DIFY_API_KEY", "").strip()
     dify_api_key_test = os.getenv("DIFY_API_KEY_TEST", "").strip() or legacy_dify_api_key
@@ -211,6 +233,7 @@ def load_config() -> AppConfig:
         worker=WorkerConfig(
             concurrency=_worker_concurrency(),
             poll_interval_seconds=_env_int("WORKER_POLL_INTERVAL_MS", 2000) / 1000.0,
+            role=worker_role,
         ),
         tos=TosConfig(
             access_key_id=_env_str("TOS_ACCESS_KEY_ID"),
@@ -225,6 +248,7 @@ def load_config() -> AppConfig:
             db_wait_interval_seconds=_env_int("MIGRATION_DB_WAIT_INTERVAL_MS", 2000) / 1000.0,
         ),
         task_queue_max_waiting=_task_queue_max_waiting(),
+        burst=burst_config,
     )
 
 
@@ -239,6 +263,31 @@ def _worker_concurrency() -> int:
     if n < 1:
         raise ValueError("WORKER_CONCURRENCY must be >= 1")
     return n
+
+
+def _worker_role() -> str:
+    value = _env_str("WORKER_ROLE", "local").lower()
+    if value not in {"local", "commercial"}:
+        raise ValueError("WORKER_ROLE must be one of: local, commercial")
+    return value
+
+
+def _burst_config() -> BurstConfig:
+    high = _env_int("BURST_QUEUE_HIGH_WATERMARK", 10)
+    low = _env_int("BURST_QUEUE_LOW_WATERMARK", 3)
+    oldest_wait = _env_int("BURST_OLDEST_WAIT_SECONDS", 600)
+    oldest_recover = _env_int("BURST_OLDEST_RECOVER_SECONDS", 120)
+    if low > high:
+        raise ValueError("BURST_QUEUE_LOW_WATERMARK must be <= BURST_QUEUE_HIGH_WATERMARK")
+    if min(high, low, oldest_wait, oldest_recover) < 0:
+        raise ValueError("burst thresholds must be >= 0")
+    return BurstConfig(
+        enabled=_env_bool("BURST_ENABLED", False),
+        queue_high_watermark=high,
+        queue_low_watermark=low,
+        oldest_wait_seconds=oldest_wait,
+        oldest_recover_seconds=oldest_recover,
+    )
 
 
 def _task_queue_max_waiting() -> int:

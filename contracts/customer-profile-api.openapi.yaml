@@ -357,10 +357,10 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
           examples:
-            outputSchemaMismatch:
+            outputInvalidJson:
               value:
-                code: DIFY_OUTPUT_SCHEMA_MISMATCH
-                message: output missing required fields card_id or nickname
+                code: DIFY_OUTPUT_INVALID_JSON
+                message: output is not valid JSON string
     TooManyRequests:
       description: Request is throttled by server
       content:

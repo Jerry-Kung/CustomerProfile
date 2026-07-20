@@ -14,6 +14,7 @@ from src.infrastructure.workflow.errors import (
 )
 from src.infrastructure.workflow.output_parser import WorkflowOutputParser
 from src.infrastructure.workflow.protocol import WorkflowClient
+from src.worker.routing import BurstGate, QueuePressure
 
 
 _WORKER_UNEXPECTED_ERROR_CODE = "WORKER_UNEXPECTED_ERROR"
@@ -28,12 +29,20 @@ class WorkerExecutor:
         output_parser: WorkflowOutputParser,
         logger: logging.Logger,
         platform_name: str = "dify",
+        worker_role: str = "local",
+        burst_gate: BurstGate | None = None,
     ):
+        if worker_role not in {"local", "commercial"}:
+            raise ValueError("worker_role must be local or commercial")
+        if worker_role == "commercial" and burst_gate is None:
+            raise ValueError("commercial worker requires a burst_gate")
         self._task_service = task_service
         self._workflow_client = workflow_client
         self._output_parser = output_parser
         self._logger = logger
         self._platform_name = platform_name
+        self._worker_role = worker_role
+        self._burst_gate = burst_gate
 
     def operational_snapshot(self) -> dict[str, object]:
         snapshot_fn = getattr(self._task_service.repository, "get_queue_stats", None)
@@ -43,6 +52,8 @@ class WorkerExecutor:
 
     def execute_once(self) -> str:
         execute_start = time.perf_counter()
+        if not self._route_allows_claim():
+            return "idle"
         # Claim is isolated: a DB error here must NOT bubble up (would kill the worker thread).
         # No task is in 'processing' yet, so return "error" and let the runner retry on next tick.
         try:
@@ -152,6 +163,33 @@ class WorkerExecutor:
                 detail = safe_text(f"{type(exc).__name__}: {str(exc)}", 800)
                 self._safe_mark_failed(task_id, f"{_WORKER_UNEXPECTED_ERROR_CODE}: {detail}")
                 return "failed"
+
+    def _route_allows_claim(self) -> bool:
+        if self._worker_role == "local":
+            return True
+        assert self._burst_gate is not None
+        try:
+            snapshot = self.operational_snapshot()
+            pressure = QueuePressure(
+                queue_depth=int(snapshot.get("queue_depth") or 0),
+                oldest_queued_age_seconds=(
+                    int(snapshot["oldest_queued_age_seconds"])
+                    if snapshot.get("oldest_queued_age_seconds") is not None
+                    else None
+                ),
+            )
+            allowed = self._burst_gate.allow_new(pressure)
+            self._logger.debug(
+                "commercial_burst_gate active=%s queue_depth=%s "
+                "oldest_queued_age_seconds=%s",
+                allowed,
+                pressure.queue_depth,
+                pressure.oldest_queued_age_seconds,
+            )
+            return allowed
+        except Exception:
+            self._logger.exception("commercial_burst_gate_check_failed")
+            return False
 
     def _safe_mark_failed(self, task_id: int, error_message: str) -> None:
         """mark_failed must not itself raise back into the caller — that would re-introduce the bug we are fixing."""

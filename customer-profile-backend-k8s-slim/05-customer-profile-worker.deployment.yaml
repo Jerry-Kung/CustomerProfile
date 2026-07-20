@@ -83,6 +83,10 @@ spec:
           value: Kbd*e5E09N
         - name: WORKER_CONCURRENCY
           value: '2'
+        - name: WORKER_ROLE
+          value: local
+        - name: BURST_ENABLED
+          value: 'false'
       restartPolicy: Always
       terminationGracePeriodSeconds: 60
       dnsPolicy: ClusterFirst

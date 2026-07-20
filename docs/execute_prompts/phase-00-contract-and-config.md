@@ -26,7 +26,7 @@
 
 - 输入上下文：
   - 接口必须保持异步提交语义（`POST` 返回 accepted，不等待 Dify）
-  - 输出校验必须以 `card_id`、`nickname` 为最低必填
+  - `card_id`、`nickname` 为可选快捷字段，不参与输出成功判定
   - 数据库唯一业务键必须是 `customer_phonenumber`
 - 实施约束：
   - 配置键名需覆盖 Dify/MySQL/应用通用配置

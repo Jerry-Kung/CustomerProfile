@@ -11,13 +11,23 @@ from src.infrastructure.workflow.errors import (
 )
 from src.infrastructure.workflow.output_parser import WorkflowOutputParser
 from src.worker.executor import WorkerExecutor
+from src.worker.routing import BurstGate, BurstThresholds
 
 
 class _Repo:
-    def __init__(self, claimed: TaskRecord | None):
+    def __init__(
+        self,
+        claimed: TaskRecord | None,
+        *,
+        queue_depth: int = 0,
+        oldest_queued_age_seconds: int | None = None,
+    ):
         self.claimed = claimed
-        self.succeeded: tuple[int, dict, str, str] | None = None
+        self.succeeded: tuple[int, dict, str | None, str | None] | None = None
         self.failed: tuple[int, str] | None = None
+        self.claim_calls = 0
+        self.queue_depth = queue_depth
+        self.oldest_queued_age_seconds = oldest_queued_age_seconds
 
     def upsert_queued(
         self,
@@ -37,11 +47,25 @@ class _Repo:
         )
 
     def claim_next_queued(self) -> TaskRecord | None:
+        self.claim_calls += 1
         item = self.claimed
         self.claimed = None
         return item
 
-    def mark_succeeded(self, *, task_id: int, output: dict, card_id: str, nickname: str) -> None:
+    def get_queue_stats(self) -> dict[str, object]:
+        return {
+            "queue_depth": self.queue_depth,
+            "oldest_queued_age_seconds": self.oldest_queued_age_seconds,
+        }
+
+    def mark_succeeded(
+        self,
+        *,
+        task_id: int,
+        output: dict,
+        card_id: str | None,
+        nickname: str | None,
+    ) -> None:
         self.succeeded = (task_id, output, card_id, nickname)
 
     def mark_failed(self, *, task_id: int, error_message: str) -> None:
@@ -103,6 +127,18 @@ def _schema_path() -> Path:
 
 def _parser() -> WorkflowOutputParser:
     return WorkflowOutputParser(schema_path=_schema_path())
+
+
+def _burst_gate(*, enabled: bool = True) -> BurstGate:
+    return BurstGate(
+        BurstThresholds(
+            enabled=enabled,
+            high_watermark=10,
+            low_watermark=3,
+            oldest_trigger_seconds=600,
+            oldest_recover_seconds=120,
+        )
+    )
 
 
 def test_executor_success_path():
@@ -175,7 +211,7 @@ def test_executor_invalid_json_marks_failed():
     assert "WORKFLOW_OUTPUT_INVALID_JSON" in repo.failed[1]
 
 
-def test_executor_missing_fields_marks_failed():
+def test_executor_missing_profile_fields_marks_succeeded():
     repo = _Repo(claimed=TaskRecord(id=3, customer_phonenumber="13800138000", status="processing"))
     service = TaskService(repository=repo, logger=_logger())
     executor = WorkerExecutor(
@@ -185,9 +221,9 @@ def test_executor_missing_fields_marks_failed():
         logger=_logger(),
     )
     status = executor.execute_once()
-    assert status == "failed"
-    assert repo.failed is not None
-    assert "WORKFLOW_OUTPUT_SCHEMA_MISMATCH" in repo.failed[1]
+    assert status == "succeeded"
+    assert repo.succeeded == (3, {"nickname": "nick-1"}, None, "nick-1")
+    assert repo.failed is None
 
 
 def test_executor_request_failed_marks_failed():
@@ -218,3 +254,71 @@ def test_executor_timeout_marks_failed():
     assert status == "failed"
     assert repo.failed is not None
     assert "WORKFLOW_TIMEOUT" in repo.failed[1]
+
+
+def test_local_worker_claims_even_when_burst_gate_is_closed():
+    repo = _Repo(
+        claimed=TaskRecord(
+            id=6,
+            customer_phonenumber="13800138000",
+            status="processing",
+        ),
+        queue_depth=0,
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=_WorkflowSuccess(),
+        output_parser=_parser(),
+        logger=_logger(),
+        worker_role="local",
+        burst_gate=_burst_gate(enabled=False),
+    )
+
+    assert executor.execute_once() == "succeeded"
+    assert repo.claim_calls == 1
+
+
+def test_commercial_worker_does_not_claim_below_burst_threshold():
+    repo = _Repo(
+        claimed=TaskRecord(
+            id=7,
+            customer_phonenumber="13800138000",
+            status="processing",
+        ),
+        queue_depth=9,
+        oldest_queued_age_seconds=599,
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=_WorkflowSuccess(),
+        output_parser=_parser(),
+        logger=_logger(),
+        worker_role="commercial",
+        burst_gate=_burst_gate(),
+    )
+
+    assert executor.execute_once() == "idle"
+    assert repo.claim_calls == 0
+
+
+def test_commercial_worker_claims_once_burst_threshold_is_reached():
+    repo = _Repo(
+        claimed=TaskRecord(
+            id=8,
+            customer_phonenumber="13800138000",
+            status="processing",
+        ),
+        queue_depth=10,
+        oldest_queued_age_seconds=20,
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=_WorkflowSuccess(),
+        output_parser=_parser(),
+        logger=_logger(),
+        worker_role="commercial",
+        burst_gate=_burst_gate(),
+    )
+
+    assert executor.execute_once() == "succeeded"
+    assert repo.claim_calls == 1

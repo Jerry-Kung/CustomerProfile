@@ -62,6 +62,30 @@ QingTian 的 API Key 选择规则与 Dify 完全一致：`task_type=invitation_s
 
 回滚到 Dify：将 `.env` 中 `WORKFLOW_PLATFORM` 改回 `dify`（或删除该行）并重启 API + Worker。QingTian 变量空着不会影响 Dify 路径。
 
+### 2.2 擎天双工作流积压分流
+
+擎天模式支持两个使用同一 MySQL 队列的 Worker：
+
+- 本地模型 Worker：`WORKER_ROLE=local`、`BURST_ENABLED=false`，始终领取普通新任务。
+- 商用模型 Worker：`WORKER_ROLE=commercial`、`BURST_ENABLED=true`，只在队列达到高水位时参与领取任务。
+
+推荐初始值：
+
+```env
+BURST_QUEUE_HIGH_WATERMARK=10
+BURST_QUEUE_LOW_WATERMARK=3
+BURST_OLDEST_WAIT_SECONDS=600
+BURST_OLDEST_RECOVER_SECONDS=120
+```
+
+进入突发状态的条件是 `queued >= 10` 或最老等待时间达到 600 秒；进入后，
+直到 `queued <= 3` 且最老等待时间不超过 120 秒才退出，避免在临界值附近频繁启停。
+两个 Worker 仍通过数据库的 `FOR UPDATE SKIP LOCKED` 互斥领取同一队列中的任务。
+
+当前版本没有自动重试：工作流调用或结果解析失败后，任务仍会直接进入 `failed`。
+未来重试方案仅保存在
+[`deferred-qingtian-retry-design.md`](deferred-qingtian-retry-design.md)，未对应任何当前运行时配置或数据库迁移。
+
 Worker 在无 `queued` 任务时，默认 **不再** 以 INFO 每 2 秒打印 `worker_tick`（避免刷屏）。需要观察轮询心跳时，可将 `LOG_LEVEL` 设为 `DEBUG`。
 
 ## 3. 本地运行（开发 / 联调）

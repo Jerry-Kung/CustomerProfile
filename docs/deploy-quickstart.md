@@ -89,13 +89,21 @@ HOST_API_PORT=8080 docker compose up -d   # 或写进 .env
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `WORKER_CONCURRENCY` | 4 | worker 单进程并发执行的工作流数。调大可提高任务吞吐，但会增加对 Dify/QingTian 平台和 MySQL 的并发压力；必须 ≥ 1，否则启动报错。 |
+| `WORKER_CONCURRENCY` | 8 | worker 单进程并发执行的工作流数。调大可提高任务吞吐，但会增加对 Dify/QingTian 平台和 MySQL 的并发压力；必须 ≥ 1，否则启动报错。 |
+| `WORKER_ROLE` | local | `local` 始终处理普通任务；`commercial` 只在突发高水位开启时处理普通任务 |
 | `TASK_QUEUE_MAX_WAITING` | 500 | 队列中最大等待（queued 状态）任务数。提交任务时超过该上限，API 返回"队列已满"错误，调用方需稍后重试；必须 ≥ 1，否则启动报错。 |
 
 修改方法：编辑 `.env` 中对应的值，然后执行：
 
 ```bash
 docker compose up -d
+```
+
+需要同时启用商用突发 Worker 时，先把商业工作流对应的三个
+`QINGTIAN_COMMERCIAL_*` API Key 填好，再执行：
+
+```bash
+docker compose --profile commercial up -d
 ```
 
 > 注意：`.env` 是在**容器创建时**注入的，`docker compose restart` 不会重新读取 `.env`，必须用 `docker compose up -d` 让 compose 重建受影响的容器，新值才生效。`WORKER_CONCURRENCY` 只影响 worker，`TASK_QUEUE_MAX_WAITING` 在 api 提交任务时生效，`up -d` 会自动重建这两个容器。
@@ -110,12 +118,15 @@ docker compose up -d
 | `DIFY_IMAGE_MODE` | file_id | 图片传给 Dify 的方式，保持默认即可 |
 | `DIFY_POLL_TIMEOUT_MS` | 2400000 | 等待 Dify 工作流完成的超时（毫秒） |
 | `QINGTIAN_POLL_TIMEOUT_MS` | 2400000 | 等待 QingTian 完成的超时（毫秒） |
+| `BURST_ENABLED` | false | 商用 Worker 设为 true；本地 Worker 保持 false |
+| `BURST_QUEUE_HIGH_WATERMARK` / `BURST_QUEUE_LOW_WATERMARK` | 10 / 3 | 商用突发启停高低水位 |
+| `BURST_OLDEST_WAIT_SECONDS` / `BURST_OLDEST_RECOVER_SECONDS` | 600 / 120 | 按最老任务等待时间启停商用突发 |
 
 上传的图片保存在 compose 定义的共享卷 `task_uploads` 中，api 写入、worker 读取，已配置好，无需手动处理。
 
 ## 5. 数据库迁移
 
-无需手动执行。`docker compose up` 时 `migrate` 服务自动按顺序执行 `db/migrations/*.sql`，全部为幂等脚本，可安全重复运行；`api` / `worker` 会等它成功退出后再启动。若 `migrate` 失败，`docker compose logs migrate` 查看原因（通常是 MySQL 连不通或库不存在）。
+无需手动执行。`docker compose up` 时 `migrate` 服务自动按顺序执行 `db/migrations/*.sql`，全部为幂等脚本，可安全重复运行；`api` / `worker` 会等它成功退出后再启动。当前积压分流复用已有任务表和队列统计查询，不新增数据库字段或表。若 `migrate` 失败，`docker compose logs migrate` 查看原因（通常是 MySQL 连不通或库不存在）。
 
 ## 6. 日常运维命令
 

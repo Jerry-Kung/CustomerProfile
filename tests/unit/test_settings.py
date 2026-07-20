@@ -24,7 +24,15 @@ REQUIRED_ENV = {
 
 def _load_with_env(monkeypatch: pytest.MonkeyPatch, extra: dict[str, str] | None = None):
     for key in list(os.environ.keys()):
-        if key.startswith("DIFY_") or key.startswith("MYSQL_") or key in {"APP_ENV", "LOG_LEVEL"}:
+        if (
+            key.startswith("DIFY_")
+            or key.startswith("QINGTIAN_")
+            or key.startswith("MYSQL_")
+            or key.startswith("WORKER_")
+            or key.startswith("BURST_")
+            or key.startswith("COMMERCIAL_")
+            or key in {"APP_ENV", "LOG_LEVEL", "WORKFLOW_PLATFORM"}
+        ):
             monkeypatch.delenv(key, raising=False)
     for key, value in REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
@@ -45,6 +53,10 @@ def test_load_config_success_defaults(monkeypatch: pytest.MonkeyPatch):
     assert isinstance(config.dify.poll_timeout_ms, int) and config.dify.poll_timeout_ms > 0
     assert config.mysql.port == 3306
     assert config.worker.concurrency >= 1
+    assert config.worker.role == "local"
+    assert config.burst.enabled is False
+    assert config.burst.queue_high_watermark == 10
+    assert config.burst.queue_low_watermark == 3
     assert config.dify.invitation_strategy_api_key == "app-INV-xxxx"
 
 
@@ -59,6 +71,10 @@ def test_load_config_overrides(monkeypatch: pytest.MonkeyPatch):
             "DIFY_POLL_INTERVAL_MS": "3000",
             "DIFY_POLL_TIMEOUT_MS": "600000",
             "MYSQL_PORT": "3307",
+            "WORKER_ROLE": "commercial",
+            "BURST_ENABLED": "true",
+            "BURST_QUEUE_HIGH_WATERMARK": "20",
+            "BURST_QUEUE_LOW_WATERMARK": "5",
         },
     )
     assert config.app_env == "test"
@@ -68,6 +84,26 @@ def test_load_config_overrides(monkeypatch: pytest.MonkeyPatch):
     assert config.dify.poll_interval_ms == 3000
     assert config.dify.poll_timeout_ms == 600000
     assert config.mysql.port == 3307
+    assert config.worker.role == "commercial"
+    assert config.burst.enabled is True
+    assert config.burst.queue_high_watermark == 20
+    assert config.burst.queue_low_watermark == 5
+
+
+def test_load_config_rejects_invalid_worker_role(monkeypatch: pytest.MonkeyPatch):
+    with pytest.raises(ValueError, match="WORKER_ROLE"):
+        _load_with_env(monkeypatch, {"WORKER_ROLE": "random"})
+
+
+def test_load_config_rejects_inverted_burst_watermarks(monkeypatch: pytest.MonkeyPatch):
+    with pytest.raises(ValueError, match="BURST_QUEUE_LOW_WATERMARK"):
+        _load_with_env(
+            monkeypatch,
+            {
+                "BURST_QUEUE_HIGH_WATERMARK": "3",
+                "BURST_QUEUE_LOW_WATERMARK": "5",
+            },
+        )
 
 
 def test_load_config_missing_required(monkeypatch: pytest.MonkeyPatch):

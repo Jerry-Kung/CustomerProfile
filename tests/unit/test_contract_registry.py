@@ -17,3 +17,5 @@ def test_default_contract_paths_exist():
 def test_validate_contract_baseline_success():
     paths = default_contract_paths(_PROJECT_ROOT)
     validate_contract_baseline(paths)
+    output_schema = paths.output_schema_path.read_text(encoding="utf-8")
+    assert '"required": []' in output_schema
