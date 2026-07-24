@@ -47,8 +47,23 @@ class TaskService:
                 )
         return record
 
-    def claim_next_task(self) -> TaskRecord | None:
-        record = self.repository.claim_next_queued()
+    def claim_next_task(
+        self,
+        *,
+        retry_enabled: bool = False,
+        lease_seconds: int | None = None,
+        execution_backend: str = "local",
+        allow_new_tasks: bool = True,
+    ) -> TaskRecord | None:
+        claim_eligible = getattr(self.repository, "claim_next_eligible", None)
+        if retry_enabled and lease_seconds is not None and callable(claim_eligible):
+            record = claim_eligible(
+                lease_seconds=lease_seconds,
+                execution_backend=execution_backend,
+                allow_new_tasks=allow_new_tasks,
+            )
+        else:
+            record = self.repository.claim_next_queued()
         if record:
             with log_context(
                 task_id=record.id,
@@ -62,6 +77,20 @@ class TaskService:
                     record.status,
                 )
         return record
+
+    def recover_expired_retry_leases(self, *, limit: int = 100) -> tuple[int, int]:
+        recover = getattr(self.repository, "recover_expired_retry_leases", None)
+        if not callable(recover):
+            return 0, 0
+        recoverable, unknown = recover(limit=limit)
+        if recoverable or unknown:
+            self.logger.warning(
+                "task_retry_lease_recovered recoverable_tasks=%s unknown_submissions_failed=%s limit=%s",
+                recoverable,
+                unknown,
+                limit,
+            )
+        return recoverable, unknown
 
     def list_tasks(
         self,

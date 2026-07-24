@@ -1,4 +1,4 @@
-# MVP: API + Worker as two containers. MySQL/Dify are external (configure via .env).
+# API plus local/commercial Worker containers. MySQL/Dify/QingTian are external (configure via .env).
 # Shared volume: API saves multipart uploads here; worker reads paths for DIFY_IMAGE_MODE=file_id.
 services:
   migrate:
@@ -37,7 +37,6 @@ services:
     environment:
       TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
       WORKER_ROLE: local
-      BURST_ENABLED: "false"
     volumes:
       - task_uploads:/var/lib/customer-profile/task-uploads
       - ./logs:/app/logs
@@ -47,7 +46,8 @@ services:
     restart: unless-stopped
 
   commercial-worker:
-    profiles: ["commercial"]
+    # Starts with the normal compose stack.  For WORKFLOW_PLATFORM=qingtian,
+    # populate all QINGTIAN_COMMERCIAL_* keys in .env before starting it.
     build: .
     command: ["customer-profile-worker"]
     env_file:
@@ -56,10 +56,9 @@ services:
       TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
       WORKER_ROLE: commercial
       WORKER_CONCURRENCY: "${COMMERCIAL_WORKER_CONCURRENCY:-1}"
-      BURST_ENABLED: "true"
+      COMMERCIAL_QUEUE_THRESHOLD: "${COMMERCIAL_QUEUE_THRESHOLD:-5}"
       QINGTIAN_API_KEY_TEST: "${QINGTIAN_COMMERCIAL_API_KEY_TEST:-}"
       QINGTIAN_API_KEY_PRODUCTION: "${QINGTIAN_COMMERCIAL_API_KEY_PRODUCTION:-}"
-      QINGTIAN_INVITATION_STRATEGY_API_KEY: "${QINGTIAN_COMMERCIAL_INVITATION_STRATEGY_API_KEY:-}"
     volumes:
       - task_uploads:/var/lib/customer-profile/task-uploads
       - ./logs:/app/logs

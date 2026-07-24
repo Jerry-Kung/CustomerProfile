@@ -203,13 +203,37 @@ kubectl -n aizt01-pro rollout status deployment/customer-profile-api
 kubectl -n aizt01-pro rollout status deployment/customer-profile-worker
 ```
 
-如果本次包含数据库迁移，先删除旧 Job，再重新 apply：
+如果本次包含数据库迁移，先删除旧 Job，再重新 apply。擎天重试没有运行时开关，
+**在 Job 完成前不要主动 restart/rollout API 或 Worker**：现有 Pod 会继续运行，
+而新的 Pod 必须等 005 字段已出现后才可启动。
 
 ```bash
 kubectl -n aizt01-pro delete job customer-profile-migrate --ignore-not-found
 kubectl apply -f deploy/k8s/customer-profile-backend.aizt01-pro.yaml
+kubectl -n aizt01-pro wait --for=condition=complete job/customer-profile-migrate --timeout=10m
 kubectl -n aizt01-pro logs job/customer-profile-migrate
+
 ```
+
+组合清单 `deploy/k8s/customer-profile-backend.aizt01-pro.yaml` 只包含本地 Worker，
+不能单独开启当前固定的三次重试策略，否则第二次本地失败后没有商用 Worker 接手。
+必须使用包含
+`customer-profile-worker-secondary` 的 split 清单，并确认 secondary 中是独立商用
+AppKey。005 迁移完成后再同时更新两个 Deployment：
+
+```bash
+kubectl -n aizt01-pro set env deployment/customer-profile-worker \
+  COMMERCIAL_QUEUE_THRESHOLD=5
+kubectl -n aizt01-pro set env deployment/customer-profile-worker-secondary \
+  COMMERCIAL_QUEUE_THRESHOLD=5
+kubectl -n aizt01-pro rollout status deployment/customer-profile-worker
+kubectl -n aizt01-pro rollout status deployment/customer-profile-worker-secondary
+```
+
+若镜像仍使用同一个可变标签（例如 `arm64-latest`），`kubectl apply` 本身不会因为镜像
+内容变化而重建已有 Pod；上述显式 `rollout restart` 会在迁移完成后拉取新镜像。若改用了
+新的不可变镜像 tag，也应先只更新迁移 Job 所用镜像，等待 Job 成功后再更新 API/Worker
+Deployment 的镜像。
 
 ## 8. 后续调参方式
 
@@ -219,7 +243,7 @@ kubectl -n aizt01-pro logs job/customer-profile-migrate
 |---|---|---|
 | `WORKER_CONCURRENCY` | worker | 单个 worker 进程内并发数。调大提升吞吐，也会增加 MySQL 和工作流平台压力。 |
 | `WORKER_ROLE` | worker | `local` 或 `commercial`，决定普通任务领取策略和执行来源 |
-| `BURST_*` | commercial worker | 商用模型高低水位和最老等待时间阈值 |
+| `COMMERCIAL_QUEUE_THRESHOLD` | commercial worker | 排队任务数达到此值后开始分流普通任务，默认 5。 |
 | `TASK_QUEUE_MAX_WAITING` | api | 队列最大等待任务数，超过后提交接口返回队列满。 |
 | `LOG_LEVEL` | api / worker | 日志级别，排查问题时可临时调为 `DEBUG`。 |
 | `LOG_DIR` | api / worker / migrate | Loguru 文件目录，K8s 中为 `/app/logs`。 |
@@ -227,8 +251,12 @@ kubectl -n aizt01-pro logs job/customer-profile-migrate
 | `LOG_RETENTION` | api / worker / migrate | 日志保留时间，默认 30 天。 |
 | `DIFY_POLL_TIMEOUT_MS` | worker | 等待 Dify 工作流完成的超时。 |
 | `QINGTIAN_POLL_TIMEOUT_MS` | worker | 等待 QingTian 工作流完成的超时。 |
+| `RETRY_MAX_POLL_RECOVERIES` / `RETRY_MAX_RUN_LIFETIME_SECONDS` | local / commercial Worker | 同一 `runId` 恢复轮询次数和总观察时长上限。 |
 | `MIGRATION_DB_WAIT_MAX_TRIES` | migrate | 迁移等待 MySQL 可用的重试次数。 |
 | `MIGRATION_DB_WAIT_INTERVAL_MS` | migrate | 迁移等待 MySQL 的重试间隔。 |
+
+恢复退避、Worker 租约、租约心跳和过期租约扫描周期属于内部一致性参数，已固定在
+代码中，不再通过 ConfigMap 调整。
 
 编辑 ConfigMap：
 
@@ -256,9 +284,10 @@ kubectl -n aizt01-pro scale deployment/customer-profile-api --replicas=3
 ```
 
 每个 Worker 角色默认固定 `replicas: 1`。`customer-profile-worker` 是本地角色，
-`customer-profile-worker-secondary` 是商用突发角色。两者通过 MySQL
-`SKIP LOCKED` 安全竞争。商用突发门控的高低水位状态保存在进程内，初期保持
-商用角色单副本，并优先通过 `WORKER_CONCURRENCY` 调整吞吐。
+`customer-profile-worker-secondary` 是商用分流角色。两者通过 MySQL
+`SKIP LOCKED` 安全竞争。商用 Worker 只根据当前排队数与
+`COMMERCIAL_QUEUE_THRESHOLD` 判断是否领取普通任务，初期保持商用角色单副本，
+并优先通过 `WORKER_CONCURRENCY` 调整吞吐。
 
 ## 9. 回滚
 

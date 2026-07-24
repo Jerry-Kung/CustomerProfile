@@ -5,13 +5,15 @@ from pathlib import Path
 
 from src.domain.task.models import TaskRecord
 from src.domain.task.service import TaskService
+from src.config.settings import RetryConfig
+from src.infrastructure.qingtian.errors import QingTianTimeout, QingTianWorkflowTerminated
 from src.infrastructure.workflow.errors import (
     WorkflowRequestFailed,
     WorkflowTimeout,
 )
 from src.infrastructure.workflow.output_parser import WorkflowOutputParser
 from src.worker.executor import WorkerExecutor
-from src.worker.routing import BurstGate, BurstThresholds
+from src.worker.routing import CommercialQueueGate, CommercialQueueThreshold
 
 
 class _Repo:
@@ -113,6 +115,89 @@ class _WorkflowTimeoutFail:
         raise WorkflowTimeout("timeout")
 
 
+class _RetryRepo:
+    def __init__(self, claimed: TaskRecord):
+        self.claimed = claimed
+        self.next_attempt_no = claimed.attempt_count + 1
+        self.claim_calls = 0
+        self.claim_args: list[dict] = []
+        self.reserved: list[dict] = []
+        self.persisted_runs: list[dict] = []
+        self.succeeded_claimed: list[dict] = []
+        self.scheduled: list[dict] = []
+        self.final_failures: list[dict] = []
+        self.stalled_lifetime_checks: list[dict] = []
+        self.stall_on_lifetime_check: int | None = None
+        self.lease_refreshes = 0
+        self.recoveries = 0
+
+    def claim_next_eligible(self, **kwargs):
+        self.claim_calls += 1
+        self.claim_args.append(kwargs)
+        item = self.claimed
+        self.claimed = None
+        return item
+
+    def claim_next_queued(self):
+        return None
+
+    def recover_expired_retry_leases(self, *, limit: int):
+        self.recoveries += 1
+        return 0, 0
+
+    def reserve_workflow_attempt(self, **kwargs):
+        self.reserved.append(kwargs)
+        return self.next_attempt_no
+
+    def persist_workflow_run(self, **kwargs):
+        self.persisted_runs.append(kwargs)
+        return True
+
+    def refresh_lease(self, **_kwargs):
+        self.lease_refreshes += 1
+        return True
+
+    def mark_succeeded_claimed(self, **kwargs):
+        self.succeeded_claimed.append(kwargs)
+        return True
+
+    def schedule_retry(self, **kwargs):
+        self.scheduled.append(kwargs)
+        return True
+
+    def mark_failed_claimed(self, **kwargs):
+        self.final_failures.append(kwargs)
+        return True
+
+    def mark_stalled_if_run_lifetime_exceeded(self, **kwargs):
+        self.stalled_lifetime_checks.append(kwargs)
+        return self.stall_on_lifetime_check == len(self.stalled_lifetime_checks)
+
+
+class _RecoverableWorkflow:
+    def __init__(self, *, output: str = '{"card_id":"card-1","nickname":"nick-1"}'):
+        self.output = output
+        self.submit_calls: list[dict] = []
+        self.poll_calls: list[dict] = []
+        self.poll_error: Exception | None = None
+        self.submit_error: Exception | None = None
+
+    def submit_workflow(self, **kwargs):
+        self.submit_calls.append(kwargs)
+        if self.submit_error is not None:
+            raise self.submit_error
+        return "run-new"
+
+    def poll_workflow(self, **kwargs):
+        self.poll_calls.append(kwargs)
+        callback = kwargs.get("on_poll")
+        if callback:
+            callback()
+        if self.poll_error is not None:
+            raise self.poll_error
+        return self.output
+
+
 def _logger() -> logging.Logger:
     logger = logging.getLogger("test_worker_executor")
     logger.handlers = []
@@ -129,15 +214,44 @@ def _parser() -> WorkflowOutputParser:
     return WorkflowOutputParser(schema_path=_schema_path())
 
 
-def _burst_gate(*, enabled: bool = True) -> BurstGate:
-    return BurstGate(
-        BurstThresholds(
-            enabled=enabled,
-            high_watermark=10,
-            low_watermark=3,
-            oldest_trigger_seconds=600,
-            oldest_recover_seconds=120,
-        )
+def _commercial_queue_gate() -> CommercialQueueGate:
+    return CommercialQueueGate(
+        CommercialQueueThreshold(queue_depth=5)
+    )
+
+
+def _retry_config(
+    *,
+    max_poll_recoveries: int = 3,
+    max_run_lifetime_seconds: int = 7200,
+) -> RetryConfig:
+    return RetryConfig(
+        max_poll_recoveries=max_poll_recoveries,
+        max_run_lifetime_seconds=max_run_lifetime_seconds,
+        backoff_seconds=(30, 120, 600),
+        lease_seconds=180,
+        lease_heartbeat_seconds=30,
+        recovery_interval_seconds=30,
+    )
+
+
+def _retry_task(
+    *,
+    workflow_run_id: str | None = None,
+    attempt_count: int = 0,
+    poll_recovery_count: int = 0,
+    execution_backend: str = "local",
+) -> TaskRecord:
+    return TaskRecord(
+        id=91,
+        customer_phonenumber="13800138000",
+        status="processing",
+        generation=7,
+        claim_token="claim-91",
+        execution_backend=execution_backend,
+        workflow_run_id=workflow_run_id,
+        attempt_count=attempt_count,
+        poll_recovery_count=poll_recovery_count,
     )
 
 
@@ -256,7 +370,7 @@ def test_executor_timeout_marks_failed():
     assert "WORKFLOW_TIMEOUT" in repo.failed[1]
 
 
-def test_local_worker_claims_even_when_burst_gate_is_closed():
+def test_local_worker_claims_regardless_of_commercial_queue_threshold():
     repo = _Repo(
         claimed=TaskRecord(
             id=6,
@@ -271,21 +385,21 @@ def test_local_worker_claims_even_when_burst_gate_is_closed():
         output_parser=_parser(),
         logger=_logger(),
         worker_role="local",
-        burst_gate=_burst_gate(enabled=False),
+        commercial_queue_gate=_commercial_queue_gate(),
     )
 
     assert executor.execute_once() == "succeeded"
     assert repo.claim_calls == 1
 
 
-def test_commercial_worker_does_not_claim_below_burst_threshold():
+def test_commercial_worker_does_not_claim_normal_task_below_queue_threshold():
     repo = _Repo(
         claimed=TaskRecord(
             id=7,
             customer_phonenumber="13800138000",
             status="processing",
         ),
-        queue_depth=9,
+        queue_depth=4,
         oldest_queued_age_seconds=599,
     )
     executor = WorkerExecutor(
@@ -294,21 +408,21 @@ def test_commercial_worker_does_not_claim_below_burst_threshold():
         output_parser=_parser(),
         logger=_logger(),
         worker_role="commercial",
-        burst_gate=_burst_gate(),
+        commercial_queue_gate=_commercial_queue_gate(),
     )
 
     assert executor.execute_once() == "idle"
     assert repo.claim_calls == 0
 
 
-def test_commercial_worker_claims_once_burst_threshold_is_reached():
+def test_commercial_worker_claims_normal_task_once_queue_threshold_is_reached():
     repo = _Repo(
         claimed=TaskRecord(
             id=8,
             customer_phonenumber="13800138000",
             status="processing",
         ),
-        queue_depth=10,
+        queue_depth=5,
         oldest_queued_age_seconds=20,
     )
     executor = WorkerExecutor(
@@ -317,8 +431,273 @@ def test_commercial_worker_claims_once_burst_threshold_is_reached():
         output_parser=_parser(),
         logger=_logger(),
         worker_role="commercial",
-        burst_gate=_burst_gate(),
+        commercial_queue_gate=_commercial_queue_gate(),
     )
 
     assert executor.execute_once() == "succeeded"
     assert repo.claim_calls == 1
+
+
+def test_retry_executor_persists_run_id_before_polling_and_guardedly_succeeds():
+    repo = _RetryRepo(_retry_task())
+    workflow = _RecoverableWorkflow()
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        retry_config=_retry_config(),
+    )
+
+    assert executor.execute_once() == "succeeded"
+    assert len(workflow.submit_calls) == 1
+    assert workflow.poll_calls[0]["workflow_run_id"] == "run-new"
+    assert repo.persisted_runs == [
+        {
+            "task_id": 91,
+            "generation": 7,
+            "claim_token": "claim-91",
+            "attempt_no": 1,
+            "workflow_run_id": "run-new",
+        }
+    ]
+    assert repo.lease_refreshes == 1
+    assert repo.succeeded_claimed[0]["attempt_no"] == 1
+
+
+def test_retry_executor_resumes_persisted_run_after_poll_timeout_without_submit():
+    repo = _RetryRepo(_retry_task(workflow_run_id="run-known", attempt_count=1))
+    workflow = _RecoverableWorkflow()
+    workflow.poll_error = QingTianTimeout("poll timeout", stage="poll")
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        retry_config=_retry_config(),
+    )
+
+    assert executor.execute_once() == "retrying"
+    assert workflow.submit_calls == []
+    assert repo.scheduled[0]["retain_workflow_run"] is True
+    assert repo.scheduled[0]["terminal_attempt"] is False
+    assert repo.scheduled[0]["increment_poll_recovery"] is True
+    assert repo.scheduled[0]["error_stage"] == "poll"
+
+
+def test_retry_executor_does_not_schedule_a_fourth_same_run_poll_recovery():
+    repo = _RetryRepo(
+        _retry_task(
+            workflow_run_id="run-known",
+            attempt_count=1,
+            poll_recovery_count=3,
+        )
+    )
+    workflow = _RecoverableWorkflow()
+    workflow.poll_error = QingTianTimeout("poll timeout", stage="poll")
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        retry_config=_retry_config(max_poll_recoveries=3),
+    )
+
+    assert executor.execute_once() == "failed"
+    assert workflow.submit_calls == []
+    assert len(workflow.poll_calls) == 1
+    assert repo.scheduled == []
+    assert repo.final_failures[0]["error_code"] == "QINGTIAN_RUN_STALLED"
+
+
+def test_retry_executor_stops_before_poll_when_run_lifetime_has_expired():
+    repo = _RetryRepo(_retry_task(workflow_run_id="run-known", attempt_count=1))
+    repo.stall_on_lifetime_check = 1
+    workflow = _RecoverableWorkflow()
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        retry_config=_retry_config(max_run_lifetime_seconds=7200),
+    )
+
+    assert executor.execute_once() == "failed"
+    assert workflow.submit_calls == []
+    assert workflow.poll_calls == []
+    assert repo.stalled_lifetime_checks == [
+        {
+            "task_id": 91,
+            "generation": 7,
+            "claim_token": "claim-91",
+            "attempt_no": 1,
+            "max_run_lifetime_seconds": 7200,
+        }
+    ]
+
+
+def test_retry_executor_stops_after_timeout_when_run_lifetime_expires():
+    repo = _RetryRepo(_retry_task(workflow_run_id="run-known", attempt_count=1))
+    # First check is immediately before polling; second is immediately before
+    # scheduling a recovery, which covers a 40-minute local poll timeout.
+    repo.stall_on_lifetime_check = 2
+    workflow = _RecoverableWorkflow()
+    workflow.poll_error = QingTianTimeout("poll timeout", stage="poll")
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        retry_config=_retry_config(max_run_lifetime_seconds=7200),
+    )
+
+    assert executor.execute_once() == "failed"
+    assert len(workflow.poll_calls) == 1
+    assert repo.scheduled == []
+    assert len(repo.stalled_lifetime_checks) == 2
+
+
+def test_retry_executor_does_not_blindly_resubmit_unknown_submit_timeout():
+    repo = _RetryRepo(_retry_task())
+    workflow = _RecoverableWorkflow()
+    workflow.submit_error = QingTianTimeout("submit timeout", stage="submit")
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        retry_config=_retry_config(),
+    )
+
+    assert executor.execute_once() == "failed"
+    assert repo.scheduled == []
+    assert repo.final_failures[0]["error_code"] == "QINGTIAN_SUBMIT_UNKNOWN"
+
+
+def test_retry_executor_retries_known_terminal_workflow_failure_as_new_run():
+    repo = _RetryRepo(_retry_task(workflow_run_id="run-known", attempt_count=1))
+    workflow = _RecoverableWorkflow()
+    workflow.poll_error = QingTianWorkflowTerminated("workflow failed", terminal_status="failed")
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        retry_config=_retry_config(),
+    )
+
+    assert executor.execute_once() == "retrying"
+    assert repo.scheduled[0]["retain_workflow_run"] is False
+    assert repo.scheduled[0]["terminal_attempt"] is True
+    assert repo.scheduled[0]["error_stage"] == "workflow"
+
+
+def test_qingtian_durable_retry_is_supported_by_the_commercial_worker():
+    repo = _RetryRepo(
+        _retry_task(
+            execution_backend="commercial",
+            attempt_count=2,
+        )
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=_RecoverableWorkflow(),
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        worker_role="commercial",
+        commercial_queue_gate=_commercial_queue_gate(),
+        retry_config=_retry_config(),
+    )
+
+    assert executor._supports_qingtian_retry() is True
+    assert executor.execute_once() == "succeeded"
+    assert repo.claim_args == [
+        {
+            "lease_seconds": 180,
+            "execution_backend": "commercial",
+            "allow_new_tasks": False,
+        }
+    ]
+    assert repo.reserved[0]["execution_backend"] == "commercial"
+    assert repo.reserved[0]["route_reason"] == "commercial_fallback"
+
+
+def test_second_definite_local_failure_switches_next_retry_to_commercial():
+    repo = _RetryRepo(_retry_task(workflow_run_id="run-local-2", attempt_count=2))
+    workflow = _RecoverableWorkflow()
+    workflow.poll_error = QingTianWorkflowTerminated(
+        "workflow failed",
+        terminal_status="failed",
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        worker_role="local",
+        retry_config=_retry_config(),
+    )
+
+    assert executor.execute_once() == "retrying"
+    assert repo.scheduled[0]["next_execution_backend"] == "commercial"
+    assert repo.scheduled[0]["retain_workflow_run"] is False
+    assert repo.scheduled[0]["terminal_attempt"] is True
+
+
+def test_first_definite_local_failure_stays_on_local_backend():
+    repo = _RetryRepo(_retry_task(workflow_run_id="run-local-1", attempt_count=1))
+    workflow = _RecoverableWorkflow()
+    workflow.poll_error = QingTianWorkflowTerminated(
+        "workflow failed",
+        terminal_status="failed",
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        worker_role="local",
+        retry_config=_retry_config(),
+    )
+
+    assert executor.execute_once() == "retrying"
+    assert repo.scheduled[0]["next_execution_backend"] == "local"
+
+
+def test_commercial_fallback_failure_stops_after_one_commercial_attempt():
+    repo = _RetryRepo(
+        _retry_task(
+            workflow_run_id="run-commercial-1",
+            attempt_count=3,
+            execution_backend="commercial",
+        )
+    )
+    workflow = _RecoverableWorkflow()
+    workflow.poll_error = QingTianWorkflowTerminated(
+        "commercial workflow failed",
+        terminal_status="failed",
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        worker_role="commercial",
+        commercial_queue_gate=_commercial_queue_gate(),
+        retry_config=_retry_config(),
+    )
+
+    assert executor.execute_once() == "failed"
+    assert repo.scheduled == []
+    assert repo.final_failures[0]["error_code"] == "QINGTIAN_RETRY_EXHAUSTED"

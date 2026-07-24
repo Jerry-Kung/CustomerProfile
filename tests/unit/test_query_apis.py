@@ -73,6 +73,13 @@ class _TaskService:
                 updated_at="2026-03-23T12:02:00",
                 task_type="customer_profile",
             ),
+            ("13800000004", "customer_profile"): TaskRecord(
+                id=5,
+                customer_phonenumber="13800000004",
+                status="retry_wait",
+                updated_at="2026-03-23T12:03:00",
+                task_type="customer_profile",
+            ),
             ("13800000001", "invitation_strategy"): TaskRecord(
                 id=4,
                 customer_phonenumber="13800000001",
@@ -173,6 +180,15 @@ def test_get_result_failed():
     assert body["code"] == "DIFY_TIMEOUT"
     assert body["status"] == "failed"
     assert body["task_type"] == "customer_profile"
+
+
+def test_get_result_retry_wait_is_kept_as_existing_processing_contract():
+    client = _client()
+    response = client.get("/v1/customer-profile/tasks/13800000004/result")
+    body = response.json()
+    assert response.status_code == 202
+    assert body["code"] == "TASK_PROCESSING"
+    assert body["status"] == "processing"
 
 
 def test_get_result_not_found():

@@ -42,15 +42,6 @@ def _env_str(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()
 
 
-def _env_bool(key: str, default: bool) -> bool:
-    raw = os.getenv(key, "true" if default else "false").strip().lower()
-    if raw in {"1", "true", "yes", "on"}:
-        return True
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(f"invalid boolean value for {key}: {raw}")
-
-
 @dataclass(frozen=True)
 class DifyConfig:
     base_url: str
@@ -105,12 +96,27 @@ class WorkerConfig:
 
 
 @dataclass(frozen=True)
-class BurstConfig:
-    enabled: bool = False
-    queue_high_watermark: int = 10
-    queue_low_watermark: int = 3
-    oldest_wait_seconds: int = 600
-    oldest_recover_seconds: int = 120
+class CommercialQueueConfig:
+    """When this many normal tasks are queued, the commercial Worker may help."""
+
+    threshold: int = 5
+
+
+@dataclass(frozen=True)
+class RetryConfig:
+    """Repository-owned retry controls for recoverable QingTian workflow runs.
+
+    This is the default QingTian execution path: a returned ``runId`` is
+    persisted and can be polled again after a process or network failure.
+    No workflow-side change is required.
+    """
+
+    max_poll_recoveries: int = 3
+    max_run_lifetime_seconds: int = 7200
+    backoff_seconds: tuple[int, ...] = (30, 120, 600)
+    lease_seconds: int = 180
+    lease_heartbeat_seconds: int = 30
+    recovery_interval_seconds: int = 30
 
 
 @dataclass(frozen=True)
@@ -146,7 +152,8 @@ class AppConfig:
     tos: TosConfig
     migration: MigrationConfig
     task_queue_max_waiting: int = 500
-    burst: BurstConfig = field(default_factory=BurstConfig)
+    commercial_queue: CommercialQueueConfig = field(default_factory=CommercialQueueConfig)
+    retry: RetryConfig = field(default_factory=RetryConfig)
 
 
 def _default_task_upload_dir() -> Path:
@@ -174,7 +181,8 @@ def load_config() -> AppConfig:
     dify_required = workflow_platform == "dify"
     qingtian_required = workflow_platform == "qingtian"
     worker_role = _worker_role()
-    burst_config = _burst_config()
+    commercial_queue_config = _commercial_queue_config()
+    retry_config = _retry_config()
 
     legacy_dify_api_key = os.getenv("DIFY_API_KEY", "").strip()
     dify_api_key_test = os.getenv("DIFY_API_KEY_TEST", "").strip() or legacy_dify_api_key
@@ -248,7 +256,8 @@ def load_config() -> AppConfig:
             db_wait_interval_seconds=_env_int("MIGRATION_DB_WAIT_INTERVAL_MS", 2000) / 1000.0,
         ),
         task_queue_max_waiting=_task_queue_max_waiting(),
-        burst=burst_config,
+        commercial_queue=commercial_queue_config,
+        retry=retry_config,
     )
 
 
@@ -272,22 +281,11 @@ def _worker_role() -> str:
     return value
 
 
-def _burst_config() -> BurstConfig:
-    high = _env_int("BURST_QUEUE_HIGH_WATERMARK", 10)
-    low = _env_int("BURST_QUEUE_LOW_WATERMARK", 3)
-    oldest_wait = _env_int("BURST_OLDEST_WAIT_SECONDS", 600)
-    oldest_recover = _env_int("BURST_OLDEST_RECOVER_SECONDS", 120)
-    if low > high:
-        raise ValueError("BURST_QUEUE_LOW_WATERMARK must be <= BURST_QUEUE_HIGH_WATERMARK")
-    if min(high, low, oldest_wait, oldest_recover) < 0:
-        raise ValueError("burst thresholds must be >= 0")
-    return BurstConfig(
-        enabled=_env_bool("BURST_ENABLED", False),
-        queue_high_watermark=high,
-        queue_low_watermark=low,
-        oldest_wait_seconds=oldest_wait,
-        oldest_recover_seconds=oldest_recover,
-    )
+def _commercial_queue_config() -> CommercialQueueConfig:
+    threshold = _env_int("COMMERCIAL_QUEUE_THRESHOLD", 5)
+    if threshold < 1:
+        raise ValueError("COMMERCIAL_QUEUE_THRESHOLD must be >= 1")
+    return CommercialQueueConfig(threshold=threshold)
 
 
 def _task_queue_max_waiting() -> int:
@@ -295,6 +293,19 @@ def _task_queue_max_waiting() -> int:
     if n < 1:
         raise ValueError("TASK_QUEUE_MAX_WAITING must be >= 1")
     return n
+
+
+def _retry_config() -> RetryConfig:
+    max_poll_recoveries = _env_int("RETRY_MAX_POLL_RECOVERIES", 3)
+    max_run_lifetime_seconds = _env_int("RETRY_MAX_RUN_LIFETIME_SECONDS", 7200)
+    if max_poll_recoveries < 1:
+        raise ValueError("RETRY_MAX_POLL_RECOVERIES must be >= 1")
+    if max_run_lifetime_seconds < 1:
+        raise ValueError("RETRY_MAX_RUN_LIFETIME_SECONDS must be >= 1")
+    return RetryConfig(
+        max_poll_recoveries=max_poll_recoveries,
+        max_run_lifetime_seconds=max_run_lifetime_seconds,
+    )
 
 
 def _migration_db_wait_max_tries() -> int:

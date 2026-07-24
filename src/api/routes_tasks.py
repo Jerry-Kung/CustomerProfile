@@ -105,7 +105,7 @@ def list_tasks(
                 customer_phonenumber=item.customer_phonenumber,
                 card_id=item.card_id,
                 nickname=item.nickname,
-                status=item.status,
+                status=_public_task_status(item.status),
                 updated_at=item.updated_at,
                 task_type=item.task_type,
             )
@@ -148,13 +148,15 @@ def get_task_result(
                 "task_type": normalized_task_type,
             },
         )
-    if item.status in {"queued", "processing"}:
+    if item.status in {"queued", "processing", "retry_wait"}:
         code = "TASK_QUEUED" if item.status == "queued" else "TASK_PROCESSING"
         payload = TaskResultInProgressResponse(
             code=code,
             message="task is still running",
             customer_phonenumber=item.customer_phonenumber,
-            status=item.status,
+            # retry_wait is intentionally internal. Existing callers keep the
+            # same HTTP 202 / processing contract and need no changes.
+            status=_public_task_status(item.status),
             updated_at=item.updated_at,
             task_type=item.task_type,
         )
@@ -200,3 +202,7 @@ def _extract_error_code(error_message: str | None) -> str:
         if error_message.startswith(code):
             return code
     return "TASK_FAILED"
+
+
+def _public_task_status(status: str) -> str:
+    return "processing" if status == "retry_wait" else status

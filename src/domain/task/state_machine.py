@@ -2,7 +2,8 @@ from __future__ import annotations
 
 ALLOWED_TRANSITIONS = {
     "queued": {"processing"},
-    "processing": {"succeeded", "failed"},
+    "processing": {"retry_wait", "succeeded", "failed"},
+    "retry_wait": {"processing", "failed"},
     "succeeded": set(),
     "failed": set(),
 }

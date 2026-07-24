@@ -105,6 +105,42 @@ def test_happy_path_submit_then_poll_success(monkeypatch):
     assert calls[1].json_body == {"RunID": "run-123", "UserID": "klh", "AppKey": "qt-TEST-KEY"}
 
 
+def test_submit_workflow_returns_run_id_without_starting_poll(monkeypatch):
+    holder = _install(monkeypatch, post_bodies=[{"runId": "run-submit-only"}])
+    client = QingTianClient(config=_config())
+
+    run_id = client.submit_workflow(customer_phonenumber="13800138000")
+
+    assert run_id == "run-submit-only"
+    calls = holder["client"].calls
+    assert len(calls) == 1
+    assert calls[0].url.endswith(RUN_PATH)
+
+
+def test_poll_workflow_reuses_existing_run_id_and_invokes_lease_callback(monkeypatch):
+    holder = _install(
+        monkeypatch,
+        post_bodies=[
+            {"status": "processing"},
+            {"status": "success", "output": '{"card_id":"c","nickname":"n"}'},
+        ],
+    )
+    client = QingTianClient(config=_config())
+    heartbeats: list[str] = []
+
+    result = client.poll_workflow(
+        workflow_run_id="run-persisted",
+        on_poll=lambda: heartbeats.append("renew"),
+    )
+
+    assert result == '{"card_id":"c","nickname":"n"}'
+    calls = holder["client"].calls
+    assert len(calls) == 2
+    assert all(call.url.endswith(QUERY_PATH) for call in calls)
+    assert all(call.json_body["RunID"] == "run-persisted" for call in calls)
+    assert heartbeats == ["renew", "renew"]
+
+
 def test_production_work_env_uses_production_key(monkeypatch):
     holder = _install(
         monkeypatch,

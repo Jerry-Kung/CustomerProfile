@@ -34,6 +34,7 @@ class WorkerRunner:
         self._stats = {
             "idle": 0,
             "succeeded": 0,
+            "retrying": 0,
             "failed": 0,
             "error": 0,
             "execute_count": 0,
@@ -77,6 +78,7 @@ class WorkerRunner:
             self._stats = {
                 "idle": 0,
                 "succeeded": 0,
+                "retrying": 0,
                 "failed": 0,
                 "error": 0,
                 "execute_count": 0,
@@ -92,11 +94,12 @@ class WorkerRunner:
             except Exception:
                 self._logger.exception("worker_operational_snapshot_failed")
         self._logger.info(
-            "worker_runtime_summary 说明=Worker队列运行概览 interval_seconds=%s inflight_threads=%s idle_polls=%s cycle_succeeded=%s cycle_failed=%s cycle_errors=%s average_execute_elapsed_ms=%s queued_count=%s processing_count=%s total_succeeded=%s total_failed=%s oldest_queued_age_seconds=%s oldest_processing_age_seconds=%s processing_over_40m_count=%s",
+            "worker_runtime_summary 说明=Worker队列运行概览 interval_seconds=%s inflight_threads=%s idle_polls=%s cycle_succeeded=%s cycle_retrying=%s cycle_failed=%s cycle_errors=%s average_execute_elapsed_ms=%s queued_count=%s retry_wait_count=%s processing_count=%s total_succeeded=%s total_failed=%s oldest_queued_age_seconds=%s oldest_processing_age_seconds=%s processing_over_40m_count=%s",
             interval_seconds,
             inflight,
             stats.get("idle", 0),
             stats.get("succeeded", 0),
+            stats.get("retrying", 0),
             stats.get("failed", 0),
             stats.get("error", 0),
             (
@@ -105,6 +108,7 @@ class WorkerRunner:
                 else None
             ),
             snapshot.get("queue_depth"),
+            snapshot.get("retry_wait_count"),
             snapshot.get("processing_count"),
             snapshot.get("succeeded_count"),
             snapshot.get("failed_count"),
