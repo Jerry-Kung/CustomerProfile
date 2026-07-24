@@ -131,6 +131,7 @@ docker compose up -d
 docker compose ps
 docker compose logs -f api
 docker compose logs -f worker
+docker compose logs -f commercial-worker
 ```
 
 健康检查（默认映射宿主机 **8000** 时）：

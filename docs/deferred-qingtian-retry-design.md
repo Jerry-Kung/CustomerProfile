@@ -1,9 +1,13 @@
-# 擎天可靠重试方案（延后实施）
+# 擎天可靠重试方案（分阶段实施）
 
-> 状态：仅设计留档，当前版本未实现、未启用。当前运行时仍是一次性执行：
-> `queued -> processing -> succeeded | failed`。本文涉及的数据库字段、attempts
-> 表、租约、run_id 恢复、自动重试、跨模型失败兜底、熔断和商用预算均不属于
-> 当前商业 API 积压分流版本。
+> 状态：**部分实施，擎天模式默认启用**。本仓库已实现纯后端的擎天 `runId` 持久化、同
+> `runId` 轮询恢复、`retry_wait`、租约、generation/claim token、有界新运行重试、
+> 执行通道路由，以及“本地明确失败两次后切商用一次”的跨工作流兜底；
+> 同一 `runId` 的恢复轮询次数/观察生命周期也有独立上限。
+> 该实现不改擎天工作流、变量或接口；部署前必须先完成 005 迁移。
+>
+> 商用预算、熔断，以及依赖擎天幂等/查重能力的“未知提交自动重试”仍仅是后续设计，
+> 尚未启用。跨工作流兜底随耐久重试自动生效，不再提供单独开关。
 
 ## 1. 背景与目标
 
@@ -12,12 +16,12 @@
 - `local`：使用本地模型，作为默认执行通道。
 - `commercial`：使用商用 API 模型，当前仅在队列积压时承担突发流量。
 
-当前 Worker 从 MySQL 队列领取任务后，会在一次同步调用中完成擎天提交和轮询。任意请求、轮询或解析异常都会立即把主任务写成 `failed`，没有自动重试。擎天 `run_id` 也只存在于进程内，Worker 重启后无法恢复原运行。
+改造前，Worker 从 MySQL 队列领取任务后会在一次同步调用中完成擎天提交和轮询。任意请求、轮询或解析异常都会立即把主任务写成 `failed`，没有自动重试；擎天 `run_id` 也只存在于进程内，Worker 重启后无法恢复原运行。本次已实现其中的本仓库侧持久化与恢复子集，完整跨模型方案仍在后文留作设计。
 
 未来重试版本的目标：
 
 1. 正常情况下只使用本地模型。
-2. 队列达到高水位时，商用模型分担积压。
+2. 排队任务数达到配置阈值时，商用模型分担积压。
 3. 区分提交失败、轮询失败、工作流终止失败、输出失败和数据库失败。
 4. 已获得 `run_id` 时只恢复轮询，不重复提交工作流。
 5. 单次执行失败不立即把主任务标记为最终失败。
@@ -69,7 +73,7 @@ API -> customer_profile_tasks
              |     - 处理 local 重试和 local run_id 恢复
              |
              +-> commercial Worker
-                   - 高水位时领取普通新任务
+                   - 排队数达到阈值时领取普通新任务
                    - 始终可处理已明确分配给 commercial 的恢复/兜底任务
                    - 受并发、熔断和预算上限约束
 ```
@@ -78,8 +82,7 @@ API -> customer_profile_tasks
 
 路由决策发生在领取任务时，不在 API 提交时提前决定，确保使用最新队列压力。
 
-当前版本只落地共享队列的高低水位积压分流。本文其余能力都应在未来独立开发，
-不得把其中的配置项当作当前可用功能。
+当前版本已落地单阈值积压分流、耐久重试和跨工作流兜底；熔断与预算仍是后续能力。
 
 ## 4. 状态模型
 
@@ -112,7 +115,9 @@ retry_wait  -> failed
 - `succeeded`：最终成功。
 - `failed`：不可重试、重试路径耗尽、超过总生命周期或人工终止。
 
-对外 API 可以把 `retry_wait` 映射为 HTTP 202 的 `processing`，同时返回 `TASK_RETRYING` 和 `next_retry_at`，避免破坏现有前端状态枚举。
+当前实现将 `retry_wait` 映射为既有 HTTP 202 的 `processing` / `TASK_PROCESSING`，不向
+调用方暴露新状态或字段，因此无需改前端或上下游。未来若要展示退避进度，可另行扩展
+为 `TASK_RETRYING` 和 `next_retry_at`，但这不属于本次兼容性实现。
 
 ## 5. 数据模型
 
@@ -126,6 +131,8 @@ retry_wait  -> failed
 | `execution_backend` | 当前执行通道：`local` / `commercial` |
 | `workflow_run_id` | 当前擎天运行 ID |
 | `attempt_count` | 已创建的新工作流运行次数 |
+| `poll_recovery_count` | 同一 `runId` 已安排的恢复轮询次数；不计入 `attempt_count` |
+| `workflow_run_started_at` | 当前 `runId` 持久化的时间，用于计算同一运行的观察生命周期 |
 | `next_retry_at` | 延迟重试可领取时间 |
 | `last_error_code` | 最近错误码 |
 | `last_error_stage` | `submit` / `poll` / `workflow` / `output` / `db` |
@@ -186,7 +193,12 @@ execution_id = task-{task_id}-generation-{generation}-attempt-{attempt_no}
 retry_wait -> resume_existing_run
 ```
 
-继续查询相同 `run_id`，不增加 `attempt_count`，不产生新的模型调用。
+继续查询相同 `run_id`，不增加 `attempt_count`，不产生新的模型调用。当前已落地的
+纯后端保护还会把每次“因本地轮询错误而安排的下一次恢复轮询”计入
+`poll_recovery_count`：默认首次轮询后最多再安排 3 次，并且从 `runId` 落库起最多
+观察 2 小时（均可由环境变量配置，以先达到的上限为准）。达到任一上限会终止为
+`QINGTIAN_RUN_STALLED`，保留原 `runId` 供排查，不会因为本地看不到终态就自动提交
+一个新运行。
 
 ### 6.3 工作流明确终止
 
@@ -201,7 +213,8 @@ retry_wait -> resume_existing_run
 - 字符串不是合法 JSON。
 - JSON 根节点不是对象。
 
-本地输出失败优先切换商用模型一次；商用输出失败优先回退本地模型，不对同一模型连续盲重试。
+本地输出失败按一次明确失败计数：第一次继续本地，第二次切换商用一次。商用输出失败
+直接终止，不再回退本地，避免在两个通道间循环。
 
 ### 6.5 数据库写入失败
 
@@ -226,6 +239,10 @@ local #1
   -> succeeded / failed
 ```
 
+这里的“失败”只包括擎天已经返回终止态、可安全重提的提交失败，以及已经拿到结果但
+输出解析/校验失败。轮询网络错误或本地 40 分钟轮询窗口耗尽会保留原 `runId` 恢复；
+提交结果未知、同一 `runId` 达到恢复次数/生命周期上限时也不会切商用，以免创建重复任务。
+
 因积压初始走商用：
 
 ```text
@@ -245,32 +262,22 @@ commercial #1
 
 ## 8. 动态分流
 
-### 8.1 高低水位
+### 8.1 单一排队阈值
 
 初始参数：
 
 ```text
-BURST_QUEUE_HIGH_WATERMARK=10
-BURST_QUEUE_LOW_WATERMARK=3
-BURST_OLDEST_WAIT_SECONDS=600
-BURST_OLDEST_RECOVER_SECONDS=120
+COMMERCIAL_QUEUE_THRESHOLD=5
 ```
 
-进入突发状态：
+商用 Worker 是否领取普通新任务只判断：
 
 ```text
-queue_depth >= 10
-OR oldest_queued_age >= 10 分钟
+queue_depth >= 5
 ```
 
-退出突发状态：
-
-```text
-queue_depth <= 3
-AND oldest_queued_age <= 2 分钟
-```
-
-本地 Worker 始终领取普通新任务。商用 Worker 只有在突发状态下领取普通新任务，但明确分配给商用的恢复和兜底任务不受高水位限制。
+低于阈值就不领取普通任务。本地 Worker 始终领取普通新任务；明确分配给商用的恢复和
+兜底任务不受阈值限制。商用 Worker 随部署默认启动，不再提供独立启停开关。
 
 ### 8.2 领取优先级
 
@@ -278,7 +285,7 @@ AND oldest_queued_age <= 2 分钟
 
 1. 已有对应后端 `run_id` 的到期恢复任务。
 2. 已到 `next_retry_at`、明确分配到该后端的重试任务。
-3. 普通新任务；商用后端需满足突发条件。
+3. 普通新任务；商用后端需满足排队数阈值。
 
 领取和写入 `claim_token`、租约、执行来源必须在同一事务完成。
 
@@ -300,11 +307,13 @@ AND lease_expires_at < NOW()
 
 恢复策略：
 
-- 有 `workflow_run_id`：进入 `retry_wait`，继续轮询原运行。
+- 有 `workflow_run_id`：进入 `retry_wait`，继续轮询原运行；下次领取前和一次本地
+  轮询失败后都会以数据库时间检查 `RETRY_MAX_RUN_LIFETIME_SECONDS`。超过上限则终止为
+  `QINGTIAN_RUN_STALLED`，不会创建新运行。
 - 无 `workflow_run_id` 且确认提交未成功：安排新提交。
 - 无 `workflow_run_id` 且提交结果未知：先按幂等执行 ID 查重；无法查重时进入受限重试并记录重复风险。
-- 目标 Worker 未启动或商用预算耗尽时，监护器仍会把超过任务总生命周期的
-  `retry_wait` 任务终止为 `TASK_LIFETIME_EXCEEDED`，不会无限等待。
+- 面向“Worker 长期未启动/商用预算耗尽”的通用任务生命周期监护器仍是后续设计；
+  当前已实现的边界只覆盖被本地擎天 Worker 再次领取的同一 `runId` 轮询恢复。
 
 旧 Worker 写回时必须匹配：
 
@@ -348,11 +357,9 @@ COMMERCIAL_MAX_CONCURRENCY=1（初期）
 COMMERCIAL_MAX_ATTEMPTS_PER_TASK=1
 COMMERCIAL_MAX_CALLS_PER_HOUR=<配置>
 COMMERCIAL_MAX_CALLS_PER_DAY=<配置>
-COMMERCIAL_FALLBACK_ENABLED=true
 ```
 
 预算只限制创建新的商用运行；继续轮询已有商用 `run_id` 不受限制。
-该开关的代码默认值为 `false`；只有确认商用 Worker 已部署后才设为 `true`。
 
 达到预算后：
 
@@ -427,8 +434,7 @@ next_retry_at
 本地并发：5
 商用并发：1
 
-积压启动：queued >= 10 或最老等待 >= 10 分钟
-积压停止：queued <= 3 且最老等待 <= 2 分钟
+商用普通任务分流：queued >= 5
 
 单任务最大新运行：3
 本地最大新运行：2
@@ -450,27 +456,20 @@ next_retry_at
 2. 先写擎天 submit/poll 分离测试，再重构客户端。
 3. 先写 run_id 持久化、租约、claim token 和恢复测试，再实现仓储事务。
 4. 先写失败分类、退避和最大次数测试，再实现 RetryPolicy。
-5. 先写本地常驻、商用高低水位、明确重试绕过水位测试，再实现 RoutingPolicy。
-6. 先写跨模型路径、熔断和预算测试，再接入 WorkerExecutor。
+5. 先写本地常驻、商用单阈值、明确重试绕过阈值测试，再实现 RoutingPolicy。
+6. 先写跨模型路径测试并接入 WorkerExecutor；熔断和预算继续独立实施。
 7. 更新 API、Deployment 和运维文档。
 8. 运行单元测试、契约测试、迁移测试和 MySQL 并发集成测试。
 
 ## 16. 上线顺序
 
 1. 先部署向后兼容的数据库迁移。
-2. 部署支持新字段但关闭自动重试和商用突发的代码。
-3. 开启 run_id 持久化与同 run_id 恢复。
-4. 开启本地模型同后端重试。
+2. 部署本地和商用 Worker；擎天耐久重试与 run_id 恢复默认生效。
+3. 验证 run_id 持久化与同 run_id 恢复。
+4. 验证本地模型同后端重试。
 5. 以商用并发 1 开启积压分流。
-6. 开启跨模型兜底。
+6. 验证固定的本地两次、商用一次跨模型兜底。
 7. 开启熔断和预算硬限制。
 
-未来版本紧急回滚可关闭：
-
-```text
-RETRY_ENABLED=false
-BURST_ENABLED=false
-COMMERCIAL_FALLBACK_ENABLED=false
-```
-
-已有 `run_id` 的轮询恢复仍应保留，不能因为关闭新调用而放弃正在运行的任务。
+紧急回滚时先停止新任务进入，等待已有 `run_id` 处理完，再回滚两个 Worker 镜像；
+不要通过删除数据库字段或直接修改任务状态来关闭重试。

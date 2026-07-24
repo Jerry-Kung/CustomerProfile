@@ -65,12 +65,17 @@ def redact_config(config: AppConfig) -> dict[str, Any]:
             "poll_interval_seconds": config.worker.poll_interval_seconds,
             "role": config.worker.role,
         },
-        "burst": {
-            "enabled": config.burst.enabled,
-            "queue_high_watermark": config.burst.queue_high_watermark,
-            "queue_low_watermark": config.burst.queue_low_watermark,
-            "oldest_wait_seconds": config.burst.oldest_wait_seconds,
-            "oldest_recover_seconds": config.burst.oldest_recover_seconds,
+        "commercial_queue": {
+            "threshold": config.commercial_queue.threshold,
+        },
+        "retry": {
+            "workflow_attempt_policy": "local,local,commercial",
+            "max_poll_recoveries": config.retry.max_poll_recoveries,
+            "max_run_lifetime_seconds": config.retry.max_run_lifetime_seconds,
+            "backoff_seconds": list(config.retry.backoff_seconds),
+            "lease_seconds": config.retry.lease_seconds,
+            "lease_heartbeat_seconds": config.retry.lease_heartbeat_seconds,
+            "recovery_interval_seconds": config.retry.recovery_interval_seconds,
         },
     }
 

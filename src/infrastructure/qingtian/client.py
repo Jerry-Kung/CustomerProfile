@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -15,6 +15,7 @@ from src.infrastructure.qingtian.errors import (
     QingTianOutputInvalidJson,
     QingTianRequestFailed,
     QingTianTimeout,
+    QingTianWorkflowTerminated,
 )
 
 _log = logging.getLogger(__name__)
@@ -25,6 +26,18 @@ QUERY_PATH = "/query_run_app_process"
 _NON_TERMINAL_STATUSES = {"to_start", "processing"}
 _SUCCESS_STATUS = "success"
 _FAILURE_STATUSES = {"failed", "stopped", "interrupted", "timeout"}
+
+
+def _parse_retry_after_seconds(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        seconds = int(value.strip())
+    except ValueError:
+        # HTTP-date values are intentionally ignored; the worker's configured
+        # bounded backoff remains safe when the proxy does not send delta-seconds.
+        return None
+    return seconds if seconds >= 0 else None
 
 
 @dataclass
@@ -40,6 +53,13 @@ class QingTianClient:
         batch_id: str | None = None,
         task_type: str = "customer_profile",
     ) -> str:
+        """Legacy convenience path: submit and poll in one process.
+
+        Retry-enabled workers use :meth:`submit_workflow` and
+        :meth:`poll_workflow` separately so the returned runId can be written to
+        MySQL before polling starts.  Keeping this method preserves the existing
+        platform-neutral ``WorkflowClient`` contract for non-retry deployments.
+        """
         workflow_start = time.perf_counter()
         api_key = self._pick_api_key(task_type=task_type, work_env=work_env)
         headers = {
@@ -72,72 +92,217 @@ class QingTianClient:
             sorted(input_data.keys()),
         )
 
-        try:
-            with httpx.Client(timeout=None) as client:
-                submit_start = time.perf_counter()
-                run_id = self._submit_workflow(
-                    client=client,
-                    url=run_url,
-                    body=run_body,
-                    headers=headers,
-                    timeout=timeout_submit,
-                )
-                if not run_id:
-                    raise QingTianRequestFailed("runId missing from /run_app_workflow response")
-                _log.info(
-                    "qingtian_workflow_submitted 说明=擎天任务提交成功，开始轮询同一个运行ID run_id=%s submit_elapsed_ms=%s",
-                    run_id,
-                    elapsed_ms(submit_start),
-                )
-                output = self._poll_run_result(
-                    client=client,
-                    url=query_url,
-                    run_id=run_id,
-                    api_key=api_key,
-                    headers=headers,
-                    poll_timeout_sec=poll_timeout_sec,
-                    timeout=timeout_poll,
-                )
-                _log.info(
-                    "qingtian_run_workflow_completed run_id=%s status=success total_elapsed_ms=%s output_size_bytes=%s",
-                    run_id,
-                    elapsed_ms(workflow_start),
-                    len(output.encode("utf-8")),
-                )
-                return output
-        except httpx.TimeoutException as exc:
-            _log.warning(
-                "qingtian_http_timeout phase=request error_type=%s total_elapsed_ms=%s",
-                type(exc).__name__,
-                elapsed_ms(workflow_start),
+        with httpx.Client(timeout=None) as client:
+            submit_start = time.perf_counter()
+            run_id = self._submit_with_client(
+                client=client,
+                url=run_url,
+                body=run_body,
+                headers=headers,
+                timeout=timeout_submit,
+                started_at=workflow_start,
             )
-            raise QingTianTimeout("qingtian request timed out") from exc
-        except httpx.HTTPStatusError as exc:
+            _log.info(
+                "qingtian_workflow_submitted 说明=擎天任务提交成功，开始轮询同一个运行ID run_id=%s submit_elapsed_ms=%s",
+                run_id,
+                elapsed_ms(submit_start),
+            )
+            output = self._poll_with_client(
+                client=client,
+                url=query_url,
+                run_id=run_id,
+                api_key=api_key,
+                headers=headers,
+                poll_timeout_sec=poll_timeout_sec,
+                timeout=timeout_poll,
+                started_at=workflow_start,
+            )
+            _log.info(
+                "qingtian_run_workflow_completed run_id=%s status=success total_elapsed_ms=%s output_size_bytes=%s",
+                run_id,
+                elapsed_ms(workflow_start),
+                len(output.encode("utf-8")),
+            )
+            return output
+
+    def submit_workflow(
+        self,
+        *,
+        customer_phonenumber: str,
+        work_env: str = "test",
+        batch_id: str | None = None,
+        task_type: str = "customer_profile",
+    ) -> str:
+        """Start a QingTian workflow and return its runId without polling it."""
+        started_at = time.perf_counter()
+        api_key = self._pick_api_key(task_type=task_type, work_env=work_env)
+        input_data = self._build_inputs(
+            customer_phonenumber=customer_phonenumber,
+            work_env=work_env,
+            batch_id=batch_id,
+        )
+        run_url = f"{self.config.base_url.rstrip('/')}{RUN_PATH}"
+        run_parts = urlparse(run_url)
+        _log.info(
+            "qingtian_submit_started customer_phone_masked=%s endpoint_host=%s endpoint_path=%s input_keys=%s",
+            mask_phone(customer_phonenumber),
+            run_parts.netloc,
+            run_parts.path,
+            sorted(input_data.keys()),
+        )
+        headers = {"Apikey": api_key, "Content-Type": "application/json"}
+        body: dict[str, Any] = {
+            "InputData": json.dumps(input_data, ensure_ascii=False),
+            "UserID": self.config.user_id,
+            "AppKey": api_key,
+        }
+        timeout = httpx.Timeout(connect=20.0, read=120.0, write=120.0, pool=20.0)
+        with httpx.Client(timeout=None) as client:
+            return self._submit_with_client(
+                client=client,
+                url=run_url,
+                body=body,
+                headers=headers,
+                timeout=timeout,
+                started_at=started_at,
+            )
+
+    def poll_workflow(
+        self,
+        *,
+        workflow_run_id: str,
+        work_env: str = "test",
+        task_type: str = "customer_profile",
+        on_poll: Callable[[], None] | None = None,
+    ) -> str:
+        """Poll a previously acknowledged QingTian run without resubmitting it."""
+        started_at = time.perf_counter()
+        api_key = self._pick_api_key(task_type=task_type, work_env=work_env)
+        headers = {"Apikey": api_key, "Content-Type": "application/json"}
+        query_url = f"{self.config.base_url.rstrip('/')}{QUERY_PATH}"
+        timeout = httpx.Timeout(connect=20.0, read=120.0, write=30.0, pool=20.0)
+        with httpx.Client(timeout=None) as client:
+            return self._poll_with_client(
+                client=client,
+                url=query_url,
+                run_id=workflow_run_id,
+                api_key=api_key,
+                headers=headers,
+                poll_timeout_sec=max(10.0, self.config.poll_timeout_ms / 1000),
+                timeout=timeout,
+                started_at=started_at,
+                on_poll=on_poll,
+            )
+
+    def _submit_with_client(
+        self,
+        *,
+        client: httpx.Client,
+        url: str,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        timeout: httpx.Timeout,
+        started_at: float,
+    ) -> str:
+        try:
+            run_id = self._submit_workflow(
+                client=client,
+                url=url,
+                body=body,
+                headers=headers,
+                timeout=timeout,
+            )
+            if not run_id:
+                raise QingTianRequestFailed(
+                    "runId missing from /run_app_workflow response",
+                    stage="submit",
+                )
+            return run_id
+        except (QingTianRequestFailed, QingTianTimeout):
+            raise
+        except httpx.HTTPError as exc:
+            self._raise_http_error(exc, stage="submit", started_at=started_at)
+
+    def _poll_with_client(
+        self,
+        *,
+        client: httpx.Client,
+        url: str,
+        run_id: str,
+        api_key: str,
+        headers: dict[str, str],
+        poll_timeout_sec: float,
+        timeout: httpx.Timeout,
+        started_at: float,
+        on_poll: Callable[[], None] | None = None,
+    ) -> str:
+        try:
+            return self._poll_run_result(
+                client=client,
+                url=url,
+                run_id=run_id,
+                api_key=api_key,
+                headers=headers,
+                poll_timeout_sec=poll_timeout_sec,
+                timeout=timeout,
+                on_poll=on_poll,
+            )
+        except (QingTianRequestFailed, QingTianTimeout, QingTianOutputInvalidJson):
+            raise
+        except httpx.HTTPError as exc:
+            self._raise_http_error(exc, stage="poll", started_at=started_at)
+
+    def _raise_http_error(self, exc: httpx.HTTPError, *, stage: str, started_at: float) -> None:
+        if isinstance(exc, httpx.TimeoutException):
+            _log.warning(
+                "qingtian_http_timeout phase=%s error_type=%s total_elapsed_ms=%s",
+                stage,
+                type(exc).__name__,
+                elapsed_ms(started_at),
+            )
+            raise QingTianTimeout(f"qingtian {stage} request timed out", stage=stage) from exc
+        if isinstance(exc, httpx.HTTPStatusError):
             body_preview = ""
             try:
                 body_preview = (exc.response.text or "")[:800]
             except Exception:
                 pass
+            status_code = exc.response.status_code
+            retry_after = _parse_retry_after_seconds(exc.response.headers.get("Retry-After"))
             _log.warning(
-                "qingtian_http_error status=%s endpoint_host=%s endpoint_path=%s response_request_id=%s detail=%s total_elapsed_ms=%s",
-                exc.response.status_code,
+                "qingtian_http_error phase=%s status=%s endpoint_host=%s endpoint_path=%s response_request_id=%s detail=%s total_elapsed_ms=%s",
+                stage,
+                status_code,
                 exc.request.url.host,
                 exc.request.url.path,
                 exc.response.headers.get("x-request-id") or exc.response.headers.get("request-id"),
                 safe_text(body_preview or exc, 800),
-                elapsed_ms(workflow_start),
+                elapsed_ms(started_at),
             )
+            # Only an explicit 429 is treated as safe to resubmit without a
+            # remote id.  A 5xx might have created a run before failing to
+            # return its response, so retry workers treat it as unknown.
             raise QingTianRequestFailed(
-                f"qingtian HTTP {exc.response.status_code} {exc.request.url}: {body_preview or str(exc)}"
+                f"qingtian HTTP {status_code} {exc.request.url}: {body_preview or str(exc)}",
+                stage=stage,
+                status_code=status_code,
+                retry_after_seconds=retry_after,
+                retryable=(stage == "submit" and status_code == 429),
             ) from exc
-        except httpx.HTTPError as exc:
-            _log.warning(
-                "qingtian_transport_error error_type=%s detail=%s total_elapsed_ms=%s",
-                type(exc).__name__,
-                safe_text(exc, 800),
-                elapsed_ms(workflow_start),
-            )
-            raise QingTianRequestFailed(f"qingtian request failed: {exc}") from exc
+        _log.warning(
+            "qingtian_transport_error phase=%s error_type=%s detail=%s total_elapsed_ms=%s",
+            stage,
+            type(exc).__name__,
+            safe_text(exc, 800),
+            elapsed_ms(started_at),
+        )
+        raise QingTianRequestFailed(
+            f"qingtian {stage} request failed: {exc}",
+            stage=stage,
+            # A connect failure happens before a usable HTTP response exists;
+            # allow a bounded retry.  Other transport failures are unknown.
+            retryable=(stage == "submit" and isinstance(exc, httpx.ConnectError)),
+        ) from exc
 
     def _submit_workflow(
         self,
@@ -158,9 +323,18 @@ class QingTianClient:
             response_headers.get("x-request-id") or response_headers.get("request-id"),
             len(response_content),
         )
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise QingTianRequestFailed(
+                "qingtian /run_app_workflow response is not valid JSON",
+                stage="submit",
+            ) from exc
         if not isinstance(payload, dict):
-            raise QingTianRequestFailed("qingtian /run_app_workflow response is not a JSON object")
+            raise QingTianRequestFailed(
+                "qingtian /run_app_workflow response is not a JSON object",
+                stage="submit",
+            )
         run_id = payload.get("runId") or payload.get("RunID") or payload.get("run_id")
         if isinstance(run_id, str) and run_id.strip():
             return run_id
@@ -176,6 +350,7 @@ class QingTianClient:
         headers: dict[str, str],
         poll_timeout_sec: float,
         timeout: httpx.Timeout,
+        on_poll: Callable[[], None] | None = None,
     ) -> str:
         interval_sec = max(0.2, self.config.poll_interval_ms / 1000)
         deadline = time.monotonic() + max(1.0, poll_timeout_sec)
@@ -188,12 +363,23 @@ class QingTianClient:
         poll_count = 0
         previous_status: str | None = None
         while True:
+            if on_poll is not None:
+                on_poll()
             poll_count += 1
             response = client.post(url, json=query_body, headers=headers, timeout=timeout)
             response.raise_for_status()
-            body = response.json()
+            try:
+                body = response.json()
+            except ValueError as exc:
+                raise QingTianRequestFailed(
+                    "qingtian poll response is not valid JSON",
+                    stage="poll",
+                ) from exc
             if not isinstance(body, dict):
-                raise QingTianRequestFailed("qingtian poll response is not a JSON object")
+                raise QingTianRequestFailed(
+                    "qingtian poll response is not a JSON object",
+                    stage="poll",
+                )
 
             status = self._extract_status(body)
             if status != previous_status:
@@ -227,8 +413,9 @@ class QingTianClient:
                 self._log_terminal_response(run_id=run_id, status=status, body=body)
                 message = body.get("message") or body.get("msg") or ""
                 code = body.get("code")
-                raise QingTianRequestFailed(
-                    f"qingtian workflow terminated status={status} code={code} message={message}"
+                raise QingTianWorkflowTerminated(
+                    f"qingtian workflow terminated status={status} code={code} message={message}",
+                    terminal_status=status,
                 )
 
             if status not in _NON_TERMINAL_STATUSES:
@@ -243,14 +430,14 @@ class QingTianClient:
 
             if time.monotonic() >= deadline:
                 _log.warning(
-                    "qingtian_poll_timeout 说明=轮询擎天超过最大等待时间，任务将进入失败处理 run_id=%s last_status=%s poll_count=%s elapsed_ms=%s last_response_summary=%s",
+                    "qingtian_poll_timeout 说明=轮询擎天超过最大等待时间，任务将按本地重试策略处理 run_id=%s last_status=%s poll_count=%s elapsed_ms=%s last_response_summary=%s",
                     run_id,
                     status,
                     poll_count,
                     elapsed_ms(poll_start),
                     json.dumps(self._response_summary(body), ensure_ascii=False, default=str),
                 )
-                raise QingTianTimeout("polling qingtian workflow result timed out")
+                raise QingTianTimeout("polling qingtian workflow result timed out", stage="poll")
             time.sleep(interval_sec)
 
     @staticmethod

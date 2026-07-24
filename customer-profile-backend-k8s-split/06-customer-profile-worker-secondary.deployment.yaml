@@ -113,16 +113,14 @@ spec:
           value: '1'
         - name: WORKER_ROLE
           value: commercial
-        - name: BURST_ENABLED
-          value: 'true'
-        - name: BURST_QUEUE_HIGH_WATERMARK
-          value: '10'
-        - name: BURST_QUEUE_LOW_WATERMARK
+        - name: COMMERCIAL_QUEUE_THRESHOLD
+          value: '5'
+        # Keep this aligned with the local Worker. Backend-aware claims ensure
+        # this Worker only polls runIds created with the commercial AppKey.
+        - name: RETRY_MAX_POLL_RECOVERIES
           value: '3'
-        - name: BURST_OLDEST_WAIT_SECONDS
-          value: '600'
-        - name: BURST_OLDEST_RECOVER_SECONDS
-          value: '120'
+        - name: RETRY_MAX_RUN_LIFETIME_SECONDS
+          value: '7200'
       restartPolicy: Always
       terminationGracePeriodSeconds: 60
       dnsPolicy: ClusterFirst
