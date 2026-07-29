@@ -23,8 +23,13 @@ class TaskRepository(Protocol):
         self,
         *,
         lease_seconds: int,
-        execution_backend: str,
+        execution_pool: str,
+        workflow_target_id: str,
+        workflow_target_revision: str,
         allow_new_tasks: bool,
+        allow_unbound_retries: bool,
+        task_types: tuple[str, ...],
+        work_envs: tuple[str, ...],
     ) -> TaskRecord | None:
         ...
 
@@ -64,8 +69,12 @@ class TaskRepository(Protocol):
         generation: int,
         claim_token: str,
         max_attempts: int,
-        execution_backend: str,
-        max_backend_attempts: int,
+        execution_pool: str,
+        workflow_target_id: str,
+        workflow_target_revision: str,
+        retry_policy_version: str,
+        max_pool_attempts: int,
+        max_target_attempts: int,
         route_reason: str,
     ) -> int | None:
         ...
@@ -131,7 +140,7 @@ class TaskRepository(Protocol):
         terminal_attempt: bool,
         attempt_no: int | None,
         increment_poll_recovery: bool = False,
-        next_execution_backend: str | None = None,
+        next_execution_pool: str | None = None,
     ) -> bool:
         ...
 

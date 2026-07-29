@@ -6,7 +6,11 @@ from pathlib import Path
 from src.domain.task.models import TaskRecord
 from src.domain.task.service import TaskService
 from src.config.settings import RetryConfig
-from src.infrastructure.qingtian.errors import QingTianTimeout, QingTianWorkflowTerminated
+from src.infrastructure.qingtian.errors import (
+    QingTianRequestFailed,
+    QingTianTimeout,
+    QingTianWorkflowTerminated,
+)
 from src.infrastructure.workflow.errors import (
     WorkflowRequestFailed,
     WorkflowTimeout,
@@ -241,7 +245,18 @@ def _retry_task(
     attempt_count: int = 0,
     poll_recovery_count: int = 0,
     execution_backend: str = "local",
+    retry_policy_version: str = "local_first_v1",
+    workflow_target_id: str | None = None,
+    local_attempt_count: int | None = None,
+    commercial_attempt_count: int | None = None,
 ) -> TaskRecord:
+    execution_pool = execution_backend
+    if local_attempt_count is None:
+        local_attempt_count = (
+            attempt_count if execution_pool == "local" else min(attempt_count, 2)
+        )
+    if commercial_attempt_count is None:
+        commercial_attempt_count = max(0, attempt_count - local_attempt_count)
     return TaskRecord(
         id=91,
         customer_phonenumber="13800138000",
@@ -249,8 +264,14 @@ def _retry_task(
         generation=7,
         claim_token="claim-91",
         execution_backend=execution_backend,
+        execution_pool=execution_pool,
+        workflow_target_id=workflow_target_id or f"{execution_pool}-default",
+        workflow_target_revision="v1",
+        retry_policy_version=retry_policy_version,
         workflow_run_id=workflow_run_id,
         attempt_count=attempt_count,
+        local_attempt_count=local_attempt_count,
+        commercial_attempt_count=commercial_attempt_count,
         poll_recovery_count=poll_recovery_count,
     )
 
@@ -487,6 +508,24 @@ def test_retry_executor_resumes_persisted_run_after_poll_timeout_without_submit(
     assert repo.scheduled[0]["error_stage"] == "poll"
 
 
+def test_successful_submit_resets_target_failures_even_when_result_poll_times_out():
+    repo = _RetryRepo(_retry_task())
+    workflow = _RecoverableWorkflow()
+    workflow.poll_error = QingTianTimeout("poll timeout", stage="poll")
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        retry_config=_retry_config(),
+    )
+    assert executor._target_circuit.record_failure() is False
+
+    assert executor.execute_once() == "retrying"
+    assert executor.operational_snapshot()["target_consecutive_failures"] == 0
+
+
 def test_retry_executor_does_not_schedule_a_fourth_same_run_poll_recovery():
     repo = _RetryRepo(
         _retry_task(
@@ -580,6 +619,30 @@ def test_retry_executor_does_not_blindly_resubmit_unknown_submit_timeout():
     assert repo.final_failures[0]["error_code"] == "QINGTIAN_SUBMIT_UNKNOWN"
 
 
+def test_retry_executor_keeps_explicit_client_rejection_distinct_from_unknown_submit():
+    repo = _RetryRepo(_retry_task())
+    workflow = _RecoverableWorkflow()
+    workflow.submit_error = QingTianRequestFailed(
+        "bad workflow input",
+        stage="submit",
+        status_code=400,
+        retryable=False,
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        retry_config=_retry_config(),
+    )
+
+    assert executor.execute_once() == "failed"
+    assert repo.scheduled == []
+    assert repo.final_failures[0]["error_code"] == "QINGTIAN_REQUEST_FAILED"
+    assert executor.operational_snapshot()["target_consecutive_failures"] == 0
+
+
 def test_retry_executor_retries_known_terminal_workflow_failure_as_new_run():
     repo = _RetryRepo(_retry_task(workflow_run_id="run-known", attempt_count=1))
     workflow = _RecoverableWorkflow()
@@ -622,11 +685,17 @@ def test_qingtian_durable_retry_is_supported_by_the_commercial_worker():
     assert repo.claim_args == [
         {
             "lease_seconds": 180,
-            "execution_backend": "commercial",
+            "execution_pool": "commercial",
+            "workflow_target_id": "commercial-default",
+            "workflow_target_revision": "v1",
             "allow_new_tasks": False,
+            "allow_unbound_retries": True,
+            "task_types": ("customer_profile", "invitation_strategy"),
+            "work_envs": ("test", "production"),
         }
     ]
-    assert repo.reserved[0]["execution_backend"] == "commercial"
+    assert repo.reserved[0]["execution_pool"] == "commercial"
+    assert repo.reserved[0]["workflow_target_id"] == "commercial-default"
     assert repo.reserved[0]["route_reason"] == "commercial_fallback"
 
 
@@ -648,7 +717,7 @@ def test_second_definite_local_failure_switches_next_retry_to_commercial():
     )
 
     assert executor.execute_once() == "retrying"
-    assert repo.scheduled[0]["next_execution_backend"] == "commercial"
+    assert repo.scheduled[0]["next_execution_pool"] == "commercial"
     assert repo.scheduled[0]["retain_workflow_run"] is False
     assert repo.scheduled[0]["terminal_attempt"] is True
 
@@ -671,7 +740,36 @@ def test_first_definite_local_failure_stays_on_local_backend():
     )
 
     assert executor.execute_once() == "retrying"
-    assert repo.scheduled[0]["next_execution_backend"] == "local"
+    assert repo.scheduled[0]["next_execution_pool"] == "local"
+
+
+def test_single_target_policy_retries_on_the_same_compatible_target():
+    repo = _RetryRepo(
+        _retry_task(
+            workflow_run_id="run-invitation-1",
+            attempt_count=1,
+            retry_policy_version="single_target_v1",
+            local_attempt_count=1,
+            commercial_attempt_count=0,
+        )
+    )
+    workflow = _RecoverableWorkflow()
+    workflow.poll_error = QingTianWorkflowTerminated(
+        "invitation workflow failed",
+        terminal_status="failed",
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        worker_role="local",
+        retry_config=_retry_config(),
+    )
+
+    assert executor.execute_once() == "retrying"
+    assert repo.scheduled[0]["next_execution_pool"] == "local"
 
 
 def test_commercial_fallback_failure_stops_after_one_commercial_attempt():
@@ -701,3 +799,119 @@ def test_commercial_fallback_failure_stops_after_one_commercial_attempt():
     assert executor.execute_once() == "failed"
     assert repo.scheduled == []
     assert repo.final_failures[0]["error_code"] == "QINGTIAN_RETRY_EXHAUSTED"
+
+
+def test_throughput_policy_releases_failed_target_back_to_any_pool():
+    repo = _RetryRepo(
+        _retry_task(
+            workflow_run_id="run-commercial-01",
+            attempt_count=1,
+            execution_backend="commercial",
+            retry_policy_version="throughput_first_v1",
+            workflow_target_id="commercial-01",
+            local_attempt_count=0,
+            commercial_attempt_count=1,
+        )
+    )
+    workflow = _RecoverableWorkflow()
+    workflow.poll_error = QingTianWorkflowTerminated(
+        "workflow failed",
+        terminal_status="failed",
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        worker_role="commercial",
+        workflow_target_id="commercial-01",
+        commercial_queue_gate=_commercial_queue_gate(),
+        retry_config=_retry_config(),
+    )
+
+    assert executor.execute_once() == "retrying"
+    assert repo.scheduled[0]["next_execution_pool"] == "any"
+    assert repo.scheduled[0]["retain_workflow_run"] is False
+
+
+def test_throughput_policy_can_reuse_a_target_within_the_shared_total_budget():
+    repo = _RetryRepo(
+        _retry_task(
+            execution_backend="commercial",
+            retry_policy_version="throughput_first_v1",
+            workflow_target_id="commercial-02",
+            local_attempt_count=0,
+            commercial_attempt_count=0,
+        )
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=_RecoverableWorkflow(),
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        worker_role="commercial",
+        workflow_target_id="commercial-02",
+        commercial_queue_gate=_commercial_queue_gate(),
+        retry_config=_retry_config(),
+    )
+
+    assert executor.execute_once() == "succeeded"
+    assert repo.reserved[0]["max_attempts"] == 3
+    assert repo.reserved[0]["max_pool_attempts"] == 3
+    assert repo.reserved[0]["max_target_attempts"] == 3
+
+
+def test_worker_never_polls_a_run_owned_by_another_target():
+    repo = _RetryRepo(
+        _retry_task(
+            workflow_run_id="run-commercial-01",
+            attempt_count=1,
+            execution_backend="commercial",
+            retry_policy_version="throughput_first_v1",
+            workflow_target_id="commercial-01",
+            local_attempt_count=0,
+            commercial_attempt_count=1,
+        )
+    )
+    workflow = _RecoverableWorkflow()
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        worker_role="commercial",
+        workflow_target_id="commercial-02",
+        commercial_queue_gate=_commercial_queue_gate(),
+        retry_config=_retry_config(),
+    )
+
+    assert executor.execute_once() == "error"
+    assert workflow.poll_calls == []
+
+
+def test_open_target_circuit_blocks_unbound_claims_but_recovers_owned_run():
+    repo = _RetryRepo(
+        _retry_task(
+            workflow_run_id="run-owned",
+            attempt_count=1,
+        )
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=_RecoverableWorkflow(),
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        worker_role="local",
+        worker_target_failure_threshold=1,
+        worker_target_cooldown_seconds=60,
+        retry_config=_retry_config(),
+    )
+    assert executor._target_circuit.record_failure() is True
+
+    assert executor.execute_once() == "succeeded"
+    assert repo.claim_args[0]["allow_new_tasks"] is False
+    assert repo.claim_args[0]["allow_unbound_retries"] is False

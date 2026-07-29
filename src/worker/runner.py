@@ -94,7 +94,7 @@ class WorkerRunner:
             except Exception:
                 self._logger.exception("worker_operational_snapshot_failed")
         self._logger.info(
-            "worker_runtime_summary 说明=Worker队列运行概览 interval_seconds=%s inflight_threads=%s idle_polls=%s cycle_succeeded=%s cycle_retrying=%s cycle_failed=%s cycle_errors=%s average_execute_elapsed_ms=%s queued_count=%s retry_wait_count=%s processing_count=%s total_succeeded=%s total_failed=%s oldest_queued_age_seconds=%s oldest_processing_age_seconds=%s processing_over_40m_count=%s",
+            "worker_runtime_summary 说明=Worker队列运行概览 interval_seconds=%s inflight_threads=%s idle_polls=%s cycle_succeeded=%s cycle_retrying=%s cycle_failed=%s cycle_errors=%s average_execute_elapsed_ms=%s queued_count=%s retry_wait_count=%s processing_count=%s total_succeeded=%s total_failed=%s oldest_queued_age_seconds=%s oldest_processing_age_seconds=%s processing_over_40m_count=%s target_circuit_state=%s target_consecutive_failures=%s target_circuit_remaining_seconds=%s",
             interval_seconds,
             inflight,
             stats.get("idle", 0),
@@ -115,6 +115,9 @@ class WorkerRunner:
             snapshot.get("oldest_queued_age_seconds"),
             snapshot.get("oldest_processing_age_seconds"),
             snapshot.get("processing_over_40m_count"),
+            snapshot.get("target_circuit_state"),
+            snapshot.get("target_consecutive_failures"),
+            snapshot.get("target_circuit_remaining_seconds"),
         )
 
     def _loop(self, thread_name: str = "worker") -> None:

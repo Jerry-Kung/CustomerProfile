@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import logging
 
-from src.infrastructure.db.task_repository import MySQLTaskRepository
+from src.infrastructure.db.task_repository import (
+    MySQLTaskRepository,
+    _select_next_eligible_sql,
+)
 
 
 class _RecoveryCursor:
@@ -16,9 +19,9 @@ class _RecoveryCursor:
         self.executed.append(normalized)
         if "workflow_run_id IS NOT NULL" in normalized:
             self.rowcount = self._task_update_rowcounts["known_run"]
-        elif "attempt_count = 0" in normalized:
+        elif "AND NOT EXISTS" in normalized:
             self.rowcount = self._task_update_rowcounts["before_submit"]
-        elif "attempt_count > 0" in normalized:
+        elif "AND EXISTS" in normalized:
             self.rowcount = self._task_update_rowcounts["unknown_submit"]
         else:
             self.rowcount = 0
@@ -158,8 +161,9 @@ def test_expired_lease_before_attempt_reservation_is_safely_requeued():
 
     sql = "\n".join(connection.cursor_instance.executed)
     assert "workflow_run_id IS NOT NULL" in sql
-    assert "attempt_count = 0" in sql
-    assert "attempt_count > 0" in sql
+    assert "current_attempt.status = 'submitting'" in sql
+    assert "AND NOT EXISTS" in sql
+    assert "AND EXISTS" in sql
     assert connection.commits == 1
     assert connection.closed is True
 
@@ -172,14 +176,14 @@ def test_expired_lease_after_attempt_reservation_is_not_blindly_resubmitted():
     assert repo.recover_expired_retry_leases(limit=10) == (0, 1)
 
     sql = "\n".join(connection.cursor_instance.executed)
-    assert "attempt_count > 0" in sql
+    assert "AND EXISTS" in sql
     assert "QINGTIAN_SUBMIT_UNKNOWN" in sql
     assert "UPDATE customer_profile_task_attempts AS attempt" in sql
     assert connection.commits == 1
     assert connection.closed is True
 
 
-def test_schedule_retry_can_atomically_switch_the_execution_backend():
+def test_schedule_retry_can_atomically_switch_the_execution_pool_and_release_target():
     connection = _ScheduleConnection()
     repo = MySQLTaskRepository(
         _ScheduleDB(connection),
@@ -197,7 +201,7 @@ def test_schedule_retry_can_atomically_switch_the_execution_backend():
         retain_workflow_run=False,
         terminal_attempt=True,
         attempt_no=2,
-        next_execution_backend="commercial",
+        next_execution_pool="commercial",
     )
 
     task_update = next(
@@ -205,8 +209,10 @@ def test_schedule_retry_can_atomically_switch_the_execution_backend():
         for item in connection.cursor_instance.executed
         if "UPDATE customer_profile_tasks" in item[0]
     )
-    assert "execution_backend = COALESCE(%s, execution_backend)" in task_update[0]
+    assert "execution_pool = COALESCE(%s, execution_pool)" in task_update[0]
+    assert "workflow_target_id = NULL" in task_update[0]
     assert task_update[1][0] == "commercial"
+    assert task_update[1][2] == "commercial"
     assert connection.commits == 1
     assert connection.closed is True
 
@@ -240,3 +246,39 @@ def test_stalled_run_lifetime_is_checked_and_finalized_with_database_time():
     assert "retryable = 0" in audit_sql
     assert connection.commits == 1
     assert connection.closed is True
+
+
+def test_target_aware_claim_prefers_fresh_throughput_target_then_allows_reuse():
+    sql, params = _select_next_eligible_sql(
+        True,
+        True,
+        True,
+        workflow_target_id="commercial-02",
+        workflow_target_revision="v1",
+        execution_pool="commercial",
+        allow_new_tasks=True,
+        allow_unbound_retries=True,
+        task_types=("customer_profile",),
+        work_envs=("production",),
+    )
+    normalized = " ".join(sql.split())
+
+    assert "task.workflow_target_id = %s" in normalized
+    assert "task.workflow_target_revision = %s" in normalized
+    assert "task.execution_pool = %s OR task.execution_pool = 'any'" in normalized
+    assert "prior_target.workflow_target_id = %s" in normalized
+    assert "task.next_retry_at <= DATE_SUB( CURRENT_TIMESTAMP, INTERVAL %s SECOND )" in normalized
+    assert "task.task_type IN (%s)" in normalized
+    assert "task.work_env IN (%s)" in normalized
+    assert params == (
+        "commercial-02",
+        "v1",
+        "commercial",
+        1,
+        "commercial",
+        "commercial-02",
+        5,
+        1,
+        "customer_profile",
+        "production",
+    )

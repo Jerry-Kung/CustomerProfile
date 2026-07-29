@@ -34,6 +34,7 @@ def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskServi
     repository = MySQLTaskRepository(
         db_client,
         queue_max_waiting=config.task_queue_max_waiting,
+        default_retry_policy_version=config.retry.policy_version,
         logger=get_logger("task_repository"),
     )
     _warn_if_task_type_column_missing(logger, db_client, repository)
@@ -52,9 +53,18 @@ def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskServi
         logger=get_logger("worker_executor"),
         platform_name=config.workflow_platform,
         worker_role=config.worker.role,
+        workflow_target_id=config.worker.target_id,
+        workflow_target_revision=config.worker.target_revision,
+        worker_target_mode=config.worker.target_mode,
+        worker_task_types=config.worker.task_types,
+        worker_work_envs=config.worker.work_envs,
+        worker_target_failure_threshold=config.worker.target_failure_threshold,
+        worker_target_cooldown_seconds=config.worker.target_cooldown_seconds,
         commercial_queue_gate=CommercialQueueGate(
             CommercialQueueThreshold(
                 queue_depth=commercial_queue.threshold,
+                routing_mode=commercial_queue.routing_mode,
+                spillover_delay_seconds=commercial_queue.spillover_delay_seconds,
             )
         ),
         retry_config=config.retry,

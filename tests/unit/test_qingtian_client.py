@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import time
 
+import httpx
 import pytest
 
 from src.config.settings import QingTianConfig
@@ -290,3 +292,31 @@ def test_response_summary_exposes_nested_status_and_invalid_output_position():
     assert summary["nested_status"] == "completed"
     assert summary["output_json_valid"] is False
     assert isinstance(summary["output_json_error_position"], int)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "retryable"),
+    [(400, False), (401, True), (403, True), (429, True), (500, False)],
+)
+def test_submit_http_status_retry_classification(status_code, retryable):
+    client = QingTianClient(config=_config())
+    request = httpx.Request(
+        "POST",
+        "https://qingtian.example.com/api/proxy/api/v1/run_app_workflow",
+    )
+    response = httpx.Response(status_code, request=request)
+    error = httpx.HTTPStatusError(
+        "submit failed",
+        request=request,
+        response=response,
+    )
+
+    with pytest.raises(QingTianRequestFailed) as exc_info:
+        client._raise_http_error(
+            error,
+            stage="submit",
+            started_at=time.perf_counter(),
+        )
+
+    assert exc_info.value.status_code == status_code
+    assert exc_info.value.retryable is retryable

@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import logging
+import random
 import threading
 import time
 
 from src.config.observability import elapsed_ms, log_context, mask_phone, safe_text
 from src.config.settings import RetryConfig
 from src.domain.task.models import TaskRecord
+from src.domain.task.retry_policy import (
+    LOCAL_FIRST_V1,
+    SINGLE_TARGET_V1,
+    attempt_limits,
+    next_execution_pool,
+)
 from src.domain.task.service import TaskService
 from src.infrastructure.qingtian.errors import (
     QingTianRequestFailed,
@@ -23,12 +30,11 @@ from src.infrastructure.workflow.errors import (
 from src.infrastructure.workflow.output_parser import WorkflowOutputParser
 from src.infrastructure.workflow.protocol import WorkflowClient
 from src.worker.routing import CommercialQueueGate, QueuePressure
+from src.worker.target_health import TargetCircuitBreaker
 
 
 _WORKER_UNEXPECTED_ERROR_CODE = "WORKER_UNEXPECTED_ERROR"
-_MAX_WORKFLOW_ATTEMPTS = 3
-_MAX_LOCAL_ATTEMPTS = 2
-_MAX_COMMERCIAL_ATTEMPTS = 1
+_BACKOFF_JITTER_RATIO = 0.2
 
 
 class _RetryLeaseLost(RuntimeError):
@@ -45,6 +51,13 @@ class WorkerExecutor:
         logger: logging.Logger,
         platform_name: str = "dify",
         worker_role: str = "local",
+        workflow_target_id: str | None = None,
+        workflow_target_revision: str = "v1",
+        worker_target_mode: str = "active",
+        worker_task_types: tuple[str, ...] = ("customer_profile", "invitation_strategy"),
+        worker_work_envs: tuple[str, ...] = ("test", "production"),
+        worker_target_failure_threshold: int = 3,
+        worker_target_cooldown_seconds: int = 60,
         commercial_queue_gate: CommercialQueueGate | None = None,
         retry_config: RetryConfig | None = None,
     ):
@@ -52,12 +65,23 @@ class WorkerExecutor:
             raise ValueError("worker_role must be local or commercial")
         if worker_role == "commercial" and commercial_queue_gate is None:
             raise ValueError("commercial worker requires a commercial_queue_gate")
+        if worker_target_mode not in {"active", "draining", "recovery_only"}:
+            raise ValueError("worker_target_mode must be active, draining, or recovery_only")
         self._task_service = task_service
         self._workflow_client = workflow_client
         self._output_parser = output_parser
         self._logger = logger
         self._platform_name = platform_name
         self._worker_role = worker_role
+        self._workflow_target_id = workflow_target_id or f"{worker_role}-default"
+        self._workflow_target_revision = workflow_target_revision
+        self._worker_target_mode = worker_target_mode
+        self._worker_task_types = worker_task_types
+        self._worker_work_envs = worker_work_envs
+        self._target_circuit = TargetCircuitBreaker(
+            failure_threshold=worker_target_failure_threshold,
+            cooldown_seconds=worker_target_cooldown_seconds,
+        )
         self._commercial_queue_gate = commercial_queue_gate
         self._retry_config = retry_config or RetryConfig()
         self._retry_recovery_lock = threading.Lock()
@@ -65,15 +89,20 @@ class WorkerExecutor:
 
     def operational_snapshot(self) -> dict[str, object]:
         snapshot_fn = getattr(self._task_service.repository, "get_queue_stats", None)
-        if not callable(snapshot_fn):
-            return {}
-        return snapshot_fn()
+        snapshot = dict(snapshot_fn()) if callable(snapshot_fn) else {}
+        snapshot.update(self._target_circuit.snapshot())
+        return snapshot
 
     def execute_once(self) -> str:
         execute_start = time.perf_counter()
         retry_enabled = self._supports_qingtian_retry()
         self._maybe_recover_expired_retry_leases(enabled=retry_enabled)
-        allow_new_tasks = self._route_allows_new_tasks()
+        allow_unbound_work = (
+            self._worker_target_mode == "active"
+            and self._target_circuit.allow_unbound_work()
+        )
+        allow_new_tasks = allow_unbound_work and self._route_allows_new_tasks()
+        allow_unbound_retries = allow_unbound_work
         if not retry_enabled and not allow_new_tasks:
             return "idle"
         # Claim is isolated: a DB error here must NOT bubble up (would kill the worker thread).
@@ -83,8 +112,13 @@ class WorkerExecutor:
             claimed = self._task_service.claim_next_task(
                 retry_enabled=retry_enabled,
                 lease_seconds=self._retry_config.lease_seconds if retry_enabled else None,
-                execution_backend=self._worker_role,
+                execution_pool=self._worker_role,
+                workflow_target_id=self._workflow_target_id,
+                workflow_target_revision=self._workflow_target_revision,
                 allow_new_tasks=allow_new_tasks,
+                allow_unbound_retries=allow_unbound_retries,
+                task_types=self._worker_task_types,
+                work_envs=self._worker_work_envs,
             )
         except Exception:
             self._logger.exception(
@@ -112,6 +146,9 @@ class WorkerExecutor:
             task_type=claimed.task_type,
             work_env=claimed.work_env,
             workflow_platform=self._platform_name,
+            execution_pool=claimed.execution_pool,
+            workflow_target_id=claimed.workflow_target_id,
+            retry_policy_version=claimed.retry_policy_version,
         ):
             if retry_enabled and claimed.claim_token:
                 return self._execute_retryable_qingtian(
@@ -242,15 +279,30 @@ class WorkerExecutor:
         task_id = claimed.id
         generation = claimed.generation
         claim_token = claimed.claim_token
-        if claimed.execution_backend != self._worker_role:
+        if claimed.execution_pool != self._worker_role:
             self._logger.error(
-                "worker_retry_backend_mismatch task_id=%s claimed_backend=%s worker_role=%s",
+                "worker_retry_pool_mismatch task_id=%s claimed_pool=%s worker_pool=%s",
                 task_id,
-                claimed.execution_backend,
+                claimed.execution_pool,
                 self._worker_role,
             )
             return "error"
+        if (
+            claimed.workflow_target_id != self._workflow_target_id
+            or claimed.workflow_target_revision != self._workflow_target_revision
+        ):
+            self._logger.error(
+                "worker_retry_target_mismatch task_id=%s claimed_target=%s claimed_revision=%s worker_target=%s worker_revision=%s",
+                task_id,
+                claimed.workflow_target_id,
+                claimed.workflow_target_revision,
+                self._workflow_target_id,
+                self._workflow_target_revision,
+            )
+            return "error"
         attempt_no: int | None = claimed.attempt_count or None
+        local_attempt_count = claimed.local_attempt_count
+        commercial_attempt_count = claimed.commercial_attempt_count
         workflow_run_id = claimed.workflow_run_id
         heartbeat = self._lease_heartbeat(
             task_id=task_id,
@@ -261,10 +313,12 @@ class WorkerExecutor:
 
         try:
             self._logger.info(
-                "worker_retry_task_started task_id=%s generation=%s execution_backend=%s attempt_count=%s poll_recovery_count=%s has_workflow_run_id=%s claim_elapsed_ms=%s",
+                "worker_retry_task_started task_id=%s generation=%s execution_pool=%s workflow_target_id=%s retry_policy_version=%s attempt_count=%s poll_recovery_count=%s has_workflow_run_id=%s claim_elapsed_ms=%s",
                 task_id,
                 generation,
-                claimed.execution_backend,
+                claimed.execution_pool,
+                claimed.workflow_target_id,
+                claimed.retry_policy_version,
                 claimed.attempt_count,
                 claimed.poll_recovery_count,
                 bool(workflow_run_id),
@@ -285,13 +339,22 @@ class WorkerExecutor:
                     on_poll=heartbeat,
                 )
             else:
+                limits = attempt_limits(
+                    policy_version=claimed.retry_policy_version,
+                    execution_pool=claimed.execution_pool,
+                    max_total_attempts=self._retry_config.max_workflow_attempts,
+                )
                 attempt_no = self._task_service.repository.reserve_workflow_attempt(
                     task_id=task_id,
                     generation=generation,
                     claim_token=claim_token,
-                    max_attempts=_MAX_WORKFLOW_ATTEMPTS,
-                    execution_backend=claimed.execution_backend,
-                    max_backend_attempts=self._max_backend_attempts(claimed.execution_backend),
+                    max_attempts=limits.max_total_attempts,
+                    execution_pool=claimed.execution_pool,
+                    workflow_target_id=self._workflow_target_id,
+                    workflow_target_revision=self._workflow_target_revision,
+                    retry_policy_version=claimed.retry_policy_version,
+                    max_pool_attempts=limits.max_pool_attempts,
+                    max_target_attempts=limits.max_target_attempts,
                     route_reason=self._route_reason(claimed),
                 )
                 if attempt_no is None:
@@ -304,12 +367,19 @@ class WorkerExecutor:
                         error_stage="submit",
                         error_message="maximum QingTian workflow attempts exhausted",
                     )
+                if claimed.execution_pool == "local":
+                    local_attempt_count += 1
+                else:
+                    commercial_attempt_count += 1
                 submitted_run_id = self._workflow_client.submit_workflow(
                     customer_phonenumber=claimed.customer_phonenumber,
                     work_env=claimed.work_env,
                     batch_id=claimed.batch_id,
                     task_type=claimed.task_type,
                 )
+                # Receiving a concrete run id is a successful target-level
+                # exchange even if the later result poll times out.
+                self._record_target_success()
                 persisted = self._task_service.repository.persist_workflow_run(
                     task_id=task_id,
                     generation=generation,
@@ -344,7 +414,9 @@ class WorkerExecutor:
             )
             return "error"
         except QingTianWorkflowTerminated as exc:
+            self._record_target_success()
             return self._retry_new_run_or_fail(
+                claimed=claimed,
                 task_id=task_id,
                 generation=generation,
                 claim_token=claim_token,
@@ -352,9 +424,13 @@ class WorkerExecutor:
                 error_code=exc.code,
                 error_stage="workflow",
                 error_message=str(exc),
+                local_attempt_count=local_attempt_count,
+                commercial_attempt_count=commercial_attempt_count,
             )
         except (WorkflowOutputInvalidJson, WorkflowOutputSchemaMismatch) as exc:
+            self._record_target_success()
             return self._retry_new_run_or_fail(
+                claimed=claimed,
                 task_id=task_id,
                 generation=generation,
                 claim_token=claim_token,
@@ -362,8 +438,12 @@ class WorkerExecutor:
                 error_code=exc.code,
                 error_stage="output",
                 error_message=str(exc),
+                local_attempt_count=local_attempt_count,
+                commercial_attempt_count=commercial_attempt_count,
             )
         except QingTianTimeout as exc:
+            if exc.stage == "submit":
+                self._record_target_failure(exc)
             if workflow_run_id:
                 return self._schedule_retry(
                     task_id=task_id,
@@ -388,6 +468,17 @@ class WorkerExecutor:
                 error_message=str(exc),
             )
         except QingTianRequestFailed as exc:
+            # A definite submit-side 4xx such as malformed workflow input is
+            # task-specific, not evidence that the target itself is unhealthy.
+            # Authentication/rate-limit rejections are marked retryable by the
+            # client and still count toward the target circuit.
+            if not (
+                exc.stage == "submit"
+                and exc.status_code is not None
+                and 400 <= exc.status_code < 500
+                and not exc.retryable
+            ):
+                self._record_target_failure(exc)
             if workflow_run_id or exc.stage == "poll":
                 return self._schedule_retry(
                     task_id=task_id,
@@ -405,6 +496,7 @@ class WorkerExecutor:
                 )
             if exc.stage == "submit" and exc.retryable:
                 return self._retry_new_run_or_fail(
+                    claimed=claimed,
                     task_id=task_id,
                     generation=generation,
                     claim_token=claim_token,
@@ -413,6 +505,22 @@ class WorkerExecutor:
                     error_stage="submit",
                     error_message=str(exc),
                     retry_after_seconds=exc.retry_after_seconds,
+                    local_attempt_count=local_attempt_count,
+                    commercial_attempt_count=commercial_attempt_count,
+                )
+            if (
+                exc.stage == "submit"
+                and exc.status_code is not None
+                and 400 <= exc.status_code < 500
+            ):
+                return self._finish_retry_failure(
+                    task_id=task_id,
+                    generation=generation,
+                    claim_token=claim_token,
+                    attempt_no=attempt_no,
+                    error_code=exc.code,
+                    error_stage="submit",
+                    error_message=str(exc),
                 )
             return self._finish_retry_failure(
                 task_id=task_id,
@@ -433,6 +541,7 @@ class WorkerExecutor:
             )
             return "error"
 
+        self._record_target_success()
         try:
             persisted = self._task_service.repository.mark_succeeded_claimed(
                 task_id=task_id,
@@ -495,6 +604,7 @@ class WorkerExecutor:
     def _retry_new_run_or_fail(
         self,
         *,
+        claimed: TaskRecord,
         task_id: int,
         generation: int,
         claim_token: str,
@@ -502,10 +612,22 @@ class WorkerExecutor:
         error_code: str,
         error_stage: str,
         error_message: str,
+        local_attempt_count: int,
+        commercial_attempt_count: int,
         retry_after_seconds: int | None = None,
     ) -> str:
-        next_backend = self._next_retry_backend(attempt_no)
-        if next_backend is None:
+        next_pool = (
+            next_execution_pool(
+                policy_version=claimed.retry_policy_version,
+                attempt_count=attempt_no,
+                local_attempt_count=local_attempt_count,
+                commercial_attempt_count=commercial_attempt_count,
+                max_total_attempts=self._retry_config.max_workflow_attempts,
+            )
+            if attempt_no is not None
+            else None
+        )
+        if next_pool is None:
             return self._finish_retry_failure(
                 task_id=task_id,
                 generation=generation,
@@ -526,7 +648,7 @@ class WorkerExecutor:
             retain_workflow_run=False,
             terminal_attempt=True,
             retry_after_seconds=retry_after_seconds,
-            next_execution_backend=next_backend,
+            next_execution_pool=next_pool,
         )
 
     def _schedule_retry(
@@ -544,7 +666,7 @@ class WorkerExecutor:
         poll_recovery_count: int = 0,
         increment_poll_recovery: bool = False,
         retry_after_seconds: int | None = None,
-        next_execution_backend: str | None = None,
+        next_execution_pool: str | None = None,
     ) -> str:
         if retain_workflow_run and increment_poll_recovery:
             # A scheduled recovery represents one more full local observation
@@ -576,7 +698,19 @@ class WorkerExecutor:
         backoff = self._retry_config.backoff_seconds[
             min(attempt_index, len(self._retry_config.backoff_seconds) - 1)
         ]
-        delay_seconds = max(backoff, retry_after_seconds or 0)
+        jittered_backoff = max(
+            1,
+            int(
+                round(
+                    backoff
+                    * random.uniform(
+                        1.0 - _BACKOFF_JITTER_RATIO,
+                        1.0 + _BACKOFF_JITTER_RATIO,
+                    )
+                )
+            ),
+        )
+        delay_seconds = max(jittered_backoff, retry_after_seconds or 0)
         try:
             scheduled = self._task_service.repository.schedule_retry(
                 task_id=task_id,
@@ -590,7 +724,7 @@ class WorkerExecutor:
                 terminal_attempt=terminal_attempt,
                 attempt_no=attempt_no,
                 increment_poll_recovery=increment_poll_recovery,
-                next_execution_backend=next_execution_backend,
+                next_execution_pool=next_execution_pool,
             )
         except Exception:
             self._logger.exception(
@@ -659,41 +793,14 @@ class WorkerExecutor:
             return "error"
         return "failed" if failed else "error"
 
-    def _max_backend_attempts(self, execution_backend: str) -> int:
-        if execution_backend == "commercial":
-            return _MAX_COMMERCIAL_ATTEMPTS
-        return _MAX_LOCAL_ATTEMPTS
-
     def _route_reason(self, claimed: TaskRecord) -> str:
-        if claimed.execution_backend == "commercial":
-            if claimed.attempt_count >= _MAX_LOCAL_ATTEMPTS:
-                return "commercial_fallback"
-            return "burst"
-        return "local_retry" if claimed.attempt_count else "normal"
-
-    def _next_retry_backend(self, attempt_no: int | None) -> str | None:
-        """Return the backend for the next *new* run after a definite failure.
-
-        Poll timeouts never call this method: they retain and resume the same
-        runId. Unknown submissions and stalled runs also remain terminal to
-        avoid creating a duplicate remote run.
-        """
-        if attempt_no is None or attempt_no >= _MAX_WORKFLOW_ATTEMPTS:
-            return None
-        if self._worker_role == "local":
-            if attempt_no < _MAX_LOCAL_ATTEMPTS:
-                return "local"
-            return "commercial"
-
-        prior_local_attempts = (
-            _MAX_LOCAL_ATTEMPTS
-            if attempt_no > _MAX_LOCAL_ATTEMPTS
-            else 0
-        )
-        commercial_attempts = attempt_no - prior_local_attempts
-        if commercial_attempts < _MAX_COMMERCIAL_ATTEMPTS:
-            return "commercial"
-        return None
+        if claimed.retry_policy_version == SINGLE_TARGET_V1:
+            return "single_target_retry" if claimed.attempt_count else "single_target"
+        if claimed.retry_policy_version != LOCAL_FIRST_V1:
+            return "parallel_retry" if claimed.attempt_count else "parallel"
+        if claimed.execution_pool == "commercial":
+            return "commercial_fallback" if claimed.local_attempt_count else "burst"
+        return "local_retry" if claimed.local_attempt_count else "normal"
 
     def _route_allows_new_tasks(self) -> bool:
         if self._worker_role == "local":
@@ -703,17 +810,41 @@ class WorkerExecutor:
             snapshot = self.operational_snapshot()
             pressure = QueuePressure(
                 queue_depth=int(snapshot.get("queue_depth") or 0),
+                oldest_queued_age_seconds=(
+                    int(snapshot["oldest_queued_age_seconds"])
+                    if snapshot.get("oldest_queued_age_seconds") is not None
+                    else None
+                ),
             )
             allowed = self._commercial_queue_gate.allow_new(pressure)
             self._logger.debug(
-                "commercial_queue_gate allowed=%s queue_depth=%s",
+                "commercial_queue_gate allowed=%s queue_depth=%s oldest_queued_age_seconds=%s",
                 allowed,
                 pressure.queue_depth,
+                pressure.oldest_queued_age_seconds,
             )
             return allowed
         except Exception:
             self._logger.exception("commercial_queue_gate_check_failed")
             return False
+
+    def _record_target_failure(self, exc: Exception) -> None:
+        opened = self._target_circuit.record_failure()
+        if opened:
+            snapshot = self._target_circuit.snapshot()
+            self._logger.warning(
+                "workflow_target_circuit_opened workflow_target_id=%s failure_type=%s cooldown_seconds=%s",
+                self._workflow_target_id,
+                type(exc).__name__,
+                snapshot["target_circuit_remaining_seconds"],
+            )
+
+    def _record_target_success(self) -> None:
+        if self._target_circuit.record_success():
+            self._logger.info(
+                "workflow_target_circuit_reset workflow_target_id=%s",
+                self._workflow_target_id,
+            )
 
     def _safe_mark_failed(self, task_id: int, error_message: str) -> None:
         """mark_failed must not itself raise back into the caller — that would re-introduce the bug we are fixing."""

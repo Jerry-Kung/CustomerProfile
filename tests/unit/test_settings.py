@@ -31,6 +31,7 @@ def _load_with_env(monkeypatch: pytest.MonkeyPatch, extra: dict[str, str] | None
             or key.startswith("QINGTIAN_")
             or key.startswith("MYSQL_")
             or key.startswith("WORKER_")
+            or key.startswith("WORKFLOW_")
             or key.startswith("RETRY_")
             or key.startswith("COMMERCIAL_")
             or key in {"APP_ENV", "LOG_LEVEL", "WORKFLOW_PLATFORM"}
@@ -56,9 +57,18 @@ def test_load_config_success_defaults(monkeypatch: pytest.MonkeyPatch):
     assert config.mysql.port == 3306
     assert config.worker.concurrency >= 1
     assert config.worker.role == "local"
+    assert config.worker.target_id == "local-default"
+    assert config.worker.target_revision == "v1"
+    assert config.worker.target_mode == "active"
+    assert config.worker.target_failure_threshold == 3
+    assert config.worker.target_cooldown_seconds == 60
+    assert config.commercial_queue.routing_mode == "parallel"
+    assert config.commercial_queue.spillover_delay_seconds == 0
     assert config.commercial_queue.threshold == 5
     assert config.retry.max_poll_recoveries == 3
     assert config.retry.max_run_lifetime_seconds == 7200
+    assert config.retry.max_workflow_attempts == 3
+    assert config.retry.policy_version == "throughput_first_v1"
     assert config.retry.backoff_seconds == (30, 120, 600)
     assert config.dify.invitation_strategy_api_key == "app-INV-xxxx"
 
@@ -75,9 +85,20 @@ def test_load_config_overrides(monkeypatch: pytest.MonkeyPatch):
             "DIFY_POLL_TIMEOUT_MS": "600000",
             "MYSQL_PORT": "3307",
             "WORKER_ROLE": "commercial",
+            "WORKFLOW_TARGET_ID": "commercial-02",
+            "WORKFLOW_TARGET_REVISION": "key-v2",
+            "WORKER_TARGET_MODE": "draining",
+            "WORKER_TASK_TYPES": "customer_profile",
+            "WORKER_WORK_ENVS": "production",
+            "WORKER_TARGET_FAILURE_THRESHOLD": "5",
+            "WORKER_TARGET_COOLDOWN_SECONDS": "90",
+            "WORKER_ROUTING_MODE": "local_preferred",
             "COMMERCIAL_QUEUE_THRESHOLD": "20",
+            "COMMERCIAL_SPILLOVER_DELAY_SECONDS": "45",
             "RETRY_MAX_POLL_RECOVERIES": "4",
             "RETRY_MAX_RUN_LIFETIME_SECONDS": "9000",
+            "RETRY_MAX_WORKFLOW_ATTEMPTS": "4",
+            "RETRY_POLICY_VERSION": "local_first_v1",
             "RETRY_BACKOFF_SECONDS": "5,10",
             "RETRY_LEASE_SECONDS": "5",
             "RETRY_LEASE_HEARTBEAT_SECONDS": "4",
@@ -92,9 +113,20 @@ def test_load_config_overrides(monkeypatch: pytest.MonkeyPatch):
     assert config.dify.poll_timeout_ms == 600000
     assert config.mysql.port == 3307
     assert config.worker.role == "commercial"
+    assert config.worker.target_id == "commercial-02"
+    assert config.worker.target_revision == "key-v2"
+    assert config.worker.target_mode == "draining"
+    assert config.worker.task_types == ("customer_profile",)
+    assert config.worker.work_envs == ("production",)
+    assert config.worker.target_failure_threshold == 5
+    assert config.worker.target_cooldown_seconds == 90
     assert config.commercial_queue.threshold == 20
+    assert config.commercial_queue.routing_mode == "local_preferred"
+    assert config.commercial_queue.spillover_delay_seconds == 45
     assert config.retry.max_poll_recoveries == 4
     assert config.retry.max_run_lifetime_seconds == 9000
+    assert config.retry.max_workflow_attempts == 4
+    assert config.retry.policy_version == "local_first_v1"
     # Internal retry coordination values are fixed in code and stale
     # deployment environment variables must not override them.
     assert config.retry.backoff_seconds == (30, 120, 600)
@@ -143,3 +175,41 @@ def test_load_config_rejects_non_positive_retry_run_bounds(monkeypatch: pytest.M
         _load_with_env(monkeypatch, {"RETRY_MAX_POLL_RECOVERIES": "0"})
     with pytest.raises(ValueError, match="RETRY_MAX_RUN_LIFETIME_SECONDS"):
         _load_with_env(monkeypatch, {"RETRY_MAX_RUN_LIFETIME_SECONDS": "0"})
+    with pytest.raises(ValueError, match="RETRY_MAX_WORKFLOW_ATTEMPTS"):
+        _load_with_env(monkeypatch, {"RETRY_MAX_WORKFLOW_ATTEMPTS": "0"})
+
+
+def test_load_config_rejects_invalid_target_and_routing_policy(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with pytest.raises(ValueError, match="WORKFLOW_TARGET_ID"):
+        _load_with_env(monkeypatch, {"WORKFLOW_TARGET_ID": "bad target"})
+    with pytest.raises(ValueError, match="WORKER_ROUTING_MODE"):
+        _load_with_env(monkeypatch, {"WORKER_ROUTING_MODE": "random"})
+    with pytest.raises(ValueError, match="RETRY_POLICY_VERSION"):
+        _load_with_env(monkeypatch, {"RETRY_POLICY_VERSION": "random"})
+
+
+def test_load_config_accepts_single_target_retry_policy(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = _load_with_env(
+        monkeypatch,
+        {"RETRY_POLICY_VERSION": "single_target_v1"},
+    )
+    assert config.retry.policy_version == "single_target_v1"
+
+
+def test_load_config_rejects_invalid_target_circuit_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with pytest.raises(ValueError, match="WORKER_TARGET_FAILURE_THRESHOLD"):
+        _load_with_env(
+            monkeypatch,
+            {"WORKER_TARGET_FAILURE_THRESHOLD": "0"},
+        )
+    with pytest.raises(ValueError, match="WORKER_TARGET_COOLDOWN_SECONDS"):
+        _load_with_env(
+            monkeypatch,
+            {"WORKER_TARGET_COOLDOWN_SECONDS": "0"},
+        )

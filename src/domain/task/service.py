@@ -52,15 +52,25 @@ class TaskService:
         *,
         retry_enabled: bool = False,
         lease_seconds: int | None = None,
-        execution_backend: str = "local",
+        execution_pool: str = "local",
+        workflow_target_id: str = "local-default",
+        workflow_target_revision: str = "v1",
         allow_new_tasks: bool = True,
+        allow_unbound_retries: bool = True,
+        task_types: tuple[str, ...] = ("customer_profile", "invitation_strategy"),
+        work_envs: tuple[str, ...] = ("test", "production"),
     ) -> TaskRecord | None:
         claim_eligible = getattr(self.repository, "claim_next_eligible", None)
         if retry_enabled and lease_seconds is not None and callable(claim_eligible):
             record = claim_eligible(
                 lease_seconds=lease_seconds,
-                execution_backend=execution_backend,
+                execution_pool=execution_pool,
+                workflow_target_id=workflow_target_id,
+                workflow_target_revision=workflow_target_revision,
                 allow_new_tasks=allow_new_tasks,
+                allow_unbound_retries=allow_unbound_retries,
+                task_types=task_types,
+                work_envs=work_envs,
             )
         else:
             record = self.repository.claim_next_queued()

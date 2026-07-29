@@ -279,15 +279,19 @@ class QingTianClient:
                 safe_text(body_preview or exc, 800),
                 elapsed_ms(started_at),
             )
-            # Only an explicit 429 is treated as safe to resubmit without a
-            # remote id.  A 5xx might have created a run before failing to
+            # Authentication/rate-limit responses explicitly reject this
+            # target before a run is acknowledged, so another target may be
+            # tried safely. A 5xx might have created a run before failing to
             # return its response, so retry workers treat it as unknown.
             raise QingTianRequestFailed(
                 f"qingtian HTTP {status_code} {exc.request.url}: {body_preview or str(exc)}",
                 stage=stage,
                 status_code=status_code,
                 retry_after_seconds=retry_after,
-                retryable=(stage == "submit" and status_code == 429),
+                retryable=(
+                    stage == "submit"
+                    and status_code in {401, 403, 429}
+                ),
             ) from exc
         _log.warning(
             "qingtian_transport_error phase=%s error_type=%s detail=%s total_elapsed_ms=%s",

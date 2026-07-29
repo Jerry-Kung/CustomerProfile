@@ -64,12 +64,22 @@ def redact_config(config: AppConfig) -> dict[str, Any]:
             "concurrency": config.worker.concurrency,
             "poll_interval_seconds": config.worker.poll_interval_seconds,
             "role": config.worker.role,
+            "target_id": config.worker.target_id,
+            "target_revision": config.worker.target_revision,
+            "target_mode": config.worker.target_mode,
+            "task_types": list(config.worker.task_types),
+            "work_envs": list(config.worker.work_envs),
+            "target_failure_threshold": config.worker.target_failure_threshold,
+            "target_cooldown_seconds": config.worker.target_cooldown_seconds,
         },
         "commercial_queue": {
             "threshold": config.commercial_queue.threshold,
+            "routing_mode": config.commercial_queue.routing_mode,
+            "spillover_delay_seconds": config.commercial_queue.spillover_delay_seconds,
         },
         "retry": {
-            "workflow_attempt_policy": "local,local,commercial",
+            "policy_version": config.retry.policy_version,
+            "max_workflow_attempts": config.retry.max_workflow_attempts,
             "max_poll_recoveries": config.retry.max_poll_recoveries,
             "max_run_lifetime_seconds": config.retry.max_run_lifetime_seconds,
             "backoff_seconds": list(config.retry.backoff_seconds),
@@ -103,7 +113,9 @@ _LOG_FORMAT = (
     "{name}:{function}:{line} | component={extra[component]} "
     "request_id={extra[request_id]} task_id={extra[task_id]} "
     "batch_id={extra[batch_id]} task_type={extra[task_type]} "
-    "work_env={extra[work_env]} workflow_platform={extra[workflow_platform]} - {message}"
+    "work_env={extra[work_env]} workflow_platform={extra[workflow_platform]} "
+    "execution_pool={extra[execution_pool]} workflow_target_id={extra[workflow_target_id]} "
+    "retry_policy_version={extra[retry_policy_version]} - {message}"
 )
 _configured_component: str | None = None
 

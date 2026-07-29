@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 
 _DOTENV_LOADED = False
 
@@ -93,13 +94,22 @@ class WorkerConfig:
     concurrency: int
     poll_interval_seconds: float
     role: str = "local"
+    target_id: str = "local-default"
+    target_revision: str = "v1"
+    target_mode: str = "active"
+    task_types: tuple[str, ...] = ("customer_profile", "invitation_strategy")
+    work_envs: tuple[str, ...] = ("test", "production")
+    target_failure_threshold: int = 3
+    target_cooldown_seconds: int = 60
 
 
 @dataclass(frozen=True)
 class CommercialQueueConfig:
-    """When this many normal tasks are queued, the commercial Worker may help."""
+    """Admission policy for commercial Workers claiming ordinary queued work."""
 
     threshold: int = 5
+    routing_mode: str = "parallel"
+    spillover_delay_seconds: int = 0
 
 
 @dataclass(frozen=True)
@@ -113,6 +123,8 @@ class RetryConfig:
 
     max_poll_recoveries: int = 3
     max_run_lifetime_seconds: int = 7200
+    max_workflow_attempts: int = 3
+    policy_version: str = "throughput_first_v1"
     backoff_seconds: tuple[int, ...] = (30, 120, 600)
     lease_seconds: int = 180
     lease_heartbeat_seconds: int = 30
@@ -242,6 +254,13 @@ def load_config() -> AppConfig:
             concurrency=_worker_concurrency(),
             poll_interval_seconds=_env_int("WORKER_POLL_INTERVAL_MS", 2000) / 1000.0,
             role=worker_role,
+            target_id=_worker_target_id(worker_role),
+            target_revision=_worker_target_revision(),
+            target_mode=_worker_target_mode(),
+            task_types=_worker_task_types(),
+            work_envs=_worker_work_envs(),
+            target_failure_threshold=_worker_target_failure_threshold(),
+            target_cooldown_seconds=_worker_target_cooldown_seconds(),
         ),
         tos=TosConfig(
             access_key_id=_env_str("TOS_ACCESS_KEY_ID"),
@@ -281,11 +300,95 @@ def _worker_role() -> str:
     return value
 
 
+_TARGET_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_TARGET_REVISION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _worker_target_id(worker_role: str) -> str:
+    value = _env_str("WORKFLOW_TARGET_ID", f"{worker_role}-default")
+    if not _TARGET_ID_PATTERN.fullmatch(value):
+        raise ValueError(
+            "WORKFLOW_TARGET_ID must be 1-128 characters using letters, digits, dot, underscore, or dash"
+        )
+    return value
+
+
+def _worker_target_revision() -> str:
+    value = _env_str("WORKFLOW_TARGET_REVISION", "v1")
+    if not _TARGET_REVISION_PATTERN.fullmatch(value):
+        raise ValueError(
+            "WORKFLOW_TARGET_REVISION must be 1-64 characters using letters, digits, dot, underscore, or dash"
+        )
+    return value
+
+
+def _worker_target_mode() -> str:
+    value = _env_str("WORKER_TARGET_MODE", "active").lower()
+    if value not in {"active", "draining", "recovery_only"}:
+        raise ValueError("WORKER_TARGET_MODE must be one of: active, draining, recovery_only")
+    return value
+
+
+def _csv_values(key: str, default: str) -> tuple[str, ...]:
+    values = tuple(
+        dict.fromkeys(
+            item.strip().lower()
+            for item in _env_str(key, default).split(",")
+            if item.strip()
+        )
+    )
+    if not values:
+        raise ValueError(f"{key} must contain at least one value")
+    return values
+
+
+def _worker_task_types() -> tuple[str, ...]:
+    values = _csv_values("WORKER_TASK_TYPES", "customer_profile,invitation_strategy")
+    unsupported = sorted(set(values) - {"customer_profile", "invitation_strategy"})
+    if unsupported:
+        raise ValueError(f"WORKER_TASK_TYPES contains unsupported values: {', '.join(unsupported)}")
+    return values
+
+
+def _worker_work_envs() -> tuple[str, ...]:
+    values = _csv_values("WORKER_WORK_ENVS", "test,production")
+    unsupported = sorted(set(values) - {"test", "production"})
+    if unsupported:
+        raise ValueError(f"WORKER_WORK_ENVS contains unsupported values: {', '.join(unsupported)}")
+    return values
+
+
+def _worker_target_failure_threshold() -> int:
+    value = _env_int("WORKER_TARGET_FAILURE_THRESHOLD", 3)
+    if value < 1:
+        raise ValueError("WORKER_TARGET_FAILURE_THRESHOLD must be >= 1")
+    return value
+
+
+def _worker_target_cooldown_seconds() -> int:
+    value = _env_int("WORKER_TARGET_COOLDOWN_SECONDS", 60)
+    if value < 1:
+        raise ValueError("WORKER_TARGET_COOLDOWN_SECONDS must be >= 1")
+    return value
+
+
 def _commercial_queue_config() -> CommercialQueueConfig:
     threshold = _env_int("COMMERCIAL_QUEUE_THRESHOLD", 5)
+    spillover_delay_seconds = _env_int("COMMERCIAL_SPILLOVER_DELAY_SECONDS", 0)
+    routing_mode = _env_str("WORKER_ROUTING_MODE", "parallel").lower()
     if threshold < 1:
         raise ValueError("COMMERCIAL_QUEUE_THRESHOLD must be >= 1")
-    return CommercialQueueConfig(threshold=threshold)
+    if spillover_delay_seconds < 0:
+        raise ValueError("COMMERCIAL_SPILLOVER_DELAY_SECONDS must be >= 0")
+    if routing_mode not in {"parallel", "local_preferred", "local_only"}:
+        raise ValueError(
+            "WORKER_ROUTING_MODE must be one of: parallel, local_preferred, local_only"
+        )
+    return CommercialQueueConfig(
+        threshold=threshold,
+        routing_mode=routing_mode,
+        spillover_delay_seconds=spillover_delay_seconds,
+    )
 
 
 def _task_queue_max_waiting() -> int:
@@ -298,13 +401,28 @@ def _task_queue_max_waiting() -> int:
 def _retry_config() -> RetryConfig:
     max_poll_recoveries = _env_int("RETRY_MAX_POLL_RECOVERIES", 3)
     max_run_lifetime_seconds = _env_int("RETRY_MAX_RUN_LIFETIME_SECONDS", 7200)
+    max_workflow_attempts = _env_int("RETRY_MAX_WORKFLOW_ATTEMPTS", 3)
+    policy_version = _env_str("RETRY_POLICY_VERSION", "throughput_first_v1").lower()
     if max_poll_recoveries < 1:
         raise ValueError("RETRY_MAX_POLL_RECOVERIES must be >= 1")
     if max_run_lifetime_seconds < 1:
         raise ValueError("RETRY_MAX_RUN_LIFETIME_SECONDS must be >= 1")
+    if max_workflow_attempts < 1:
+        raise ValueError("RETRY_MAX_WORKFLOW_ATTEMPTS must be >= 1")
+    if policy_version not in {
+        "throughput_first_v1",
+        "local_first_v1",
+        "single_target_v1",
+    }:
+        raise ValueError(
+            "RETRY_POLICY_VERSION must be one of: "
+            "throughput_first_v1, local_first_v1, single_target_v1"
+        )
     return RetryConfig(
         max_poll_recoveries=max_poll_recoveries,
         max_run_lifetime_seconds=max_run_lifetime_seconds,
+        max_workflow_attempts=max_workflow_attempts,
+        policy_version=policy_version,
     )
 
 

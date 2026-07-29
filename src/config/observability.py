@@ -14,6 +14,9 @@ _LOG_FIELDS = (
     "task_type",
     "work_env",
     "workflow_platform",
+    "execution_pool",
+    "workflow_target_id",
+    "retry_policy_version",
 )
 
 _context: dict[str, contextvars.ContextVar[str]] = {
