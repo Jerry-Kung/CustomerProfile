@@ -11,6 +11,7 @@ from src.domain.task.models import TaskRecord
 from src.domain.task.retry_policy import (
     LOCAL_FIRST_V1,
     SINGLE_TARGET_V1,
+    THROUGHPUT_FIRST_V1,
     attempt_limits,
     next_execution_pool,
 )
@@ -39,6 +40,10 @@ _BACKOFF_JITTER_RATIO = 0.2
 
 class _RetryLeaseLost(RuntimeError):
     """The worker no longer owns the claimed task, so it must stop polling."""
+
+
+class _WorkerShutdownRequested(RuntimeError):
+    """The process is stopping, so a persisted run must be handed back safely."""
 
 
 class WorkerExecutor:
@@ -90,6 +95,7 @@ class WorkerExecutor:
         self._legacy_processing_timeout_seconds = legacy_processing_timeout_seconds
         self._retry_recovery_lock = threading.Lock()
         self._last_retry_recovery_monotonic = 0.0
+        self._shutdown_event = threading.Event()
 
     def operational_snapshot(self) -> dict[str, object]:
         snapshot_fn = getattr(self._task_service.repository, "get_queue_stats", None)
@@ -97,7 +103,13 @@ class WorkerExecutor:
         snapshot.update(self._target_circuit.snapshot())
         return snapshot
 
+    def request_shutdown(self) -> None:
+        """Stop claiming new work and interrupt QingTian polling between requests."""
+        self._shutdown_event.set()
+
     def execute_once(self) -> str:
+        if self._shutdown_event.is_set():
+            return "idle"
         execute_start = time.perf_counter()
         retry_enabled = self._supports_qingtian_retry()
         self._maybe_recover_expired_retry_leases(enabled=retry_enabled)
@@ -140,6 +152,12 @@ class WorkerExecutor:
                 mask_phone(claimed.customer_phonenumber),
             )
             return "error"
+        if retry_enabled and claimed.claim_token and self._shutdown_event.is_set():
+            return self._release_retry_claim_for_shutdown(
+                claimed=claimed,
+                attempt_no=claimed.attempt_count or None,
+                retain_workflow_run=bool(claimed.workflow_run_id),
+            )
 
         task_id = claimed.id
         phone = claimed.customer_phonenumber
@@ -414,6 +432,12 @@ class WorkerExecutor:
                     on_poll=heartbeat,
                 )
             parsed = self._output_parser.parse(output_raw)
+        except _WorkerShutdownRequested:
+            return self._release_retry_claim_for_shutdown(
+                claimed=claimed,
+                attempt_no=attempt_no,
+                retain_workflow_run=bool(workflow_run_id),
+            )
         except _RetryLeaseLost:
             self._logger.warning(
                 "worker_retry_lease_lost task_id=%s generation=%s; stopping without a terminal write",
@@ -595,6 +619,8 @@ class WorkerExecutor:
 
         def heartbeat() -> None:
             nonlocal last_heartbeat
+            if self._shutdown_event.is_set():
+                raise _WorkerShutdownRequested("worker shutdown requested")
             now = time.monotonic()
             if now - last_heartbeat < self._retry_config.lease_heartbeat_seconds:
                 return
@@ -612,6 +638,52 @@ class WorkerExecutor:
             last_heartbeat = now
 
         return heartbeat
+
+    def _release_retry_claim_for_shutdown(
+        self,
+        *,
+        claimed: TaskRecord,
+        attempt_no: int | None,
+        retain_workflow_run: bool,
+    ) -> str:
+        if claimed.id is None or not claimed.claim_token:
+            return "error"
+        next_execution_pool = (
+            "any"
+            if not retain_workflow_run
+            and claimed.retry_policy_version == THROUGHPUT_FIRST_V1
+            else None
+        )
+        try:
+            scheduled = self._task_service.repository.schedule_retry(
+                task_id=claimed.id,
+                generation=claimed.generation,
+                claim_token=claimed.claim_token,
+                error_code="WORKER_SHUTDOWN",
+                error_stage="worker",
+                error_message="worker shutdown requested; resuming durable work on another worker",
+                delay_seconds=0,
+                retain_workflow_run=retain_workflow_run,
+                terminal_attempt=False,
+                attempt_no=attempt_no,
+                increment_poll_recovery=False,
+                next_execution_pool=next_execution_pool,
+            )
+        except Exception:
+            self._logger.exception(
+                "worker_shutdown_claim_release_failed task_id=%s generation=%s",
+                claimed.id,
+                claimed.generation,
+            )
+            return "error"
+        if scheduled:
+            self._logger.info(
+                "worker_shutdown_claim_released task_id=%s generation=%s has_workflow_run_id=%s",
+                claimed.id,
+                claimed.generation,
+                retain_workflow_run,
+            )
+        return "retrying" if scheduled else "error"
 
     def _retry_new_run_or_fail(
         self,
@@ -818,6 +890,9 @@ class WorkerExecutor:
         if self._worker_role == "local":
             return True
         assert self._commercial_queue_gate is not None
+        static_decision = self._commercial_queue_gate.static_decision()
+        if static_decision is not None:
+            return static_decision
         try:
             snapshot = self.operational_snapshot()
             pressure = QueuePressure(

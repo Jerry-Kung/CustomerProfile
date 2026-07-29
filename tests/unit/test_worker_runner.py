@@ -10,9 +10,13 @@ from src.worker.runner import WorkerRunner
 class _Executor:
     def __init__(self, status: str):
         self.status = status
+        self.shutdown_requests = 0
 
     def execute_once(self) -> str:
         return self.status
+
+    def request_shutdown(self) -> None:
+        self.shutdown_requests += 1
 
 
 def test_worker_run_once_idle_logged_at_debug_only(caplog):
@@ -29,11 +33,13 @@ def test_worker_run_once_claimed_logs(caplog):
 
 
 def test_worker_can_start_and_stop():
-    runner = WorkerRunner(executor=_Executor("idle"), interval_seconds=0.02)
+    executor = _Executor("idle")
+    runner = WorkerRunner(executor=executor, interval_seconds=0.02)
     t = threading.Thread(target=runner.run_forever, daemon=True)
     t.start()
     time.sleep(0.06)
     runner.stop()
     t.join(timeout=1.0)
     assert not t.is_alive()
+    assert executor.shutdown_requests >= 1
 

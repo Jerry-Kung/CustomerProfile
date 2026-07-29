@@ -1,8 +1,25 @@
 from __future__ import annotations
 
+import signal
+
 from src.app.bootstrap import bootstrap
 from src.config.logging_utils import get_logger, log_runtime_identity
 from src.worker.runner import WorkerRunner
+
+
+def _install_shutdown_signal_handlers(runner: WorkerRunner) -> None:
+    logger = get_logger("worker")
+
+    def handle_shutdown(signum, _frame) -> None:
+        try:
+            signal_name = signal.Signals(signum).name
+        except ValueError:
+            signal_name = str(signum)
+        logger.info("worker_shutdown_signal_received signal=%s", signal_name)
+        runner.stop()
+
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
 
 
 def main() -> int:
@@ -13,10 +30,8 @@ def main() -> int:
         interval_seconds=config.worker.poll_interval_seconds,
         concurrency=config.worker.concurrency,
     )
-    try:
-        runner.run_forever()
-    except KeyboardInterrupt:
-        runner.stop()
+    _install_shutdown_signal_handlers(runner)
+    runner.run_forever()
     return 0
 
 

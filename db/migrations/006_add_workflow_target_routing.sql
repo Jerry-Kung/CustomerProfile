@@ -5,9 +5,9 @@
 -- are VARCHAR values on purpose: adding another workflow must not require a
 -- schema migration.
 --
--- The one-time backfill binds only active legacy work to the AppKey that
--- created it.  Plain queued work remains unbound so target-specific Workers
--- can compete for it.
+-- The replay-safe backfill binds processing work and retry_wait work that
+-- already owns a runId. Plain queued work and retries awaiting a new run
+-- remain unbound so target-specific Workers can compete for them.
 --
 -- The new attempt-audit columns intentionally remain nullable. New Workers
 -- always populate them, while an emergency rollback to the pre-006 image can
@@ -98,16 +98,23 @@ PREPARE stmt_task_target_revision FROM @add_task_target_revision;
 EXECUTE stmt_task_target_revision;
 DEALLOCATE PREPARE stmt_task_target_revision;
 
-SET @backfill_active_task_target = (
-    SELECT IF(
-        @task_target_existed,
-        'SELECT ''workflow target backfill already applied''',
-        'UPDATE customer_profile_tasks SET workflow_target_id = CONCAT(execution_backend, ''-default''), workflow_target_revision = ''v1'' WHERE workflow_target_id IS NULL AND status IN (''processing'', ''retry_wait'')'
+UPDATE customer_profile_tasks
+SET workflow_target_id = COALESCE(
+        workflow_target_id,
+        CONCAT(execution_backend, '-default')
+    ),
+    workflow_target_revision = COALESCE(workflow_target_revision, 'v1')
+WHERE (
+        workflow_target_id IS NULL
+        OR workflow_target_revision IS NULL
     )
-);
-PREPARE stmt_backfill_active_task_target FROM @backfill_active_task_target;
-EXECUTE stmt_backfill_active_task_target;
-DEALLOCATE PREPARE stmt_backfill_active_task_target;
+  AND (
+        status = 'processing'
+        OR (
+            status = 'retry_wait'
+            AND workflow_run_id IS NOT NULL
+        )
+    );
 
 SET @task_policy_existed = (
     SELECT EXISTS (

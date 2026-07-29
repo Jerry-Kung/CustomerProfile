@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -37,6 +38,7 @@ class MySQLTaskRepository:
         self._has_work_env_column_cache: bool | None = None
         self._has_batch_id_column_cache: bool | None = None
         self._has_task_type_column_cache: bool | None = None
+        self._column_capability_lock = threading.Lock()
 
     def upsert_queued(
         self,
@@ -1621,22 +1623,42 @@ class MySQLTaskRepository:
             conn.close()
 
     def _has_work_env_column(self, conn) -> bool:
-        if self._has_work_env_column_cache is not None:
-            return self._has_work_env_column_cache
-        self._has_work_env_column_cache = _column_exists(conn, "work_env")
-        return self._has_work_env_column_cache
+        return self._cached_column_capability(
+            conn,
+            cache_attribute="_has_work_env_column_cache",
+            column_name="work_env",
+        )
 
     def _has_batch_id_column(self, conn) -> bool:
-        if self._has_batch_id_column_cache is not None:
-            return self._has_batch_id_column_cache
-        self._has_batch_id_column_cache = _column_exists(conn, "batch_id")
-        return self._has_batch_id_column_cache
+        return self._cached_column_capability(
+            conn,
+            cache_attribute="_has_batch_id_column_cache",
+            column_name="batch_id",
+        )
 
     def _has_task_type_column(self, conn) -> bool:
-        if self._has_task_type_column_cache is not None:
-            return self._has_task_type_column_cache
-        self._has_task_type_column_cache = _column_exists(conn, "task_type")
-        return self._has_task_type_column_cache
+        return self._cached_column_capability(
+            conn,
+            cache_attribute="_has_task_type_column_cache",
+            column_name="task_type",
+        )
+
+    def _cached_column_capability(
+        self,
+        conn,
+        *,
+        cache_attribute: str,
+        column_name: str,
+    ) -> bool:
+        cached = getattr(self, cache_attribute)
+        if cached is not None:
+            return cached
+        with self._column_capability_lock:
+            cached = getattr(self, cache_attribute)
+            if cached is None:
+                cached = _column_exists(conn, column_name)
+                setattr(self, cache_attribute, cached)
+            return cached
 
     @staticmethod
     def _to_record(row: dict) -> TaskRecord:

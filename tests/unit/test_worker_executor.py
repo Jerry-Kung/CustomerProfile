@@ -32,6 +32,7 @@ class _Repo:
         self.succeeded: tuple[int, dict, str | None, str | None] | None = None
         self.failed: tuple[int, str] | None = None
         self.claim_calls = 0
+        self.queue_stats_calls = 0
         self.queue_depth = queue_depth
         self.oldest_queued_age_seconds = oldest_queued_age_seconds
 
@@ -59,6 +60,7 @@ class _Repo:
         return item
 
     def get_queue_stats(self) -> dict[str, object]:
+        self.queue_stats_calls += 1
         return {
             "queue_depth": self.queue_depth,
             "oldest_queued_age_seconds": self.oldest_queued_age_seconds,
@@ -192,6 +194,7 @@ class _RecoverableWorkflow:
         self.poll_calls: list[dict] = []
         self.poll_error: Exception | None = None
         self.submit_error: Exception | None = None
+        self.before_poll_callback = None
 
     def submit_workflow(self, **kwargs):
         self.submit_calls.append(kwargs)
@@ -201,6 +204,8 @@ class _RecoverableWorkflow:
 
     def poll_workflow(self, **kwargs):
         self.poll_calls.append(kwargs)
+        if self.before_poll_callback is not None:
+            self.before_poll_callback()
         callback = kwargs.get("on_poll")
         if callback:
             callback()
@@ -466,6 +471,63 @@ def test_commercial_worker_claims_normal_task_once_queue_threshold_is_reached():
     assert repo.claim_calls == 1
 
 
+def test_parallel_commercial_worker_skips_queue_pressure_query():
+    repo = _Repo(
+        claimed=TaskRecord(
+            id=9,
+            customer_phonenumber="13800138000",
+            status="processing",
+        ),
+        queue_depth=0,
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=_WorkflowSuccess(),
+        output_parser=_parser(),
+        logger=_logger(),
+        worker_role="commercial",
+        commercial_queue_gate=CommercialQueueGate(
+            CommercialQueueThreshold(
+                queue_depth=100,
+                routing_mode="parallel",
+                spillover_delay_seconds=600,
+            )
+        ),
+    )
+
+    assert executor.execute_once() == "succeeded"
+    assert repo.claim_calls == 1
+    assert repo.queue_stats_calls == 0
+
+
+def test_local_only_commercial_worker_skips_queue_pressure_query():
+    repo = _Repo(
+        claimed=TaskRecord(
+            id=10,
+            customer_phonenumber="13800138000",
+            status="processing",
+        ),
+        queue_depth=100,
+    )
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=_WorkflowSuccess(),
+        output_parser=_parser(),
+        logger=_logger(),
+        worker_role="commercial",
+        commercial_queue_gate=CommercialQueueGate(
+            CommercialQueueThreshold(
+                queue_depth=1,
+                routing_mode="local_only",
+            )
+        ),
+    )
+
+    assert executor.execute_once() == "idle"
+    assert repo.claim_calls == 0
+    assert repo.queue_stats_calls == 0
+
+
 def test_retry_executor_persists_run_id_before_polling_and_guardedly_succeeds():
     repo = _RetryRepo(_retry_task())
     workflow = _RecoverableWorkflow()
@@ -495,6 +557,32 @@ def test_retry_executor_persists_run_id_before_polling_and_guardedly_succeeds():
     assert repo.lease_refreshes == 0
     assert repo.legacy_recoveries == [{"timeout_seconds": 2400, "limit": 100}]
     assert repo.succeeded_claimed[0]["attempt_no"] == 1
+
+
+def test_shutdown_after_submit_retains_persisted_run_without_counting_recovery():
+    repo = _RetryRepo(_retry_task(retry_policy_version="throughput_first_v1"))
+    workflow = _RecoverableWorkflow()
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        retry_config=_retry_config(),
+    )
+    workflow.before_poll_callback = executor.request_shutdown
+
+    assert executor.execute_once() == "retrying"
+    assert len(workflow.submit_calls) == 1
+    assert len(repo.persisted_runs) == 1
+    assert len(repo.scheduled) == 1
+    scheduled = repo.scheduled[0]
+    assert scheduled["delay_seconds"] == 0
+    assert scheduled["retain_workflow_run"] is True
+    assert scheduled["terminal_attempt"] is False
+    assert scheduled["increment_poll_recovery"] is False
+    assert scheduled["next_execution_pool"] is None
+    assert scheduled["error_code"] == "WORKER_SHUTDOWN"
 
 
 def test_lease_heartbeat_waits_one_interval_before_first_renewal(monkeypatch):

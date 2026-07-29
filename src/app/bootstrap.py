@@ -88,7 +88,7 @@ def _build_workflow_client(config: AppConfig, logger: logging.Logger) -> Workflo
 
 
 def _warn_if_task_type_column_missing(logger, db_client, repository) -> None:
-    """Probe the task_type column at boot so ops gets a loud warning if migration 003 wasn't applied.
+    """Warm legacy-column capabilities and warn if migration 003 is missing.
 
     Without this, invitation_strategy submissions silently run as customer_profile.
     Probe is best-effort: a DB failure here must not block startup.
@@ -96,6 +96,8 @@ def _warn_if_task_type_column_missing(logger, db_client, repository) -> None:
     try:
         conn = db_client.connect()
         try:
+            repository._has_work_env_column(conn)
+            repository._has_batch_id_column(conn)
             if not repository._has_task_type_column(conn):
                 logger.warning(
                     "task_type_column_missing migration=003_add_task_type.sql "

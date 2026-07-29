@@ -30,6 +30,7 @@ def test_parallel_mode_always_allows_commercial_consumption():
         )
     )
 
+    assert gate.static_decision() is True
     assert gate.allow_new(QueuePressure(queue_depth=0)) is True
 
 
@@ -42,6 +43,7 @@ def test_local_preferred_mode_spills_over_by_oldest_wait_age():
         )
     )
 
+    assert gate.static_decision() is None
     assert gate.allow_new(
         QueuePressure(queue_depth=1, oldest_queued_age_seconds=29)
     ) is False
@@ -55,6 +57,7 @@ def test_local_only_mode_keeps_commercial_gate_closed():
         CommercialQueueThreshold(queue_depth=1, routing_mode="local_only")
     )
 
+    assert gate.static_decision() is False
     assert gate.allow_new(
         QueuePressure(queue_depth=100, oldest_queued_age_seconds=1000)
     ) is False

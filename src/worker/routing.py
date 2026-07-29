@@ -22,11 +22,18 @@ class CommercialQueueGate:
     def __init__(self, threshold: CommercialQueueThreshold):
         self._threshold = threshold
 
-    def allow_new(self, pressure: QueuePressure) -> bool:
+    def static_decision(self) -> bool | None:
+        """Return a decision that does not require a queue-pressure query."""
         if self._threshold.routing_mode == "parallel":
             return True
         if self._threshold.routing_mode == "local_only":
             return False
+        return None
+
+    def allow_new(self, pressure: QueuePressure) -> bool:
+        static_decision = self.static_decision()
+        if static_decision is not None:
+            return static_decision
         if pressure.queue_depth >= self._threshold.queue_depth:
             return True
         age = pressure.oldest_queued_age_seconds

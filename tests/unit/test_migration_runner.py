@@ -93,3 +93,27 @@ def test_split_sql_statements_drops_empty_trailing_statement():
         "CREATE TABLE x(id INT)"
     ]
     assert migration_runner._split_sql_statements("   \n-- only a comment\n") == []
+
+
+def test_routing_migration_replays_only_safe_active_target_backfill():
+    migration_path = (
+        Path(__file__).resolve().parents[2]
+        / "db"
+        / "migrations"
+        / "006_add_workflow_target_routing.sql"
+    )
+    statements = migration_runner._split_sql_statements(
+        migration_path.read_text(encoding="utf-8")
+    )
+    target_backfills = [
+        statement
+        for statement in statements
+        if statement.startswith("UPDATE customer_profile_tasks")
+        and "CONCAT(execution_backend, '-default')" in statement
+    ]
+
+    assert len(target_backfills) == 1
+    target_backfill = target_backfills[0]
+    assert "status = 'processing'" in target_backfill
+    assert "status = 'retry_wait'" in target_backfill
+    assert "workflow_run_id IS NOT NULL" in target_backfill

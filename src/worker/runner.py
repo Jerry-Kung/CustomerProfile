@@ -7,6 +7,9 @@ from src.config.logging_utils import get_logger
 from src.worker.executor import WorkerExecutor
 
 
+_SHUTDOWN_TIMEOUT_SECONDS = 45.0
+
+
 class WorkerRunner:
     def __init__(
         self,
@@ -138,7 +141,7 @@ class WorkerRunner:
         name = f"worker-{index}"
         with self._heartbeats_lock:
             self._heartbeats[name] = time.monotonic()
-        t = threading.Thread(target=self._loop, name=name, args=(name,), daemon=False)
+        t = threading.Thread(target=self._loop, name=name, args=(name,), daemon=True)
         t.start()
         return t
 
@@ -204,7 +207,7 @@ class WorkerRunner:
         self._supervisor_thread = threading.Thread(
             target=self._supervisor_loop,
             name="worker-supervisor",
-            daemon=False,
+            daemon=True,
         )
         self._supervisor_thread.start()
         try:
@@ -214,14 +217,29 @@ class WorkerRunner:
         except KeyboardInterrupt:
             self._logger.info("worker_shutdown_requested")
         finally:
-            self._stop_event.set()
+            self.stop()
             # supervisor will observe stop_event and exit; it will not respawn anything from here on.
+            shutdown_deadline = time.monotonic() + _SHUTDOWN_TIMEOUT_SECONDS
             for t in list(self._threads):
-                t.join(timeout=30.0)
+                t.join(timeout=max(0.0, shutdown_deadline - time.monotonic()))
             if self._supervisor_thread is not None:
-                self._supervisor_thread.join(timeout=10.0)
+                self._supervisor_thread.join(
+                    timeout=max(0.0, shutdown_deadline - time.monotonic())
+                )
+            unfinished = [t.name for t in self._threads if t.is_alive()]
+            if self._supervisor_thread is not None and self._supervisor_thread.is_alive():
+                unfinished.append(self._supervisor_thread.name)
+            if unfinished:
+                self._logger.warning(
+                    "worker_shutdown_timeout timeout_seconds=%s unfinished_threads=%s",
+                    int(_SHUTDOWN_TIMEOUT_SECONDS),
+                    unfinished,
+                )
             self._maybe_log_summary(force=True)
             self._logger.info("worker_stopped")
 
     def stop(self) -> None:
         self._stop_event.set()
+        request_shutdown = getattr(self._executor, "request_shutdown", None)
+        if callable(request_shutdown):
+            request_shutdown()
