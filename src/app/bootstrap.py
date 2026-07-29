@@ -68,6 +68,13 @@ def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskServi
             )
         ),
         retry_config=config.retry,
+        # Old pre-005 claims have no lease. Recover them only after the
+        # configured QingTian poll timeout plus one recovery-scan interval.
+        legacy_processing_timeout_seconds=max(
+            1,
+            (config.qingtian.poll_timeout_ms + 999) // 1000
+            + config.retry.recovery_interval_seconds,
+        ),
     )
     return config, db_client, task_service, executor, upload_store
 

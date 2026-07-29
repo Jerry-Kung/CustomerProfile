@@ -141,6 +141,94 @@ class _ScheduleDB:
         return self.connection
 
 
+class _LeaseCursor:
+    def __init__(self, *, update_rowcount: int, ownership_matches: bool):
+        self._update_rowcount = update_rowcount
+        self._ownership_matches = ownership_matches
+        self.rowcount = 0
+        self.executed: list[tuple[str, tuple | None]] = []
+
+    def execute(self, sql: str, params=None) -> None:
+        normalized = " ".join(sql.split())
+        self.executed.append((normalized, params))
+        if normalized.startswith("UPDATE customer_profile_tasks"):
+            self.rowcount = self._update_rowcount
+        else:
+            self.rowcount = 0
+
+    def fetchone(self):
+        return (1,) if self._ownership_matches else None
+
+
+class _LeaseConnection:
+    def __init__(self, *, update_rowcount: int, ownership_matches: bool):
+        self.cursor_instance = _LeaseCursor(
+            update_rowcount=update_rowcount,
+            ownership_matches=ownership_matches,
+        )
+        self.commits = 0
+        self.closed = False
+
+    def cursor(self):
+        return self.cursor_instance
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _LeaseDB:
+    def __init__(self, connection: _LeaseConnection):
+        self.connection = connection
+
+    def connect(self) -> _LeaseConnection:
+        return self.connection
+
+
+class _LegacyRequeueCursor:
+    def __init__(self, *, rowcount: int):
+        self._configured_rowcount = rowcount
+        self.rowcount = 0
+        self.executed: list[tuple[str, tuple | None]] = []
+
+    def execute(self, sql: str, params=None) -> None:
+        normalized = " ".join(sql.split())
+        self.executed.append((normalized, params))
+        self.rowcount = self._configured_rowcount
+
+
+class _LegacyRequeueConnection:
+    def __init__(self, *, rowcount: int):
+        self.cursor_instance = _LegacyRequeueCursor(rowcount=rowcount)
+        self.commits = 0
+        self.closed = False
+
+    def cursor(self):
+        return self.cursor_instance
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _LegacyRequeueDB:
+    def __init__(self, connection: _LegacyRequeueConnection):
+        self.connection = connection
+
+    def connect(self) -> _LegacyRequeueConnection:
+        return self.connection
+
+
 def _repository(task_update_rowcounts: dict[str, int]) -> tuple[MySQLTaskRepository, _RecoveryConnection]:
     connection = _RecoveryConnection(task_update_rowcounts)
     return (
@@ -179,6 +267,73 @@ def test_expired_lease_after_attempt_reservation_is_not_blindly_resubmitted():
     assert "AND EXISTS" in sql
     assert "QINGTIAN_SUBMIT_UNKNOWN" in sql
     assert "UPDATE customer_profile_task_attempts AS attempt" in sql
+    assert connection.commits == 1
+    assert connection.closed is True
+
+
+def test_same_second_lease_refresh_accepts_unchanged_but_still_owned_row():
+    connection = _LeaseConnection(update_rowcount=0, ownership_matches=True)
+    repo = MySQLTaskRepository(
+        _LeaseDB(connection),
+        logger=logging.getLogger("test_task_repository_retry"),
+    )
+
+    assert repo.refresh_lease(
+        task_id=91,
+        generation=7,
+        claim_token="claim-91",
+        lease_seconds=180,
+    )
+
+    statements = connection.cursor_instance.executed
+    assert len(statements) == 2
+    assert statements[1][0].startswith("SELECT 1 FROM customer_profile_tasks")
+    assert "generation = %s" in statements[1][0]
+    assert "claim_token = %s" in statements[1][0]
+    assert statements[1][1] == (91, 7, "claim-91")
+    assert connection.commits == 1
+    assert connection.closed is True
+
+
+def test_lease_refresh_rejects_row_when_fencing_token_no_longer_matches():
+    connection = _LeaseConnection(update_rowcount=0, ownership_matches=False)
+    repo = MySQLTaskRepository(
+        _LeaseDB(connection),
+        logger=logging.getLogger("test_task_repository_retry"),
+    )
+
+    assert not repo.refresh_lease(
+        task_id=91,
+        generation=7,
+        claim_token="stale-claim",
+        lease_seconds=180,
+    )
+    assert connection.commits == 1
+    assert connection.closed is True
+
+
+def test_stale_unleased_legacy_task_is_requeued_as_a_new_unbound_generation():
+    connection = _LegacyRequeueConnection(rowcount=10)
+    repo = MySQLTaskRepository(
+        _LegacyRequeueDB(connection),
+        default_retry_policy_version="throughput_first_v1",
+        logger=logging.getLogger("test_task_repository_retry"),
+    )
+
+    assert repo.requeue_stale_processing(timeout_seconds=2430, limit=100) == 10
+
+    sql, params = connection.cursor_instance.executed[0]
+    assert "generation = generation + 1" in sql
+    assert "workflow_target_id = NULL" in sql
+    assert "workflow_target_revision = NULL" in sql
+    assert "workflow_run_id = NULL" in sql
+    assert "attempt_count = 0" in sql
+    assert "lease_expires_at IS NULL" in sql
+    assert "claim_token IS NULL" in sql
+    assert "workflow_run_id IS NULL" in sql
+    assert "dify_run_id IS NULL" in sql
+    assert "attempt_count = 0" in sql
+    assert params == ("throughput_first_v1", 2430, 100)
     assert connection.commits == 1
     assert connection.closed is True
 

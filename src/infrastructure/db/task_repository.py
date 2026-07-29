@@ -700,8 +700,28 @@ class MySQLTaskRepository:
                 """,
                 (lease_seconds, task_id, generation, claim_token),
             )
+            renewed = cursor.rowcount == 1
+            if not renewed:
+                # MySQL returns zero affected rows when claim and heartbeat
+                # occur in the same second and the DATETIME value is
+                # unchanged. Distinguish that no-op from a genuinely lost
+                # generation/token fence before stopping the remote poll.
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM customer_profile_tasks
+                    WHERE id = %s
+                      AND generation = %s
+                      AND claim_token = %s
+                      AND status = 'processing'
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    (task_id, generation, claim_token),
+                )
+                renewed = cursor.fetchone() is not None
             conn.commit()
-            return cursor.rowcount == 1
+            return renewed
         except Exception:
             try:
                 conn.rollback()
@@ -1478,15 +1498,43 @@ class MySQLTaskRepository:
                 """
                 UPDATE customer_profile_tasks
                 SET status = 'queued',
-                    error_message = 'PROCESSING_TIMEOUT_RECOVERED',
+                    generation = generation + 1,
+                    output = NULL,
+                    card_id = NULL,
+                    nickname = NULL,
+                    execution_backend = 'local',
+                    execution_pool = 'local',
+                    workflow_target_id = NULL,
+                    workflow_target_revision = NULL,
+                    retry_policy_version = CASE
+                        WHEN task_type = 'invitation_strategy' THEN 'single_target_v1'
+                        ELSE %s
+                    END,
+                    workflow_run_id = NULL,
+                    workflow_run_started_at = NULL,
+                    attempt_count = 0,
+                    poll_recovery_count = 0,
+                    next_retry_at = NULL,
+                    error_message = 'PROCESSING_TIMEOUT_RECOVERED: legacy unleased task requeued',
+                    last_error_code = 'PROCESSING_TIMEOUT_RECOVERED',
+                    last_error_stage = 'claim',
+                    lease_expires_at = NULL,
+                    claim_token = NULL,
+                    queued_at = CURRENT_TIMESTAMP,
+                    started_at = NULL,
+                    finished_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE status = 'processing'
                   AND lease_expires_at IS NULL
+                  AND claim_token IS NULL
+                  AND workflow_run_id IS NULL
+                  AND dify_run_id IS NULL
+                  AND attempt_count = 0
                   AND updated_at < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL %s SECOND)
                 ORDER BY updated_at ASC
                 LIMIT %s
                 """,
-                (timeout_seconds, limit),
+                (self._default_retry_policy_version, timeout_seconds, limit),
             )
             conn.commit()
             affected = int(cursor.rowcount)

@@ -302,7 +302,10 @@ WORKER_LEASE_SECONDS=180
 WORKER_LEASE_HEARTBEAT_SECONDS=30
 ```
 
-Worker 每次发起轮询请求前刷新租约；180 秒默认值长于擎天客户端 120 秒读取超时，避免请求尚未返回时被恢复器误判为 Worker 失联。恢复器只处理：
+领取任务时先创建 180 秒租约，首次续租等待一个 30 秒心跳周期，之后在轮询期间按周期
+刷新。MySQL 报告零变更行时会再次校验 generation/claim token，区分同秒无变化和真实
+租约丢失。180 秒默认值长于擎天客户端 120 秒读取超时，避免请求尚未返回时被恢复器
+误判为 Worker 失联。常规恢复器处理：
 
 ```text
 status = processing
@@ -316,6 +319,8 @@ AND lease_expires_at < NOW()
   `QINGTIAN_RUN_STALLED`，不会创建新运行。
 - 无 `workflow_run_id` 且确认提交未成功：安排新提交。
 - 无 `workflow_run_id` 且提交结果未知：先按幂等执行 ID 查重；无法查重时进入受限重试并记录重复风险。
+- 升级前遗留的无租约任务，仅在同时满足无 claim token、无新旧 runId、零尝试且超过
+  当前轮询超时时，清除旧目标绑定、递增 generation 并重新入队。
 - 面向“Worker 长期未启动/商用预算耗尽”的通用任务生命周期监护器仍是后续设计；
   当前已实现的边界只覆盖被本地擎天 Worker 再次领取的同一 `runId` 轮询恢复。
 

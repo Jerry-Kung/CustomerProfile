@@ -60,6 +60,7 @@ class WorkerExecutor:
         worker_target_cooldown_seconds: int = 60,
         commercial_queue_gate: CommercialQueueGate | None = None,
         retry_config: RetryConfig | None = None,
+        legacy_processing_timeout_seconds: int = 2400,
     ):
         if worker_role not in {"local", "commercial"}:
             raise ValueError("worker_role must be local or commercial")
@@ -67,6 +68,8 @@ class WorkerExecutor:
             raise ValueError("commercial worker requires a commercial_queue_gate")
         if worker_target_mode not in {"active", "draining", "recovery_only"}:
             raise ValueError("worker_target_mode must be active, draining, or recovery_only")
+        if legacy_processing_timeout_seconds < 1:
+            raise ValueError("legacy_processing_timeout_seconds must be >= 1")
         self._task_service = task_service
         self._workflow_client = workflow_client
         self._output_parser = output_parser
@@ -84,6 +87,7 @@ class WorkerExecutor:
         )
         self._commercial_queue_gate = commercial_queue_gate
         self._retry_config = retry_config or RetryConfig()
+        self._legacy_processing_timeout_seconds = legacy_processing_timeout_seconds
         self._retry_recovery_lock = threading.Lock()
         self._last_retry_recovery_monotonic = 0.0
 
@@ -254,6 +258,10 @@ class WorkerExecutor:
             self._last_retry_recovery_monotonic = now
         try:
             self._task_service.recover_expired_retry_leases(limit=100)
+            self._task_service.requeue_stale_processing(
+                timeout_seconds=self._legacy_processing_timeout_seconds,
+                limit=100,
+            )
         except Exception:
             # A recovery scan is best effort.  Claiming is still safe because
             # the DB transaction and fencing token protect each active task.
@@ -579,7 +587,11 @@ class WorkerExecutor:
         return "succeeded"
 
     def _lease_heartbeat(self, *, task_id: int, generation: int, claim_token: str):
-        last_heartbeat = 0.0
+        # The claim already created a full lease. Starting at zero caused the
+        # first poll to rewrite the same second-level DATETIME immediately;
+        # MySQL reports zero changed rows for that no-op, which looked like a
+        # lost fencing token. Wait one heartbeat interval before renewing.
+        last_heartbeat = time.monotonic()
 
         def heartbeat() -> None:
             nonlocal last_heartbeat

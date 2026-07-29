@@ -165,7 +165,8 @@ API 会把 `RETRY_POLICY_VERSION` 固化到每一代任务上。修改策略只�
   不会盲目重提造成重复画像。
 - 基础退避为 30/120/600 秒，并加入 ±20% 抖动避免大量失败任务同时重试；
   `Retry-After` 只会把等待时间拉长。租约 180 秒、心跳 30 秒、过期租约扫描 30 秒，
-  属于内部一致性参数。
+  属于内部一致性参数。领取时已经创建完整租约，首次续租会等待一个心跳周期；
+  MySQL 返回零变更行时还会校验 generation/claim token，避免把同秒续租误判为丢失。
 - `retry_wait` 是内部状态；现有结果接口仍返回 HTTP 202 和 `processing`。
 
 `throughput_first_v1` 的目标去重是软优先，不是会阻塞任务的硬限制：到期重试先给新
@@ -306,7 +307,9 @@ customer-profile-migrate
 > **先完成 006，再启动新版 API 和全部目标 Worker**。迁移会把升级时仍在
 > `processing` / `retry_wait` 的旧任务绑定到 `local-default` 或
 > `commercial-default`，旧版 1+1 Worker 的默认目标 ID 与之匹配；普通 `queued`
-> 任务保持未绑定。
+> 任务保持未绑定。若升级时直接中断旧 Worker，新版擎天 Worker 会在原轮询超时加一次
+> 扫描间隔后，自动把“无租约、无 claim token、无新旧 runId、零尝试”的遗留
+> `processing` 任务作为新 generation 重新入队；已有 runId 的任务不会走该路径。
 
 ## 6. 对外接口一览
 

@@ -134,6 +134,7 @@ class _RetryRepo:
         self.stall_on_lifetime_check: int | None = None
         self.lease_refreshes = 0
         self.recoveries = 0
+        self.legacy_recoveries: list[dict] = []
 
     def claim_next_eligible(self, **kwargs):
         self.claim_calls += 1
@@ -148,6 +149,12 @@ class _RetryRepo:
     def recover_expired_retry_leases(self, *, limit: int):
         self.recoveries += 1
         return 0, 0
+
+    def requeue_stale_processing(self, *, timeout_seconds: int, limit: int):
+        self.legacy_recoveries.append(
+            {"timeout_seconds": timeout_seconds, "limit": limit}
+        )
+        return 0
 
     def reserve_workflow_attempt(self, **kwargs):
         self.reserved.append(kwargs)
@@ -483,8 +490,40 @@ def test_retry_executor_persists_run_id_before_polling_and_guardedly_succeeds():
             "workflow_run_id": "run-new",
         }
     ]
-    assert repo.lease_refreshes == 1
+    # The claim already owns a full lease, so the first immediate poll does
+    # not perform a redundant same-second renewal.
+    assert repo.lease_refreshes == 0
+    assert repo.legacy_recoveries == [{"timeout_seconds": 2400, "limit": 100}]
     assert repo.succeeded_claimed[0]["attempt_no"] == 1
+
+
+def test_lease_heartbeat_waits_one_interval_before_first_renewal(monkeypatch):
+    repo = _RetryRepo(_retry_task(workflow_run_id="run-known", attempt_count=1))
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=_RecoverableWorkflow(),
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="qingtian",
+        retry_config=_retry_config(),
+    )
+    monotonic_now = [100.0]
+    monkeypatch.setattr(
+        "src.worker.executor.time.monotonic",
+        lambda: monotonic_now[0],
+    )
+
+    heartbeat = executor._lease_heartbeat(
+        task_id=91,
+        generation=7,
+        claim_token="claim-91",
+    )
+    heartbeat()
+    assert repo.lease_refreshes == 0
+
+    monotonic_now[0] = 131.0
+    heartbeat()
+    assert repo.lease_refreshes == 1
 
 
 def test_retry_executor_resumes_persisted_run_after_poll_timeout_without_submit():
