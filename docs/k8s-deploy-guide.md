@@ -1,5 +1,10 @@
 # K8s 部署快速上手
 
+> 此文档记录旧的原始 YAML 部署方式。当前生产部署已经改用 Helm，请以
+> [Helm 部署与升级](helm-deploy.md) 为准。旧 YAML 仅用于历史参数核对，不应继续直接
+> `kubectl apply`，否则会与 Helm 管理的同名资源发生冲突；这些清单也不包含 006
+> 目标绑定和当前 1 本地 + 3 商用拓扑。
+
 本文说明如何把 Customer Profile Backend 部署到 Kubernetes。当前 K8s 方案包含：
 
 - `Job/customer-profile-migrate`：一次性执行数据库迁移。

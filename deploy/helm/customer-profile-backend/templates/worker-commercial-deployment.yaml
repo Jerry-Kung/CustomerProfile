@@ -1,0 +1,99 @@
+{{- if not .Values.workflowTargets }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.names.commercialWorker }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "customer-profile-backend.commonLabels" . | nindent 4 }}
+    app: {{ .Values.names.commercialWorker }}
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/instance-role: commercial
+spec:
+  replicas: {{ .Values.commercialWorker.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Values.names.commercialWorker }}
+  template:
+    metadata:
+      labels:
+        {{- include "customer-profile-backend.commonLabels" . | nindent 8 }}
+        app: {{ .Values.names.commercialWorker }}
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/instance-role: commercial
+      annotations:
+        checksum/config: {{ toJson .Values.config | sha256sum }}
+        checksum/secrets: {{ toJson (dict "common" .Values.secrets.common "commercial" .Values.secrets.commercial) | sha256sum }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.commercialWorker.terminationGracePeriodSeconds }}
+      containers:
+        - name: customer-profile-worker-commercial
+          image: {{ include "customer-profile-backend.image" . | quote }}
+          imagePullPolicy: {{ .Values.commercialWorker.imagePullPolicy | default .Values.image.pullPolicy }}
+          command:
+            - customer-profile-worker
+          envFrom:
+            - configMapRef:
+                name: {{ .Values.names.configMap }}
+            - secretRef:
+                name: {{ .Values.names.commonSecret }}
+            - secretRef:
+                name: {{ .Values.names.commercialSecret }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WORKER_ROLE
+              value: commercial
+            - name: WORKFLOW_TARGET_ID
+              value: commercial-default
+            - name: WORKFLOW_TARGET_REVISION
+              value: v1
+            - name: WORKER_TARGET_MODE
+              value: active
+            - name: WORKER_TASK_TYPES
+              value: customer_profile
+            - name: WORKER_WORK_ENVS
+              value: test,production
+            - name: WORKER_CONCURRENCY
+              value: {{ .Values.commercialWorker.concurrency | quote }}
+            - name: COMMERCIAL_QUEUE_THRESHOLD
+              value: {{ .Values.commercialWorker.queueThreshold | quote }}
+            - name: RETRY_MAX_WORKFLOW_ATTEMPTS
+              value: {{ .Values.retry.maxWorkflowAttempts | quote }}
+            - name: RETRY_POLICY_VERSION
+              value: {{ .Values.retry.policyVersion | quote }}
+            - name: RETRY_MAX_POLL_RECOVERIES
+              value: {{ .Values.retry.maxPollRecoveries | quote }}
+            - name: RETRY_MAX_RUN_LIFETIME_SECONDS
+              value: {{ .Values.retry.maxRunLifetimeSeconds | quote }}
+          resources:
+            {{- toYaml .Values.commercialWorker.resources | nindent 12 }}
+          volumeMounts:
+            - name: logs
+              mountPath: {{ .Values.config.LOG_DIR }}
+            {{- if .Values.commercialWorker.mountTaskUploads }}
+            - name: task-uploads
+              mountPath: {{ .Values.config.TASK_UPLOAD_DIR }}
+            {{- end }}
+      volumes:
+        - name: logs
+          {{- if .Values.persistence.logs.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "customer-profile-backend.logsPvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.commercialWorker.mountTaskUploads }}
+        - name: task-uploads
+          {{- if .Values.persistence.taskUploads.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "customer-profile-backend.taskUploadsPvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+{{- end }}

@@ -1,0 +1,23 @@
+{{- if and .Values.persistence.taskUploads.enabled (not .Values.persistence.taskUploads.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.names.taskUploadsPvc }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "customer-profile-backend.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: task-uploads
+  {{- if .Values.persistence.taskUploads.keep }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.taskUploads.accessMode }}
+  {{- with .Values.persistence.taskUploads.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.taskUploads.size }}
+{{- end }}

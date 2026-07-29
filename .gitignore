@@ -2,8 +2,19 @@
 __pycache__/
 .pytest_cache/
 *.pyc
+*.egg-info/
 .env
 .env.local
 .env.test
 data/task-uploads/
 logs/
+tmp/
+dist/
+.uploads/
+.qoder/
+.DS_Store
+
+# Helm production values and packaged charts contain deployment secrets.
+deploy/helm/**/values*.private.yaml
+deploy/helm/**/*.tgz
+deploy/helm/**/*.tar.gz
