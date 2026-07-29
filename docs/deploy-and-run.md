@@ -1,12 +1,12 @@
 # 部署与运行指南（MVP）
 
-本文说明如何以**微服务方式**启动 Customer Profile 后端：HTTP API 与异步 Worker 分离部署，数据库与 Dify 使用外部环境变量配置。
+本文说明如何以**微服务方式**启动 Customer Profile 后端：HTTP API 与异步 Worker 分离部署，数据库与 Dify/擎天使用外部环境变量配置。
 
 ## 1. 前置条件
 
 - Python **3.11+**（本地运行）或 **Docker / Docker Compose**（容器运行）
 - 可访问的 **MySQL 8.x**，并已创建业务库（如 `customer_profile`）
-- 可访问的 **Dify**（Worker 消费任务时需要）
+- 可访问的 **Dify 或擎天**（由 `WORKFLOW_PLATFORM` 选择）
 - 数据库迁移：**docker compose 启动时由独立的 `migrate` 容器自动执行**（见 §4 / §5）；本地裸跑可手动执行 `customer-profile-migrate`。
 
 ## 2. 环境变量
@@ -21,7 +21,8 @@ cp .env.example .env
 
 若未安装依赖，请先执行：`pip install -e .` 或 `pip install python-dotenv`。
 
-必填项见 `.env.example`：`DIFY_*`、`MYSQL_*`。可选：
+必填项见 `.env.example`：`MYSQL_*`，以及所选平台对应的 `DIFY_*` 或
+`QINGTIAN_*`。可选：
 
 | 变量 | 说明 | 默认 |
 |------|------|------|
@@ -62,65 +63,115 @@ QingTian 的 API Key 选择规则与 Dify 完全一致：`task_type=invitation_s
 
 回滚到 Dify：将 `.env` 中 `WORKFLOW_PLATFORM` 改回 `dify`（或删除该行）并重启 API + Worker。QingTian 变量空着不会影响 Dify 路径。
 
-### 2.2 擎天双工作流积压分流
+### 2.2 可扩展工作流目标与消费模式
 
-擎天模式支持两个使用同一 MySQL 队列的 Worker：
+Worker 现在把“资源池”和“具体工作流目标”分开：
 
-- 本地模型 Worker：`WORKER_ROLE=local`，始终领取普通新任务。
-- 商用模型 Worker：`WORKER_ROLE=commercial`，排队数达到阈值时参与领取普通任务。
+- `WORKER_ROLE=local|commercial`：表示资源池，用于成本与路由策略。
+- `WORKFLOW_TARGET_ID`：表示一套稳定的工作流/AppKey，例如 `local-01`、
+  `commercial-01`。同一 AppKey 的多个副本使用同一个 ID；不同 AppKey 必须使用不同
+  ID。
+- `WORKFLOW_TARGET_REVISION`：目标密钥/配置的非敏感版本，默认 `v1`。
+- `WORKER_TARGET_MODE=active|draining|recovery_only`：`active` 可领取未绑定任务；
+  另外两种模式只处理已经绑定到本目标的恢复任务。
+- `WORKER_TASK_TYPES` / `WORKER_WORK_ENVS`：声明该目标能处理的任务类型和环境。
 
-Docker Compose 会默认启动这两个 Worker。擎天模式下，必须先在 `.env` 填写商用
-客户画像工作流的 TEST/PRODUCTION 两个 `QINGTIAN_COMMERCIAL_API_KEY_*`；邀请策略
-统一使用 `QINGTIAN_INVITATION_STRATEGY_API_KEY`。商用 Worker 不会回退使用本地客户
-画像工作流的 Key。商用 Worker 在排队数达到阈值时领取普通任务；它还会无视该阈值
-领取明确分配给 `commercial` 的 `retry_wait`，并且只恢复由商用 AppKey 创建的
-`runId`。
+当前 Docker Compose 测试拓扑默认启动一条本地目标和一条商用目标：
 
-唯一的分流参数：
+| 服务 | 目标 ID | 资源池 | 任务类型 |
+|------|---------|--------|----------|
+| `worker` | `local-default` | `local` | 客户画像、邀请策略 |
+| `commercial-worker` | `commercial-default` | `commercial` | 客户画像 |
+
+商用目标配置自己的 TEST/PRODUCTION AppKey：
 
 ```env
+QINGTIAN_COMMERCIAL_API_KEY_TEST=
+QINGTIAN_COMMERCIAL_API_KEY_PRODUCTION=
+```
+
+沿用 `local-default` / `commercial-default` 是有意的：006 会把旧版 1+1
+环境中尚未完成的运行绑定到这两个 ID，Compose 升级后可以直接恢复原 `runId`。
+其他环境可继续增加带独立 AppKey 和唯一目标 ID 的 Worker，不需要修改数据库结构。
+
+普通任务通过 MySQL `FOR UPDATE SKIP LOCKED` 原子领取，任意数量的 Worker
+进程/线程都不会重复消费。消费模式由以下变量控制：
+
+```env
+WORKER_ROUTING_MODE=parallel
 COMMERCIAL_QUEUE_THRESHOLD=5
+COMMERCIAL_SPILLOVER_DELAY_SECONDS=600
 ```
 
-当 `queued >= 5` 时商用 Worker 参与普通任务分流，低于 5 时停止领取普通任务。
-商用 Worker 没有额外启停开关，Compose 默认启动。两个 Worker 仍通过数据库的
-`FOR UPDATE SKIP LOCKED` 互斥领取同一队列中的任务。
+- `parallel`：所有 active 本地/商用目标立即共同消费，适合当前清理大量积压。
+- `local_preferred`：本地立即消费；队列深度达到阈值，或最老任务等待时间达到
+  `COMMERCIAL_SPILLOVER_DELAY_SECONDS` 后，商用目标参与新任务。
+- `local_only`：商用目标不领取普通 `queued` 任务。已经绑定的 `runId` 和明确的重试
+  仍会继续处理，避免切换策略时破坏进行中的任务。
 
-### 2.3 擎天 runId 恢复与重试（纯后端能力）
+商用队列闸门只限制普通新任务，不会阻断已经进入 `retry_wait` 的兜底重试。以后本地
+资源恢复后，只需将模式切到 `local_preferred` 并设置合适的等待时间；不需要修改消费
+代码或数据库结构。
 
-擎天 Worker 默认使用“持久化已有 `runId` 后恢复轮询”。这不修改擎天工作流、
-变量或接口：本服务仍调用原有 `/run_app_workflow` 与
-`/query_run_app_process`，只是会在收到 `runId` 后先写入 MySQL。
-
-擎天模式默认启用。必须先确认 `005_add_qingtian_retry_fields.sql` 已成功执行，再将
-API、本地 Worker 和商用 Worker 一起升级。可调参数只保留轮询恢复边界：
+每个 Worker 进程还有一个目标级轻量熔断器：
 
 ```env
-RETRY_MAX_POLL_RECOVERIES=3
-RETRY_MAX_RUN_LIFETIME_SECONDS=7200
+WORKER_TARGET_FAILURE_THRESHOLD=3
+WORKER_TARGET_COOLDOWN_SECONDS=60
 ```
 
-重试退避（30/120/600 秒）、任务租约（180 秒）、租约心跳（30 秒）和过期租约
-扫描周期（30 秒）属于内部一致性参数，已固定在代码中，不再通过环境变量配置。
+连续 3 次目标级 HTTP/传输失败后，该目标暂停领取普通任务和未绑定重试 60 秒，让健康
+目标接管；已经绑定的 `runId` 仍只能由原目标恢复，不会跨 AppKey 轮询。成功访问目标
+后失败计数立即清零。熔断状态和剩余时间会进入 Worker 周期汇总日志。
 
-`execution_backend` 会和 `runId` 一起落库：本地 Worker 只领取 `local` 恢复任务，
-商用 Worker 只领取 `commercial` 恢复任务，因此不会用一个 AppKey 查询另一个
-AppKey 创建的运行。本地第 1 次明确失败后仍走本地；第 2 次明确失败后，任务会固定
-转给商用 Worker 执行最后 1 次。新运行次数固定为 3 次（本地 2 次、
-商用 1 次），不提供环境变量覆盖。
+### 2.3 目标绑定、runId 恢复与有界重试
 
-- 已持久化 `runId` 的轮询网络错误、轮询超时和 Worker 重启会恢复查询同一个运行，
-  不会重复提交工作流。
-- 对同一个 `runId`，首次轮询之外最多再安排 `RETRY_MAX_POLL_RECOVERIES` 次恢复轮询，
-  且从 `runId` 落库起最多观察 `RETRY_MAX_RUN_LIFETIME_SECONDS` 秒。默认是“首次轮询
-  + 最多 3 次恢复轮询”、总计 2 小时（以先达到的边界为准）；达到任一边界会标记
-  `QINGTIAN_RUN_STALLED` 并保留原 `runId`，不会自动创建新的擎天运行。
-- 擎天明确返回工作流终态失败、或成功响应的输出不是合法 JSON 对象时，才在上限内
-  创建新的运行。
-- 提交请求已发出但没有收到 `runId` 时，系统不会盲目重提；它会最终标记
-  `QINGTIAN_SUBMIT_UNKNOWN`，以避免同一任务在擎天执行两次。
-- `retry_wait` 是内部状态；现有结果接口仍返回 HTTP 202 和 `processing`，前端无需
-  为该状态增加分支。
+擎天 Worker 收到 `runId` 后会先把它和 `WORKFLOW_TARGET_ID` /
+`WORKFLOW_TARGET_REVISION` 一起持久化，再开始轮询。一个已存在的 `runId` 只能由
+完全相同的目标 ID 和 revision 恢复，绝不会拿另一条商用工作流的 AppKey 去查询。
+
+需要先完成 `005_add_qingtian_retry_fields.sql` 和
+`006_add_workflow_target_routing.sql`，再统一升级 API 与所有 Worker。默认策略为
+`throughput_first_v1`，新运行总上限 3 次；同一 `runId` 默认最多恢复轮询 3 次、
+最长观察 7200 秒。普通部署无需在 `.env` 重复配置这些默认值，也不需要根据目标数量
+调整它们。
+
+API 会把 `RETRY_POLICY_VERSION` 固化到每一代任务上。修改策略只影响之后新提交或重新
+提交的任务；已有任务继续按原策略完成，避免发布过程中语义漂移。
+
+三类重试策略：
+
+- `throughput_first_v1`：新运行总数最多
+  3 次；明确失败后释放目标绑定，尚未尝试过且能力匹配的健康目标先竞争下一次。
+  如果没有新目标，短暂优先窗口结束后允许已尝试的健康目标复用，直到达到总次数上限。
+  因此 1+0、1+1、1+3 等拓扑都不会仅因目标数量不足而永久停在 `retry_wait`。
+- `local_first_v1`：最多本地 2 次、商用 1 次，适合以后本地资源为主的运行方式。
+  Helm 的旧版 1+1 兼容模式默认使用此策略。
+- `invitation_strategy` 当前只有一条兼容工作流，会自动使用
+  `single_target_v1`：在同一个本地目标上有界重试，仍受总运行次数上限约束，不会被
+  错误路由到客户画像商用工作流。
+
+轮询恢复和创建新运行是两套独立上限：
+
+- 已持久化 `runId` 的网络错误、轮询超时和 Worker 重启只恢复同一个运行，不增加
+  `attempt_count`。
+- 同一个 `runId` 在首次轮询之外，最多再安排
+  `RETRY_MAX_POLL_RECOVERIES` 次恢复轮询；默认是首次 1 次 + 恢复最多 3 次。
+- 从 `runId` 落库起最多观察 `RETRY_MAX_RUN_LIFETIME_SECONDS` 秒，默认 2 小时。
+  次数或时长任一先到即标记 `QINGTIAN_RUN_STALLED`，不会无限轮询，也不会因此创建
+  新运行。
+- 只有擎天明确返回终态失败，或返回结果明确不可用时，才会在新运行次数上限内重试。
+- 提交请求结果不确定、没有安全拿到 `runId` 时标记 `QINGTIAN_SUBMIT_UNKNOWN`，
+  不会盲目重提造成重复画像。
+- 基础退避为 30/120/600 秒，并加入 ±20% 抖动避免大量失败任务同时重试；
+  `Retry-After` 只会把等待时间拉长。租约 180 秒、心跳 30 秒、过期租约扫描 30 秒，
+  属于内部一致性参数。
+- `retry_wait` 是内部状态；现有结果接口仍返回 HTTP 202 和 `processing`。
+
+`throughput_first_v1` 的目标去重是软优先，不是会阻塞任务的硬限制：到期重试先给新
+目标 5 秒领取窗口，没有新目标时旧目标自动兜底。总尝试次数仍由数据库原子限制为 3，
+不会无限重试。旧目标更换 AppKey 时仍不要直接复用 ID/revision：先以
+`recovery_only` 保留旧目标恢复存量 `runId`，新 AppKey 使用新的目标 ID。
 
 Worker 在无 `queued` 任务时，默认 **不再** 以 INFO 每 2 秒打印 `worker_tick`（避免刷屏）。需要观察轮询心跳时，可将 `LOG_LEVEL` 设为 `DEBUG`。
 
@@ -178,9 +229,9 @@ docker compose build
 docker compose up -d
 ```
 
-- **api**：对外暴露 HTTP，默认映射本机 `8000` → 容器内 `8000`。
+- **api**：对外暴露 HTTP，默认映射本机 `18008` → 容器内 `18008`。
 - **worker**：本地 Worker，后台轮询 MySQL 队列并调用工作流。
-- **commercial-worker**：商用 Worker，Compose 默认启动；排队数达到阈值时领取普通任务，并处理明确分配给商用的兜底/恢复任务。
+- **commercial-worker**：测试环境的一条商用工作流目标。
 - **migrate**：一次性容器，启动时扫 `db/migrations/*.sql` 并按文件名顺序全部执行（所有 SQL 已实现幂等，可放心重复执行）。`api` 和两个 Worker 通过 `depends_on: service_completed_successfully` 等它退出成功后再启动；任一迁移失败都会阻塞业务进程启动。MySQL 尚未就绪时 `migrate` 会自动重试（次数与间隔由 `MIGRATION_DB_WAIT_MAX_TRIES` / `MIGRATION_DB_WAIT_INTERVAL_MS` 控制，默认 30 次 × 2s）。
 
 修改本机映射端口（例如改为 8080）：
@@ -245,9 +296,17 @@ customer-profile-migrate
 > ⚠️ `005_add_qingtian_retry_fields.sql` 增加 `retry_wait` 状态、`workflow_run_id`、同一
 > `runId` 的恢复计数/起始时间、租约、generation 和 attempts 审计表。必须先执行迁移，再部署能够识别这些字段的 API/Worker；
 > 该迁移还增加执行通道和尝试路由原因。新版擎天 Worker 默认使用这些字段，因此必须
-> 严格按“先迁移、后升级两个 Worker”的顺序发布。如需回滚，先让已有 `retry_wait`
+> 严格按“先迁移、后升级所有 Worker”的顺序发布。如需回滚，先让已有 `retry_wait`
 > 任务处理完，或按运维流程人工终止；不要删除 `workflow_run_id`
 > 或把任务直接改回 `queued`。
+>
+> ⚠️ `006_add_workflow_target_routing.sql` 增加 `execution_pool`、
+> `workflow_target_id`、`workflow_target_revision`、`retry_policy_version` 及 attempts
+> 审计字段和索引。代码的目标感知领取 SQL 会直接读取这些字段，因此发布顺序必须是：
+> **先完成 006，再启动新版 API 和全部目标 Worker**。迁移会把升级时仍在
+> `processing` / `retry_wait` 的旧任务绑定到 `local-default` 或
+> `commercial-default`，旧版 1+1 Worker 的默认目标 ID 与之匹配；普通 `queued`
+> 任务保持未绑定。
 
 ## 6. 对外接口一览
 

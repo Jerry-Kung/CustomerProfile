@@ -37,6 +37,11 @@ services:
     environment:
       TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
       WORKER_ROLE: local
+      # Keep the legacy workflow lineage id so pre-006 runIds remain recoverable.
+      WORKFLOW_TARGET_ID: local-default
+      WORKFLOW_TARGET_REVISION: "${LOCAL_WORKFLOW_TARGET_REVISION:-v1}"
+      WORKER_TARGET_MODE: "${LOCAL_WORKER_TARGET_MODE:-active}"
+      WORKER_TASK_TYPES: "customer_profile,invitation_strategy"
     volumes:
       - task_uploads:/var/lib/customer-profile/task-uploads
       - ./logs:/app/logs
@@ -46,8 +51,7 @@ services:
     restart: unless-stopped
 
   commercial-worker:
-    # Starts with the normal compose stack.  For WORKFLOW_PLATFORM=qingtian,
-    # populate all QINGTIAN_COMMERCIAL_* keys in .env before starting it.
+    # Commercial workflow target 01.
     build: .
     command: ["customer-profile-worker"]
     env_file:
@@ -55,6 +59,11 @@ services:
     environment:
       TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
       WORKER_ROLE: commercial
+      # Keep the legacy workflow lineage id so pre-006 runIds remain recoverable.
+      WORKFLOW_TARGET_ID: commercial-default
+      WORKFLOW_TARGET_REVISION: "${COMMERCIAL_1_WORKFLOW_TARGET_REVISION:-v1}"
+      WORKER_TARGET_MODE: "${COMMERCIAL_1_WORKER_TARGET_MODE:-active}"
+      WORKER_TASK_TYPES: customer_profile
       WORKER_CONCURRENCY: "${COMMERCIAL_WORKER_CONCURRENCY:-1}"
       COMMERCIAL_QUEUE_THRESHOLD: "${COMMERCIAL_QUEUE_THRESHOLD:-5}"
       QINGTIAN_API_KEY_TEST: "${QINGTIAN_COMMERCIAL_API_KEY_TEST:-}"

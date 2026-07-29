@@ -12,14 +12,14 @@
 | 组件 | 运行方式 | 是否进 Docker |
 |------|----------|----------------|
 | **本仓库 API** | `docker compose` 中的 `api` 服务 | ✅ |
-| **本仓库 Worker** | `docker compose` 中的 `worker` 服务 | ✅ |
+| **本仓库 Worker** | `worker`（本地）+ `commercial-worker`（商用） | ✅ |
 | **MySQL** | 业务数据库 | ❌ 默认**外部**（云 RDS 或自建机上的 MySQL） |
-| **Dify** | 工作流引擎 | ❌ 默认**外部** |
+| **Dify / 擎天** | 工作流引擎（由 `WORKFLOW_PLATFORM` 选择） | ❌ 默认**外部** |
 
 容器内的 **Worker** 需要能访问：
 
 - `MYSQL_HOST`（若 MySQL 在宿主机上，见下文「宿主机 MySQL」）
-- Dify 的 `DIFY_BASE_URL`（一般为内网或公网 URL）
+- 所选工作流平台的地址（一般为内网或公网 URL）
 
 ---
 
@@ -78,10 +78,9 @@ cp .env.example .env
 nano .env   # 或用 vim
 ```
 
-**必填**（与本地运行一致）：
-
-- `DIFY_BASE_URL`、`DIFY_RUN_URL`、`DIFY_API_KEY`、`DIFY_USER_ID`
-- `MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE`
+**必填**：`MYSQL_*`，以及 `WORKFLOW_PLATFORM` 所选平台对应的 Dify 或擎天变量。当前
+Compose 测试拓扑还需要一套独立的 `QINGTIAN_COMMERCIAL_API_KEY_*`。完整清单见
+[部署快速上手](deploy-quickstart.md) §4。
 
 **Docker 下建议同时检查**：
 
@@ -103,16 +102,10 @@ nano .env   # 或用 vim
 
 ---
 
-## 4. 数据库迁移（在容器外执行一次即可）
+## 4. 数据库迁移
 
-在**能连上 MySQL 的机器**上执行 SQL（示例用本机 `mysql` 客户端）：
-
-```bash
-mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" < db/migrations/001_create_customer_profile_tasks.sql
-mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" < db/migrations/002_add_task_image_columns.sql
-```
-
-（密码含特殊字符时建议交互式 `-p` 不要跟在同一参数里。）
+无需手工逐个执行 SQL。Compose 的 `migrate` 一次性服务会按文件名顺序执行全部幂等
+迁移（包括 005 重试状态和 006 目标路由），成功后 API 和两个 Worker 才会启动。
 
 ---
 
@@ -134,17 +127,17 @@ docker compose logs -f worker
 docker compose logs -f commercial-worker
 ```
 
-健康检查（默认映射宿主机 **8000** 时）：
+健康检查（默认映射宿主机 **18008** 时）：
 
 ```bash
-curl -sS http://127.0.0.1:8000/health
+curl -sS http://127.0.0.1:18008/health
 ```
 
 ---
 
 ## 6. 端口冲突：如何修改对外端口
 
-对外访问的是 **宿主机端口 → 容器内 8000** 的映射，由环境变量 **`HOST_API_PORT`** 控制（见 `docker-compose.yml`）。
+对外访问的是 **宿主机端口 → 容器内 18008** 的映射，由环境变量 **`HOST_API_PORT`** 控制（见 `docker-compose.yml`）。
 
 ### 6.1 写入 `.env`（推荐，便于记住）
 
@@ -178,7 +171,7 @@ docker compose up -d
 | 变量 | 含义 |
 |------|------|
 | `HOST_API_PORT` | **宿主机**上对外监听的端口（给浏览器 / 前端 / 公网访问） |
-| `API_PORT`（容器内） | 进程在**容器内**监听端口；`docker-compose.yml` 已固定为 `8000`，一般**不要改** compose 里的映射右侧 |
+| `API_PORT`（容器内） | 进程在**容器内**监听端口；`docker-compose.yml` 已固定为 `18008`，一般**不要改** compose 里的映射右侧 |
 
 ---
 
@@ -218,7 +211,7 @@ sudo ufw allow from 10.0.0.0/8 to any port 18080 proto tcp
 
 ### 7.3 确认监听地址
 
-容器内服务监听 `0.0.0.0:8000`，映射到宿主机后，应可通过 **服务器公网 IP + 端口** 访问（在安全组与 UFW 均允许的前提下）。
+容器内服务监听 `0.0.0.0:18008`，映射到宿主机后，应可通过 **服务器公网 IP + 端口** 访问（在安全组与 UFW 均允许的前提下）。
 
 ---
 

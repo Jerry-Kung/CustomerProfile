@@ -4,11 +4,11 @@
 
 ## 1. 项目是什么
 
-一个"客户画像"任务后台，由 API 和两个 Worker 角色组成（同一份代码、同一个镜像）：
+一个"客户画像"任务后台，由 API 和可扩展 Worker 目标组成（同一份代码、同一个镜像）：
 
 - **api**：FastAPI HTTP 服务，接收任务提交（手机号 + 可选微信截图），写入 MySQL。
-- **worker**：本地 Worker，始终轮询 MySQL 中的任务队列。
-- **commercial-worker**：商用 Worker，容器会随 Compose 默认启动；排队数达到阈值时领取普通任务，并处理明确分配给商用的兜底/恢复任务。
+- **worker**：本地目标 `local-default`（沿用旧本地工作流身份）。
+- **commercial-worker**：商用目标 `commercial-default`（沿用旧商用工作流身份）。
 
 MySQL 数据库即任务队列，没有额外的消息中间件。**MySQL 和 Dify/QingTian 都是外部依赖**，不在 compose 内，需要提前准备好并通过环境变量指向它们。
 
@@ -29,7 +29,7 @@ cp .env.example .env
 docker compose up -d --build
 
 # 3) 验证
-docker compose ps                    # api / worker / commercial-worker 应为 running，migrate 为 exited (0)
+docker compose ps                    # api / 两个 Worker 应为 running，migrate 为 exited (0)
 curl http://127.0.0.1:18008/health   # 应返回健康状态
 ```
 
@@ -84,10 +84,11 @@ HOST_API_PORT=8080 docker compose up -d   # 或写进 .env
 | `QINGTIAN_INVITATION_STRATEGY_API_KEY` | 邀约策略任务类型的 Key |
 | `QINGTIAN_USER_ID` | 用户标识 |
 
-Compose 会默认启动商用 Worker；擎天模式下还必须填写商用客户画像工作流的
-`QINGTIAN_COMMERCIAL_API_KEY_TEST` 和
-`QINGTIAN_COMMERCIAL_API_KEY_PRODUCTION`。邀请策略统一使用
-`QINGTIAN_INVITATION_STRATEGY_API_KEY`。
+Compose 默认启动一条商用 Worker；擎天模式下还必须填写：
+
+- `QINGTIAN_COMMERCIAL_API_KEY_TEST` / `QINGTIAN_COMMERCIAL_API_KEY_PRODUCTION`
+
+邀请策略统一使用 `QINGTIAN_INVITATION_STRATEGY_API_KEY`，只由本地目标处理。
 
 ### 4.5 常用调优项（未来可能经常调整）
 
@@ -96,8 +97,10 @@ Compose 会默认启动商用 Worker；擎天模式下还必须填写商用客�
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `WORKER_CONCURRENCY` | 8 | worker 单进程并发执行的工作流数。调大可提高任务吞吐，但会增加对 Dify/QingTian 平台和 MySQL 的并发压力；必须 ≥ 1，否则启动报错。 |
-| `WORKER_ROLE` | local | `local` 始终处理普通任务；`commercial` 在排队数达到阈值时处理普通任务 |
-| `COMMERCIAL_QUEUE_THRESHOLD` | 5 | 排队任务数达到此值后，商用 Worker 开始分流普通任务。 |
+| `WORKER_ROUTING_MODE` | parallel | `parallel` 让本地与商用立即共同消费；以后可改为 `local_preferred` 或 `local_only`。 |
+| `COMMERCIAL_QUEUE_THRESHOLD` | 5 | `local_preferred` 下，排队数达到此值后商用 Worker 开始分流普通任务。 |
+| `COMMERCIAL_SPILLOVER_DELAY_SECONDS` | 0 | `local_preferred` 下，最老任务达到该等待时间也会启用商用分流。 |
+| `WORKER_TARGET_FAILURE_THRESHOLD` / `WORKER_TARGET_COOLDOWN_SECONDS` | 3 / 60 | 目标连续 HTTP/传输失败后，暂停领取未绑定任务的次数阈值和冷却时间。 |
 | `TASK_QUEUE_MAX_WAITING` | 500 | 队列中最大等待（queued 状态）任务数。提交任务时超过该上限，API 返回"队列已满"错误，调用方需稍后重试；必须 ≥ 1，否则启动报错。 |
 
 修改方法：编辑 `.env` 中对应的值，然后执行：
@@ -106,9 +109,8 @@ Compose 会默认启动商用 Worker；擎天模式下还必须填写商用客�
 docker compose up -d
 ```
 
-商用 Worker 已默认启用；无需再传 `--profile commercial`。启动前必须填写商用客户
-画像工作流对应的两个 `QINGTIAN_COMMERCIAL_API_KEY_*`；否则在擎天模式下该容器会
-因缺少必填 Key 而无法启动。邀请策略 Key 与本地 Worker 共用。
+商用 Worker 已默认启用；无需再传 profile。启动前必须填写一套商用客户画像 Key；
+否则对应容器会在擎天模式下因缺少必填 Key 而无法启动。
 
 > 注意：`.env` 是在**容器创建时**注入的，`docker compose restart` 不会重新读取 `.env`，必须用 `docker compose up -d` 让 compose 重建受影响的容器，新值才生效。`WORKER_CONCURRENCY` 只影响 worker，`TASK_QUEUE_MAX_WAITING` 在 api 提交任务时生效，`up -d` 会自动重建这两个容器。
 
@@ -122,7 +124,10 @@ docker compose up -d
 | `DIFY_IMAGE_MODE` | file_id | 图片传给 Dify 的方式，保持默认即可 |
 | `DIFY_POLL_TIMEOUT_MS` | 2400000 | 等待 Dify 工作流完成的超时（毫秒） |
 | `QINGTIAN_POLL_TIMEOUT_MS` | 2400000 | 等待 QingTian 完成的超时（毫秒） |
-| `RETRY_MAX_POLL_RECOVERIES` / `RETRY_MAX_RUN_LIFETIME_SECONDS` | 3 / 7200 | 同一 `runId` 的恢复轮询次数与总观察时长上限。 |
+
+重试默认最多创建 3 个擎天新运行，同一 `runId` 最多恢复轮询 3 次、最长观察
+7200 秒。代码会优先选择尚未尝试的目标；目标数量不足时自动复用健康目标，因此
+这些参数不需要根据工作流数量计算或调整。
 
 上传的图片保存在 compose 定义的共享卷 `task_uploads` 中，api 写入、worker 读取，已配置好，无需手动处理。
 
@@ -144,5 +149,5 @@ docker compose up -d --build        # 更新代码后重新构建并启动
 ## 7. 验证服务正常
 
 1. `curl http://127.0.0.1:18008/health` 返回正常。
-2. 提交一个测试任务后，`docker compose logs -f worker` 能看到任务被领取、调用工作流、写回结果的日志；商用 Worker 在排队数达到阈值时领取普通任务，也会领取明确分配的兜底任务。
+2. 提交测试任务后，本地和商用两个 active 目标能原子竞争队列；一条任务只会被一个 Worker 领取。
 3. 同一手机号重复提交会复用/重新排队原任务记录（这是设计行为，重新提交即重试，没有单独的重试接口）。
