@@ -249,7 +249,7 @@ Deployment 的镜像。
 | `WORKER_CONCURRENCY` | worker | 单个 worker 进程内并发数。调大提升吞吐，也会增加 MySQL 和工作流平台压力。 |
 | `WORKER_ROLE` | worker | `local` 或 `commercial`，决定普通任务领取策略和执行来源 |
 | `COMMERCIAL_QUEUE_THRESHOLD` | commercial worker | 排队任务数达到此值后开始分流普通任务，默认 5。 |
-| `TASK_QUEUE_MAX_WAITING` | api | 队列最大等待任务数，超过后提交接口返回队列满。 |
+| `TASK_QUEUE_MAX_WAITING` | api | 每种任务类型各自的最大等待任务数，同类型队列达到上限后提交接口返回队列满。 |
 | `LOG_LEVEL` | api / worker | 日志级别，排查问题时可临时调为 `DEBUG`。 |
 | `LOG_DIR` | api / worker / migrate | Loguru 文件目录，K8s 中为 `/app/logs`。 |
 | `LOG_ROTATION` | api / worker / migrate | 文件轮转策略，默认每天零点。 |

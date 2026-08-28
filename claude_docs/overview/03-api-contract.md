@@ -27,7 +27,7 @@
 |---|---|---|
 | 202 | `TASK_ACCEPTED` | 入队成功（含 upsert 覆盖已有终态行的情况） |
 | 400 | `INVALID_ARGUMENT` | Pydantic 校验失败 |
-| 503 | `TASK_QUEUE_FULL` | `queued` 行数已达 `TASK_QUEUE_MAX_WAITING` 且该手机号不是已 queued 状态 |
+| 503 | `TASK_QUEUE_FULL` | 同 `task_type` 的 `queued` 行数已达 `TASK_QUEUE_MAX_WAITING`，且该手机号的同类型任务不是已 queued 状态 |
 
 成功体：
 ```json

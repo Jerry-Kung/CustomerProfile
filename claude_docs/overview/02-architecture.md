@@ -69,7 +69,7 @@ FastAPI: POST /v1/customer-profile/tasks
   │           ├─ GET_LOCK('cp_task_queue_admit', 10)     ← 进程间互斥
   │           ├─ START TRANSACTION
   │           ├─ SELECT ... FOR UPDATE                   ← 行锁
-  │           ├─ if not 已经是 queued 且 queued 总数 >= TASK_QUEUE_MAX_WAITING:
+  │           ├─ if not 已经是 queued 且同 task_type 的 queued 数 >= TASK_QUEUE_MAX_WAITING:
   │           │      raise TaskQueueFullError
   │           ├─ INSERT ... ON DUPLICATE KEY UPDATE
   │           │      (清空 output/card_id/nickname/error_message; status='queued')
@@ -80,7 +80,7 @@ FastAPI: POST /v1/customer-profile/tasks
 
 要点：
 
-- `GET_LOCK` + `count_queued()` 是为了在并发提交时**防止队列超过 `TASK_QUEUE_MAX_WAITING`**——但**已经是 `queued` 的同一手机号免计入**，所以即使队列满了，老用户也能 re-trigger。
+- `GET_LOCK` + `count_queued(task_type=...)` 是为了在并发提交时**防止任一任务类型的队列超过 `TASK_QUEUE_MAX_WAITING`**。两类任务分别计数；但**同手机号、同类型已经是 `queued` 的任务免计入**，所以该类型队列满时仍可 re-trigger。
 - `ON DUPLICATE KEY UPDATE` 是 upsert 的物理实现。Schema 上 `customer_phonenumber` 有 unique key。
 
 ## Worker 消费的调用链（读+写路径）

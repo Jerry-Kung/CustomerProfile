@@ -60,7 +60,7 @@ GET_LOCK('cp_task_queue_admit', 10)        -- 进程间互斥；仅用于"是否
 START TRANSACTION
 SELECT status WHERE customer_phonenumber=? FOR UPDATE
 -- 容量检查仅作用于"新增等待者"
-IF 现状不是 queued 且 COUNT(status='queued') >= TASK_QUEUE_MAX_WAITING:
+IF 现状不是 queued 且 COUNT(status='queued' AND task_type=当前类型) >= TASK_QUEUE_MAX_WAITING:
     ROLLBACK; raise TaskQueueFullError
 INSERT ... ON DUPLICATE KEY UPDATE
     status='queued', output=NULL, card_id=NULL, nickname=NULL,

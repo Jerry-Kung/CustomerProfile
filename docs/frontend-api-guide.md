@@ -95,7 +95,7 @@
 | HTTP 码 | `code` | 含义 |
 |---|---|---|
 | 400 | `INVALID_ARGUMENT` | 手机号 / `task_type` / `work_env` / `batch_id` 格式非法，或缺少必填字段。`details` 为 Pydantic 校验错误数组 |
-| 503 | `TASK_QUEUE_FULL` | 队列等待数已达 `TASK_QUEUE_MAX_WAITING`（队列两类任务共用计数）。`details` 形如 `{"max_waiting": 500, "queued_count": 500}` |
+| 503 | `TASK_QUEUE_FULL` | 当前任务类型的队列等待数已达 `TASK_QUEUE_MAX_WAITING`（两类任务分别计数）。`details` 形如 `{"max_waiting": 500, "queued_count": 500}` |
 | 500 | `INTERNAL_ERROR` | 未预期的服务端错误 |
 
 ### cURL 示例（multipart 提交）
@@ -383,7 +383,7 @@ export async function pollTaskResult(
 - 任务完成后 `GET .../result` 返回 `200`（`TASK_SUCCEEDED`）或 `422`（失败 + 对应错误码）
 - `GET .../result?task_type=invitation_strategy` 与缺省值返回的是不同任务的结果
 - 提交非法手机号 / 非法 `task_type` 返回 `400 INVALID_ARGUMENT`
-- 队列满载返回 `503 TASK_QUEUE_FULL`（两类任务共用同一计数）
+- 当前任务类型的队列满载时返回 `503 TASK_QUEUE_FULL`（两类任务分别计数、分别享有 `TASK_QUEUE_MAX_WAITING` 容量）
 - 列表接口 `GET /v1/customer-profile/tasks?phone_prefix=...&task_type=...` 按类型过滤生效；缺省 `task_type` 时两类都返回
 - 失败时前端按 `code` 做文案分流
 - 页面刷新后可通过手机号 + `task_type` 再次拉取任务结果

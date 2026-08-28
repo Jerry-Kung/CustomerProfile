@@ -90,7 +90,7 @@ class MySQLTaskRepository:
                 )
             existed = cursor.fetchone()
             existed_status = str(existed.get("status")) if existed else None
-            queued_count = self.count_queued(conn=conn)
+            queued_count = self.count_queued(task_type=task_type, conn=conn)
             if existed_status != "queued" and queued_count >= self._queue_max_waiting:
                 conn.rollback()
                 self._logger.warning(
@@ -1355,18 +1355,28 @@ class MySQLTaskRepository:
         finally:
             conn.close()
 
-    def count_queued(self, conn=None) -> int:
+    def count_queued(self, *, task_type: str | None = None, conn=None) -> int:
         owns_conn = conn is None
         db_conn = conn or self._db_client.connect()
         try:
             cursor = db_conn.cursor(dictionary=True)
-            cursor.execute(
-                """
-                SELECT COUNT(1) AS total
-                FROM customer_profile_tasks
-                WHERE status = 'queued'
-                """
-            )
+            if task_type is not None and self._has_task_type_column(db_conn):
+                cursor.execute(
+                    """
+                    SELECT COUNT(1) AS total
+                    FROM customer_profile_tasks
+                    WHERE status = 'queued' AND task_type = %s
+                    """,
+                    (task_type,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT COUNT(1) AS total
+                    FROM customer_profile_tasks
+                    WHERE status = 'queued'
+                    """
+                )
             row = cursor.fetchone() or {"total": 0}
             return int(row["total"])
         finally:

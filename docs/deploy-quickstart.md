@@ -101,7 +101,7 @@ Compose 默认启动一条商用 Worker；擎天模式下还必须填写：
 | `COMMERCIAL_QUEUE_THRESHOLD` | 5 | `local_preferred` 下，排队数达到此值后商用 Worker 开始分流普通任务。 |
 | `COMMERCIAL_SPILLOVER_DELAY_SECONDS` | 0 | `local_preferred` 下，最老任务达到该等待时间也会启用商用分流。 |
 | `WORKER_TARGET_FAILURE_THRESHOLD` / `WORKER_TARGET_COOLDOWN_SECONDS` | 3 / 60 | 目标连续 HTTP/传输失败后，暂停领取未绑定任务的次数阈值和冷却时间。 |
-| `TASK_QUEUE_MAX_WAITING` | 500 | 队列中最大等待（queued 状态）任务数。提交任务时超过该上限，API 返回"队列已满"错误，调用方需稍后重试；必须 ≥ 1，否则启动报错。 |
+| `TASK_QUEUE_MAX_WAITING` | 500 | 每种任务类型各自的最大等待（queued 状态）任务数。提交任务时同类型等待数达到该上限，API 返回"队列已满"错误；必须 ≥ 1，否则启动报错。 |
 
 修改方法：编辑 `.env` 中对应的值，然后执行：
 

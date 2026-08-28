@@ -33,7 +33,7 @@ class TaskRepository(Protocol):
     ) -> TaskRecord | None:
         ...
 
-    def count_queued(self) -> int:
+    def count_queued(self, *, task_type: str | None = None) -> int:
         ...
 
     def list_by_prefix(

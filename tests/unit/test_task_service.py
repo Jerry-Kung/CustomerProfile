@@ -80,8 +80,12 @@ class InMemoryTaskRepository:
     def get_by_phone(self, customer_phonenumber: str, *, task_type: str = "customer_profile"):
         return self._rows.get((customer_phonenumber, task_type))
 
-    def count_queued(self) -> int:
-        return sum(1 for v in self._rows.values() if v.status == "queued")
+    def count_queued(self, *, task_type: str | None = None) -> int:
+        return sum(
+            1
+            for v in self._rows.values()
+            if v.status == "queued" and (task_type is None or v.task_type == task_type)
+        )
 
 
 def _logger(name: str) -> logging.Logger:

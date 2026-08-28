@@ -38,7 +38,7 @@
 | `DIFY_POLL_TIMEOUT_MS` | `2400000` | 40 min |
 | `WORKER_CONCURRENCY` | `5` | Worker 线程数，必须 ≥ 1 |
 | `WORKER_POLL_INTERVAL_MS` | `2000` | 每个 Worker 线程的 idle 节流 |
-| `TASK_QUEUE_MAX_WAITING` | `500` | 入队容量上限，必须 ≥ 1 |
+| `TASK_QUEUE_MAX_WAITING` | `500` | 每种任务类型各自的入队容量上限，必须 ≥ 1 |
 | `TASK_UPLOAD_DIR` | `<repo>/data/task-uploads` | API 写、Worker 读；Docker 里默认 `/var/lib/customer-profile/task-uploads` |
 | `TASK_UPLOAD_MAX_BYTES_PER_FILE` | `10485760` (10 MiB) | 单个图片上限 |
 | `CORS_ALLOW_ORIGINS` | `*` | `,` 分隔；含 `*` 即 wildcard 模式 |
