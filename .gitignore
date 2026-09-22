@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---- Customer Profile project ----
+# 真实客户手机号等个人信息，禁止入库
+phone_numbers.txt
+data/
+
+dify_dsl_data/
