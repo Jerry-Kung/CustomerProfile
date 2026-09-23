@@ -3,8 +3,9 @@
 对齐 `docs/specs/V0迁移规划.md` §6.2 的「节点 → Python」映射原则：执行器只负责把
 节点声明翻译成一次函数调用，业务逻辑本身写在 `workflows/` 下的普通 Python 里。
 
-V0.2 覆盖 start / end / code / template-transform / if-else / llm / http-request / tool
-八种节点类型；iteration、variable-aggregator、vision 留给 V0.3。
+V0.3 覆盖 DSL 的全部节点类型：start / end / code / template-transform / if-else /
+llm（含 vision）/ http-request / tool / iteration（含 iteration-start）/
+variable-aggregator（含分组）。
 """
 
 from __future__ import annotations
@@ -58,6 +59,13 @@ class NodeRuntime:
 
     subworkflow_runner: Callable[..., Awaitable[dict[str, Any]]] | None = None
     """``tool`` 节点调用子工作流时使用；由调度层注入，避免循环导入。"""
+
+    iteration_node_runner: Callable[..., Awaitable[Any]] | None = None
+    """``iteration`` 节点逐项驱动循环体节点时使用；同样由调度层注入。
+
+    迭代循环体节点不在父图的调度集合里，因此它需要这个入口去跑一个「图外节点」。
+    与 ``subworkflow_runner`` 一样，走注入而不是让执行器去 import 调度器。
+    """
 
     extra: dict[str, Any] = field(default_factory=dict)
     """节点实现可能需要的其他服务（如模板仓库）。"""
@@ -116,12 +124,20 @@ def build_default_registry(
     code_functions: Mapping[str, Callable[..., Any]] | None = None,
 ) -> ExecutorRegistry:
     """装配 V0.2 的全部内置执行器。"""
-    from . import executors_http, executors_llm, executors_misc
+    from . import (
+        executors_aggregator,
+        executors_http,
+        executors_iteration,
+        executors_llm,
+        executors_misc,
+    )
 
     registry = ExecutorRegistry()
     executors_misc.register_all(registry, template_repository=template_repository)
     executors_llm.register_all(registry)
     executors_http.register_all(registry)
+    executors_iteration.register_all(registry)
+    executors_aggregator.register_all(registry)
     return registry
 
 

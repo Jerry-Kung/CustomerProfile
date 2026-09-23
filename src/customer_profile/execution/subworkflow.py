@@ -138,11 +138,23 @@ class SubWorkflowRunner:
         )
 
 
+LITERAL_PREFIX = "@literal:"
+"""``@inputs`` 中标记「这是常量而非父节点入参名」的前缀。"""
+
+
 def make_tool_executor(runner: SubWorkflowRunner) -> Any:
     """构造 ``tool`` 节点的执行器。
 
-    节点配置：``@workflow``（子工作流 ID）、``@inputs``（子流程入参名 → 父节点入参名）。
-    父节点的绑定实参即子流程的入参，键名按 ``@inputs`` 映射。
+    节点配置：``@workflow``（子工作流 ID）、``@inputs``（子流程入参名 → 来源）。
+
+    ``@inputs`` 的值有两种形态：
+
+    - 父节点入参名（如 ``"phone_number"``）：从父节点绑定实参里取同名入参；
+    - 字面量（如 ``"@literal:WeChatMomentsScreenshot"``）：直接作为常量传给子流程。
+
+    字面量形态是 V0.3 新增的：DSL 里子流程入参存在固定值，典型是截图类工作流传的
+    ``data_source``（每个子流程对应一种数据渠道）。这类参数在父图里没有对应入参，
+    按名字映射会找不到而报错。
     """
 
     async def execute_tool(
@@ -159,13 +171,16 @@ def make_tool_executor(runner: SubWorkflowRunner) -> Any:
         bound = ctx.bind_inputs(node.bindings)
 
         inputs: dict[str, Any] = {}
-        for child_param, parent_param in mapping.items():
-            if parent_param in bound:
-                inputs[child_param] = bound[parent_param]
+        for child_param, source in mapping.items():
+            if isinstance(source, str) and source.startswith(LITERAL_PREFIX):
+                inputs[child_param] = source[len(LITERAL_PREFIX) :]
+                continue
+            if source in bound:
+                inputs[child_param] = bound[source]
             else:
                 raise NodeExecutionError(
                     f"tool 节点 {node.node_id} 声明子流程入参 {child_param} 取自 "
-                    f"{parent_param!r}，但该父节点入参未绑定；已绑定：{sorted(bound)}"
+                    f"{source!r}，但该父节点入参未绑定；已绑定：{sorted(bound)}"
                 )
         # 未在映射中声明的绑定，按同名透传
         for name, value in bound.items():

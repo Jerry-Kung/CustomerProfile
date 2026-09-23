@@ -36,13 +36,13 @@ python scripts/inventory/extract_ledger.py --dump-prompts
 | `docs/specs/ledger/resource_inventory.json` | 提示词/模板指纹（长度、行数、SHA256、变量名）。**不含正文** | 是 |
 | `docs/specs/ledger/tool_mapping.json` | `tool_name` ↔ 本地文件，附实测引用次数 | 是 |
 | `docs/specs/ledger/workflow_digest.json` | 每工作流的节点/边/按类型计数与顺序依赖边数 | 是 |
-| `docs/specs/prompts/*.txt` | 提示词正文（逐字符原文），供 V0.3 逐字符比对与后续版本优化 | **是** |
+| `docs/specs/prompts/*.txt` | 提示词正文（逐字符原文），评审副本；命名与包内资源同为 `<slug>__<node_id>.txt`，两边逐字节一致（`tests/test_templates.py` 断言） | **是** |
 
 ## 两点须知的实现口径
 
 **`{{#node.field#}}` 出现次数 ≠ 绑定条目数。** 提取器统计的是「绑定条目」：节点的 `variables[]` 条目、`tool` 节点的每个参数、条件分支的变量选择器，都算一条绑定，即使其值不是引用字面量。DSL 文本中 `{{#...#}}` 的实际出现次数是另一个数（当前 111），两者都打印，不要混用。
 
-**提示词正文入库是有意的（D8）。** 正文是后续版本的重要优化对象，需要评审与追溯，因此作为正式产物存放在 `docs/specs/prompts/`。台账另存哈希与长度，用于快速定位变更；逐字符比对始终针对本地 DSL。
+**提示词正文入库是有意的（D8）。** 正文是后续版本的重要优化对象，需要评审与追溯，因此作为正式产物存放在 `docs/specs/prompts/`。台账另存哈希与长度，用于快速定位变更；**逐字符比对的基准始终是本地 DSL**（`scripts/export_templates.py --check`）。V0.3 起运行期唯一来源是包内 `src/customer_profile/templates/`，本目录是它的评审副本，两边逐字节一致。
 
 正文入库前已扫描确认不含密钥形状字符串与手机号，`verify_ledger.py` 会持续校验这一点——一旦有人把凭据写进提示词，复核会失败。
 

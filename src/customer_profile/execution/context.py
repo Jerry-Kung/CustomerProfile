@@ -55,6 +55,15 @@ class RunContext:
     _outputs: dict[str, NodeResult] = field(default_factory=dict, repr=False)
     _started_at: float = field(default_factory=time.monotonic, repr=False)
 
+    iteration_locals: dict[str, Any] = field(default_factory=dict, repr=False)
+    """迭代循环体内的局部变量（当前项 ``item`` 与序号 ``index``）。
+
+    只在迭代执行期间存在，不写进父上下文的输出表——它不是某个节点的产出。
+    """
+
+    _workflow: Any = field(default=None, repr=False)
+    """父图定义。循环体节点要从这里按 ID 取回，因此上下文需要它的引用。"""
+
     # ------------------------------------------------------------ 读写
 
     def record(self, result: NodeResult) -> None:
@@ -90,6 +99,16 @@ class RunContext:
             node_id, field_name = selector
         if not node_id or not field_name:
             raise MissingValue(f"变量引用格式非法：{selector!r}")
+
+        # 迭代循环体正是通过 ``{{#<迭代节点>.item#}}`` 取当前项的（DSL 里如此，
+        # 9 个含迭代的工作流都这么写）。但循环体执行期间迭代节点**尚未产出结果**，
+        # 按节点输出查必然失败。这里先把当前项就地解析出来，与 Dify 的语义一致；
+        # 迭代结束后迭代节点会记下真正的结果，下游拿到的仍是正常输出。
+        current_iteration = self.iteration_locals.get("iteration_id")
+        if current_iteration and node_id == current_iteration:
+            if field_name in self.iteration_locals:
+                return self.iteration_locals[field_name]
+
         return self.result_of(node_id).get(field_name)
 
     def resolve_optional(self, selector: Selector | str, default: Any = None) -> Any:
@@ -121,6 +140,61 @@ class RunContext:
                 continue
             resolved[target] = self.resolve(source)
         return resolved
+
+    # ------------------------------------------------------------ 迭代
+
+    def bind_workflow(self, workflow: Any) -> None:
+        """绑定父图定义，供迭代执行器按 ID 取回循环体节点。"""
+        self._workflow = workflow
+
+    def workflow_node(self, node_id: str) -> Any:
+        """按 ID 取父图节点。迭代循环体节点不在父图的调度集合里，但仍完整声明在
+        定义中，因此这里能取到。"""
+        if self._workflow is None:
+            raise MissingValue("运行上下文尚未绑定工作流定义，无法取回循环体节点")
+        node = self._workflow.node_map.get(node_id)
+        if node is None:
+            raise MissingValue(f"工作流定义中没有节点 {node_id}")
+        return node
+
+    def fork_iteration(
+        self, *, item: Any, index: int, iteration_id: str | None = None
+    ) -> "RunContext":
+        """派生一个迭代项的子上下文。
+
+        子上下文**不复制**父上下文已有的输出，而是引用同一张表：循环体经常要读迭代
+        之外的节点输出。写入落在同一张表上，因此迭代节点自身仍能被下游按图语义引用。
+        当前项与序号放在 ``iteration_locals``，避免与节点输出混淆。
+        """
+        child = RunContext(
+            run_id=self.run_id,
+            workflow_id=self.workflow_id,
+            inputs=dict(self.inputs),
+            call_path=self.call_path,
+            parent_run_id=self.parent_run_id,
+            parent_node_id=self.parent_node_id,
+        )
+        child._outputs = self._outputs
+        child._workflow = self._workflow
+        child.iteration_locals = {"item": item, "index": index}
+        if iteration_id:
+            # 循环体里 ``{{#<迭代节点>.item#}}`` 要能解析，见 resolve 的说明。
+            child.iteration_locals["iteration_id"] = iteration_id
+        return child
+
+    def iterations_order(self, node_ids: tuple[str, ...]) -> list[str]:
+        """把循环体节点按依赖排序，保证顺序执行时前置已就绪。"""
+        import graphlib
+
+        known = set(node_ids)
+        graph: dict[str, set[str]] = {}
+        for node_id in node_ids:
+            node = self.workflow_node(node_id)
+            graph[node_id] = {p for p in node.predecessors if p in known}
+        try:
+            return list(graphlib.TopologicalSorter(graph).static_order())
+        except graphlib.CycleError as exc:  # 循环体自身成环属定义错误
+            raise MissingValue(f"迭代循环体存在环：{exc}") from exc
 
     @property
     def elapsed_ms(self) -> int:

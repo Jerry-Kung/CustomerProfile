@@ -231,8 +231,14 @@ class LlmClient:
         prompt: str,
         system: str | None = None,
         images: Sequence[str] | None = None,
+        detail: str | None = None,
     ) -> list[dict[str, Any]]:
-        """组装 messages。有图片时用多模态的 content 数组形式。"""
+        """组装 messages。有图片时用多模态的 content 数组形式。
+
+        ``detail`` 对应 Dify vision 节点的 ``vision.configs.detail``（实测为 ``high``），
+        透传给 OpenAI 兼容的 ``image_url.detail``。不设时不下发该字段——缺省行为交给
+        模型侧，不替调用方猜。
+        """
         messages: list[dict[str, Any]] = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -240,9 +246,10 @@ class LlmClient:
         if images:
             content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
             for image in images:
-                content.append(
-                    {"type": "image_url", "image_url": {"url": image}}
-                )
+                image_url: dict[str, Any] = {"url": image}
+                if detail:
+                    image_url["detail"] = detail
+                content.append({"type": "image_url", "image_url": image_url})
             messages.append({"role": "user", "content": content})
         else:
             messages.append({"role": "user", "content": prompt})
@@ -253,11 +260,12 @@ class LlmClient:
         prompt: str,
         system: str | None = None,
         images: Sequence[str] | None = None,
+        detail: str | None = None,
     ) -> dict[str, Any]:
         """构造请求体。按 §6.4.4 只设模型与 temperature，不设其他参数。"""
         return {
             "model": self._settings.llm_model,
-            "messages": self.build_messages(prompt, system, images),
+            "messages": self.build_messages(prompt, system, images, detail),
             "temperature": self._settings.llm_temperature,
         }
 
@@ -268,6 +276,7 @@ class LlmClient:
         prompt: str,
         system: str | None = None,
         images: Sequence[str] | None = None,
+        detail: str | None = None,
         expect_json: bool = False,
         node_ref: Any = None,
         max_attempts: int = MAX_ATTEMPTS,
@@ -280,7 +289,7 @@ class LlmClient:
         每次尝试都写入 ``node_ref`` 指向的尝试记录，失败时抛 :class:`LlmCallError`
         并把全部尝试带出。
         """
-        payload = self.build_payload(prompt, system, images)
+        payload = self.build_payload(prompt, system, images, detail)
         attempts: list[LlmAttempt] = []
 
         for attempt_no in range(1, max_attempts + 1):

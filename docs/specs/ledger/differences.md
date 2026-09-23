@@ -1,6 +1,7 @@
-# 差异清单 v1（V0.1.1）
+# 差异清单 v2（V0.3）
 
 > 依据：`docs/specs/V0迁移规划.md`（§2 待决问题、§6 工程优化规则）、`Dify迁移任务说明.md`（§3.1/§3.2/§6/§7.2）。
+> v2 变更（V0.3）：§2.2 的 P1–P4 与 §2.3 的 M1 由「待确认」改为**实测复核已完成**（依据是 V0.3 的执行器与测试，见 §5）；新增 §1.1 的 V0.3 有意差异。
 > 每条只标注三种状态之一：**已确认**（已决策或有明确外部结论）、**待确认**（缺外部输入）、**缺省采用**（无结论时按既定缺省执行，并已记录）。
 > 无空白项。凡实测与文档不符者，一律以本清单记录的实测值为准。
 
@@ -27,6 +28,17 @@
 | W7 | 迭代 / 聚合 / 条件节点折叠为普通控制流（`for` 循环、赋值/三元、`if/elif/else`） | §6.2 | 已确认 |
 | W8 | 图节点/边数将少于 293/324 | §6.7 | 已确认（具体数字见 §3） |
 
+## 1.1 V0.3 新增的有意差异
+
+| 编号 | 差异 | 依据 | 状态 |
+|---|---|---|---|
+| W9 | 传给子流程的 `llm_model` **字面量**（`"gemini"`）一并删除，不只是 `start` 的入参。原值是固定串，属同一处废弃参数的残留 | §6.4.5 | 已确认 |
+| W10 | 新增 `WRITEBACK_ENABLED` 开关，**缺省 `false`**。置 false 时回写节点不发请求，只产出「已跳过」的可解释结果 | §9.3、Q1/Q2 缺省处理 | 已确认。真实冒烟亦保持 false——V0.3 的验收目标是端到端**读**通 |
+| W11 | 提示词正文的运行期唯一来源是包内 `src/customer_profile/templates/`；`docs/specs/prompts/` 降为**评审副本**，由测试断言两边逐字符一致 | D8、`TemplateRepository.DEFAULT_TEMPLATE_DIR` | 已确认。避免同一正文存在两个事实来源 |
+| W12 | `tool` 节点的 `@inputs` 支持 `@literal:<值>` 前缀，承载 DSL 里子流程入参的字面量（典型为截图类工作流的 `data_source`） | 迁移实测 | 已确认 |
+| W13 | 迭代节点的「收集哪个字段」以 `@output` **绑定**声明，不使用 `config["output"]`（后者是聚合结果的字段名）。校验层对迭代节点的 `@output` 指向循环体节点作豁免 | 迁移实测 | 已确认 |
+| W14 | AUC 语音识别由**内网自建服务**改为**火山引擎云服务**（`openspeech.bytedance.com`）：云服务异步提交 + 由调用方轮询、状态在响应头`X-Api-Status-Code`、`task_id` 由调用方生成，与 DSL 契约不同。`src/customer_profile/execution/auc.py` 做协议适配，**保持**`/submit_analyze` 与 `/query_analyze` 两个节点及其下游 code 节点不变 |用户 2026-09-23 决定（内网服务长期不可达） | 已确认。真实录音冒烟通过，见`v0.3_smoke_report.md` |
+
 ## 2. 未知运行语义（DSL 无法确认）
 
 ### 2.1 外部接口与协议
@@ -49,17 +61,17 @@
 
 | 编号 | 问题 | 状态 | 缺省处理 |
 |---|---|---|---|
-| P1 | `iteration` 节点的 `parallel_nums: 10` 与 `is_parallel: false` 组合语义 | **待确认** | **按串行实现**（与文档 §1.3-2「默认串行、逐项」一致）。`is_parallel: false` 是权威信号，`parallel_nums: 10` 在其下不生效 |
-| P2 | `iteration` 的 `error_handle_mode: terminated` 派生行为：某一项失败是否终止整轮并阻断下游？ | **待确认** | 按「失败传播、终止迭代」实现；下游与最终回写被阻断，保留已完成结果 |
-| P3 | `variable-aggregator` 开启 `group_enabled` 时的取值行为（多组并存的输出形态） | **待确认** | 返回一个普通对象，下游按属性取（`hobby` / `consumption`）。实测下游 `code` 节点确实取 `["output"]`，与「分组聚合 → 普通对象」一致 |
-| P4 | `if-else` 两侧分支汇聚到同一 `variable-aggregator` 时的取值行为（非教科书式二选一，出现在人设特征判断与各截图类工作流） | **待确认** | 按 aggregator 语义「取第一个可用输入」实现；因两支互斥，实际不会同时产出 |
-| P5 | HTTP 非 2xx 是否使节点失败？插件默认参数为何？ | **待确认** | 与 Q5 合并处理，走显式配置 |
+| P1 | `iteration` 节点的 `parallel_nums: 10` 与 `is_parallel: false` 组合语义 | **已复核（实现为串行）** | **按串行实现**。`is_parallel: false` 是权威信号，`parallel_nums: 10` 在其下不生效。V0.3 实测：8 个迭代节点的 `is_parallel` **全为 `false`**，且逐项留痕按 `call_path` 区分（`tests/test_iteration.py`） |
+| P2 | `iteration` 的 `error_handle_mode: terminated` 派生行为：某一项失败是否终止整轮并阻断下游？ | **已复核（终止即阻断）** | 实测 8 个迭代节点的 `error_handle_mode` **全为 `terminated`**。实现为「某项失败即终止整轮」，错误信息指明失败项序号，下游按既有 P2 缺省阻断；已完成项的结果保留（`tests/test_iteration.py::test_iteration_stops_on_first_failure`） |
+| P3 | `variable-aggregator` 开启 `group_enabled` 时的取值行为（多组并存的输出形态） | **已复核（每组包 `{"output": 值}`）** | 返回普通对象，键为组名。**V0.3 修正**：每组的值不是裸值，而是 `{"output": 值}`——实测下游 `code` 取 `hobby_result_object["output"]`，且这些入参在 DSL 里声明为 `value_type: object`。已按此实现（`executors_aggregator.py`，`tests/test_aggregator.py::test_grouped_aggregator_wraps_each_group_in_output`） |
+| P4 | `if-else` 两侧分支汇聚到同一 `variable-aggregator` 时的取值行为（非教科书式二选一，出现在人设特征判断与各截图类工作流） | **已复核（判据是「执行过」而非「非空」）** | **V0.3 修正判据**：取「第一个**真正执行过**的输入」，判据是 `ctx.has(node_id)`，**不是**「值非空」。空串是合法产出（`无数据，输出默认信息` 模板的正常结果、各截图流程 code 在未命中 channel 时明确返回空串）；按非空判定会把这些正常结果误判为缺失，静默改用另一支的值（`tests/test_aggregator.py::test_aggregator_takes_first_executed_even_when_empty`） |
+| P5 | HTTP 非 2xx 是否使节点失败？插件默认参数为何？ | **已复核（≥400 即失败，可配兜底）** | 实现为 `HttpAttempt.succeeded` 要求 `status < 400`；节点可用 `@error_strategy: default-value` 改为取兜底值而不失败。超时/重试参数一律走显式配置（Q5），不把 DSL 原值传给 HTTP 库 |
 
 ### 2.3 模型与提示词
 
 | 编号 | 问题 | 状态 | 缺省处理 |
 |---|---|---|---|
-| M1 | 「3 次尝试」是指最多 3 次（首次 + 2 重试），还是首次 + 3 次重试 = 4 次？ | **待确认** | 按**最多 3 次尝试**实现（§6.4.3） |
+| M1 | 「3 次尝试」是指最多 3 次（首次 + 2 重试），还是首次 + 3 次重试 = 4 次？ | **缺省采用（实现为最多 3 次）** | 按**最多 3 次尝试**实现（`llm.py` 的 `MAX_ATTEMPTS = 3`，§6.4.3）。**仍无外部结论**：这是缺省口径而非已核实协议，沿用 v1 的标记方式，不写成「已确认」 |
 | M2 | 17 处 `tool` 节点的 `output_json` 入参**全部为 `false`**，无法据此判断任务是否需要 JSON 输出 | **已确认（事实）** | 按「下游消费方语义」逐个确认：下游 `code` 对其输出做 JSON 解析、或提示词明确约定输出 JSON，即 `expect_json=True`。须在 V0.3 逐点标注 |
 | M3 | 全项目 12 个 vision 节点要求统一模型具备多模态能力 | **已确认（硬约束）** | `.env` 的 `LLM_MODEL` 选型时必须确认；实测 12 个节点全部位于 6 个截图解析工作流，每流 2 个 |
 
@@ -120,5 +132,16 @@
 
 ### 4.2 本清单的后续维护
 
-- 本文件是 **v1**。Q1/Q2/Q5–Q8 的「缺省采用」是**实现依据，不是等价验证通过**——缺外部协议时不得宣称等价。
+- 本文件是 **v2**。v1 → v2 的实质变化是 §2.2/§2.3 的四条 Dify 语义由「待确认」转为实测复核结论，其中 **P3 与 P4 的复核改变了实现口径**（每组包 `{"output": 值}`；判据由「非空」改为「执行过」）。Q1/Q2/Q5–Q8 的「缺省采用」是**实现依据，不是等价验证通过**——缺外部协议时不得宣称等价。
 - 任一 Qx 获得外部结论后，须回来更新本表并把状态改为「已确认」，同时修订实现。
+- P1–P5、M1 的「已复核」指的是**与本项目实现一致且经测试固定**，不等于已向 Dify 官方接口核实。若日后发现 Dify 实际行为不同，仍须回来修订。
+
+## 5. V0.3 复核依据
+
+| 结论 | 依据 | 固化于 |
+|---|---|---|
+| P1 串行、P2 终止即阻断 | 8 个迭代节点配置实测 | `tests/test_iteration.py` |
+| P3 分组包 `{"output": 值}` | 下游 code 取 `["output"]` + `value_type: object` | `tests/test_aggregator.py` |
+| P4 判据为「执行过」 | 空串是合法产出的两处证据 | `tests/test_aggregator.py` |
+| P5 非 2xx 失败 | `HttpAttempt.succeeded` 实现 | `tests/test_api.py` |
+| M1 最多 3 次 | `MAX_ATTEMPTS` | `tests/test_llm_retry.py` |

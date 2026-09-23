@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -90,41 +91,96 @@ class TemplateRepository:
         self._cache.clear()
 
 
+DIFY_REF_PATTERN = re.compile(r"\{\{#([^#{}]+)#\}\}")
+"""Dify 的节点引用：``{{#node_id.field#}}``。
+
+外置的正文里**原样保留**这种写法（正文不可改，见模块说明）。渲染时把它映射成本次
+调用已提供的变量值，因此这里先做一遍引用翻译，再做普通的 ``{{ 名字 }}`` 替换。
+"""
+
+BARE_NAME_PATTERN = re.compile(r"\{\{\s*([A-Za-z_][\w.]*)\s*\}\}")
+
+LITERAL_PATTERN = re.compile(r'\{\{\s*"([^"]*)"\s*\}\}')
+"""Dify 里 ``{{ "字面量" }}`` 表示直接输出该字符串（如无数据时的固定提示语）。"""
+
+JOIN_PATTERN = re.compile(
+    r"""\{\{\s*([A-Za-z_][\w.]*)\s*\|\s*join\(\s*"""
+    r"""(['"])((?:\\.|(?!\2).)*)\2\s*\)\s*\}\}""",
+    re.S,
+)
+"""``{{ arr | join('\n') }}``：把列表按给定分隔符拼成文本。
+
+全项目只用到 ``join`` 这一个过滤器（8 处，均在各工作流的「多图/多文件内容聚合」节点），
+因此这里只实现它，不引入通用模板引擎：多一个依赖就多一处行为差异面。
+"""
+
+
 def render_text(
     text: str, variables: Mapping[str, Any], *, strict: bool = True
 ) -> str:
-    """用 ``{{ variable }}`` 语法做纯文本替换。
+    """渲染模板正文。
 
-    不使用通用 ``str.replace`` 粗暴替换全部内容（`Dify迁移任务说明.md` §5.1）；
-    只识别 ``{{ 名字 }}`` 形态，且**只替换一次**每处占位符。
+    按顺序处理三种占位符：
+
+    1. ``{{#node_id.field#}}``：Dify 引用。按 ``node_id.field`` 在 ``variables`` 里
+       查同名键，或按 ``node_id`` 取对象再取字段；
+    2. ``{{ "字面量" }}``：直接输出引号内的内容（Dify 的常量写法）；
+    3. ``{{ 名字 }}``：普通变量。
+
+    不使用通用 ``str.replace`` 粗暴替换全部内容（`Dify迁移任务说明.md` §5.1）：
+    只识别上述形态，且逐个占位符替换。
     """
-    import re
 
-    pattern = re.compile(r"\{\{\s*([A-Za-z_][\w.]*)\s*\}\}")
-
-    def replace(match: "re.Match[str]") -> str:
-        key = match.group(1)
+    def resolve(key: str) -> Any:
         if key in variables:
-            return coerce_to_text(variables[key])
-        root = key.split(".", 1)[0]
-        if root in variables:
-            return coerce_to_text(_walk(variables[root], key.split(".")[1:]))
+            return variables[key]
+        root, _, rest = key.partition(".")
+        if root in variables and rest:
+            return _walk(variables[root], rest.split("."))
         if strict:
             raise MissingVariable(
                 f"模板变量 {key!r} 未提供；已提供：{sorted(variables)}"
             )
         return ""
 
-    return pattern.sub(replace, text)
+    def replace_ref(match: "re.Match[str]") -> str:
+        return coerce_to_text(resolve(match.group(1).strip()))
+
+    def replace_literal(match: "re.Match[str]") -> str:
+        return match.group(1)
+
+    def replace_join(match: "re.Match[str]") -> str:
+        value = resolve(match.group(1))
+        separator = match.group(3).encode("utf-8").decode("unicode_escape")
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (list, tuple)):
+            return separator.join(coerce_to_text(item) for item in value)
+        return coerce_to_text(value)
+
+    def replace_bare(match: "re.Match[str]") -> str:
+        return coerce_to_text(resolve(match.group(1)))
+
+    text = DIFY_REF_PATTERN.sub(replace_ref, text)
+    text = LITERAL_PATTERN.sub(replace_literal, text)
+    text = JOIN_PATTERN.sub(replace_join, text)
+    return BARE_NAME_PATTERN.sub(replace_bare, text)
 
 
 def find_placeholders(text: str) -> list[str]:
-    """列出模板中的变量名（去重、保持出现顺序）。用于校验绑定是否齐全。"""
-    import re
+    """列出模板引用的全部来源（去重、保持出现顺序）。
 
-    pattern = re.compile(r"\{\{\s*([A-Za-z_][\w.]*)\s*\}\}")
+    包含 Dify 引用（``{{#node.field#}}`` → ``node.field``）与普通变量名，用于校验
+    节点定义的绑定是否齐全。
+    """
     seen: dict[str, None] = {}
-    for match in pattern.finditer(text):
+    for match in DIFY_REF_PATTERN.finditer(text):
+        seen.setdefault(match.group(1).strip(), None)
+    for match in JOIN_PATTERN.finditer(text):
+        seen.setdefault(match.group(1), None)
+    for match in BARE_NAME_PATTERN.finditer(text):
         seen.setdefault(match.group(1), None)
     return list(seen)
 

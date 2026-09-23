@@ -109,7 +109,7 @@ class RunTracker:
                 node_id=execution.node_id,
                 node_title=execution.title,
                 node_type=execution.node_type,
-                call_path=run.call_path,
+                call_path=getattr(execution, "call_path", None) or run.call_path,
                 status=execution.status,
                 branch=execution.branch,
                 outputs=execution.outputs,

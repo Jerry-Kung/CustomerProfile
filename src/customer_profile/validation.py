@@ -12,7 +12,7 @@ import graphlib
 from dataclasses import dataclass
 from typing import Iterable
 
-from .definitions import NodeDef, WorkflowDef
+from .definitions import Binding, NodeDef, WorkflowDef
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,10 +103,15 @@ def _check_bindings(workflow: WorkflowDef) -> list[ValidationIssue]:
 
     「顺序依赖但无数据消费」的边在 DSL 中是合法且必须保留的，因此这里只校验
     **已被绑定引用**的来源，不要求存在对应边——反向要求（有边必须有绑定）不成立。
+
+    **迭代是例外**：``iteration`` 节点的 ``@output`` 指向循环体节点，而循环体在图上看
+    挂在迭代节点**内部**（``iteration_id`` 标记），不是它的图祖先。这是 Dify 迭代的
+    固有结构，不是错误，因此这里把循环体节点视为其宿主迭代节点的后代。
     """
     issues: list[ValidationIssue] = []
     known = workflow.node_map
     ancestors = _ancestors(workflow)
+    _add_iteration_body_ancestors(workflow, ancestors)
 
     for node in workflow.nodes:
         for binding in node.bindings:
@@ -120,7 +125,13 @@ def _check_bindings(workflow: WorkflowDef) -> list[ValidationIssue]:
                     )
                 )
                 continue
-            if src_id not in ancestors.get(node.node_id, set()):
+            if _is_iteration_output_selector(node, binding, ancestors):
+                # 迭代节点的 ``@output`` 指向自己的循环体节点。这不是图上的向后引用，
+                # 而是**结构性声明**（谁在循环里、收集哪个字段），Dify 的迭代本来就
+                # 这么表达。循环体由图规则挂在迭代节点内部，不构成其祖先，因此这里
+                # 按结构放行；其余任何非祖先引用一律照旧报错。
+                pass
+            elif src_id not in ancestors.get(node.node_id, set()):
                 issues.append(
                     ValidationIssue(
                         "binding_source_not_ancestor",
@@ -144,14 +155,34 @@ def _check_bindings(workflow: WorkflowDef) -> list[ValidationIssue]:
     return issues
 
 
+def _is_iteration_output_selector(node: NodeDef, binding: Binding, ancestors: dict) -> bool:
+    """判断一条绑定是不是「迭代节点指向自己循环体」的结构性声明。"""
+    if node.node_type != "iteration":
+        return False
+    if binding.target not in {"@output", "output_selector"}:
+        return False
+    body = set(node.config.get("body") or ())
+    return binding.source[0] in body
+
+
 def _check_entry_reachable(workflow: WorkflowDef) -> list[ValidationIssue]:
-    """所有节点都必须从入口可达。"""
+    """所有节点都必须从入口可达。
+
+    迭代循环体节点不被父图连边指向（它们挂在迭代节点内部），因此从入口做可达性遍历
+    时，把迭代节点当作其循环体入口（``iteration-start``）的前驱。
+    """
     try:
         entry = workflow.resolve_entry()
     except (ValueError, KeyError) as exc:
         return [ValidationIssue("entry_unresolved", str(exc))]
 
     succ = workflow.successors()
+    for node in workflow.nodes:
+        body = tuple(node.config.get("body") or ())
+        if node.node_type == "iteration" and body:
+            succ.setdefault(node.node_id, set()).update(
+                b for b in body if not known_predecessors(workflow, b)
+            )
     seen = {entry}
     stack = [entry]
     while stack:
@@ -205,6 +236,44 @@ def _check_terminals(workflow: WorkflowDef) -> list[ValidationIssue]:
                     )
                 )
     return issues
+
+
+def known_predecessors(workflow: WorkflowDef, node_id: str) -> tuple[str, ...]:
+    """某节点的前置（不含它自己）。供可达性遍历判断循环体入口用。"""
+    node = workflow.node_map.get(node_id)
+    return node.predecessors if node else ()
+
+
+def _add_iteration_body_ancestors(
+    workflow: WorkflowDef, ancestors: dict[str, set[str]]
+) -> None:
+    """把循环体节点登记为其宿主迭代节点的后代。
+
+    ``iteration`` 的 ``@output`` 引用循环体节点，而循环体不属于迭代节点的图祖先链。
+    这里按 Dify 的实际结构补上这层关系，而不是放宽「来源必须是祖先」这条检查——
+    放宽会让真正写错的引用也蒙混过关。
+    """
+    for node in workflow.nodes:
+        if node.node_type != "iteration":
+            continue
+        body = {b for b in (node.config.get("body") or ()) if b in ancestors}
+        if not body:
+            continue
+
+        # 方向一：循环体是迭代节点的**内容**，因此循环体节点的祖先里要包含迭代节点。
+        # DS L 里循环体确实引用迭代节点自身的 ``item``（`{{#<iteration>.item#}}`），
+        # 没有这一条会把合法引用误报成「非祖先引用」。
+        for body_id in body:
+            ancestors[body_id].add(node.node_id)
+            ancestors[body_id].update(ancestors.get(node.node_id, set()))
+
+        # 方向二：迭代节点「之后」的节点，其祖先集合要包含循环体——迭代的输出正是
+        # 从循环体收集来的。
+        for other in workflow.nodes:
+            if other.node_id == node.node_id:
+                continue
+            if node.node_id in ancestors.get(other.node_id, set()):
+                ancestors[other.node_id].update(body)
 
 
 def _ancestors(workflow: WorkflowDef) -> dict[str, set[str]]:

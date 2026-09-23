@@ -1,8 +1,0 @@
-【客户证据线索列表】
-{{ evidence_items }}
-【客户人设特征画像】
-{{ profile_analysis }}
-【客户兴趣爱好特征画像】
-{{ hobby_analysis }}
-【客户消费性格特征画像】
-{{ consumption_style_analysis }}

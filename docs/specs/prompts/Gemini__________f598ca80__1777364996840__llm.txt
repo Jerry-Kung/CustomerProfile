@@ -1,4 +1,0 @@
-system
-You are a helpful AI assistant.
-user
-{{#1777362439109.input_prompt#}}

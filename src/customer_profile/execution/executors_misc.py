@@ -53,7 +53,7 @@ async def execute_start(
     for name in declared:
         if name in ctx.inputs:
             outputs[name] = ctx.inputs[name]
-        elif node.config.get(f"required.{name}", True):
+        elif _is_required_input(node, name):
             missing.append(name)
     if missing:
         raise NodeExecutionError(
@@ -63,6 +63,20 @@ async def execute_start(
     for name, value in ctx.inputs.items():
         outputs.setdefault(name, value)
     return ExecutionOutcome(outputs=outputs)
+
+
+def _is_required_input(node: NodeDef, name: str) -> bool:
+    """某个工作流入参是否必填。
+
+    定义层用 ``required_<name>`` 传递（``required_phone_number=True``），这是一直以来的
+    写法；而这里原先读的是 ``required.<name>``，两种拼法对不上，于是**所有**入参都落到
+    默认的「必填」，``required_data_source=False`` 这类声明形同虚设——调用方少传一个
+    可选参数就会在 ``start`` 节点直接失败。两种拼法都认，缺省仍为必填。
+    """
+    for key in (f"required_{name}", f"required.{name}"):
+        if key in node.config:
+            return bool(node.config[key])
+    return True
 
 
 async def execute_end(

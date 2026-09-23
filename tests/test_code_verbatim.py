@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import ast
+import io
 import textwrap
 from pathlib import Path
 
@@ -189,3 +190,185 @@ def test_dsl_secret_is_not_in_definition():
     serialised = str(human_corrected_info.WORKFLOW.asdict())
     for secret in secrets:
         assert secret not in serialised, "迁移后的定义中出现了 DSL 的明文密钥"
+
+
+# ====================================================================
+# V0.3：全量比对（19 个工作流 / 49 个 code 节点）
+#
+# 上面两个工作流是 V0.2 手写的逐节点断言，保留作为「写法样板」；下面这组是通用比对，
+# 从定义里读 ``config['function']`` 自动定位迁移后的函数，因此新增工作流时无需再改测试。
+# ====================================================================
+
+
+def _load_workflows() -> dict:
+    from customer_profile.workflows import load_all
+
+    return load_all()
+
+
+def _dsl_code_nodes(dsl_name: str) -> dict[str, str]:
+    """取一个 DSL 里全部 ``code`` 节点的正文，``{node_id: code}``。"""
+    import yaml
+
+    path = DSL_DIR / (dsl_name if dsl_name.endswith(".yml") else f"{dsl_name}.yml")
+    with path.open("r", encoding="utf-8") as handle:
+        document = yaml.safe_load(handle)
+    return {
+        str(node["id"]): node["data"]["code"]
+        for node in document["workflow"]["graph"]["nodes"]
+        if node["data"].get("type") == "code"
+    }
+
+
+def _module_of(function_path: str):
+    import importlib
+
+    module_name, _, _ = function_path.partition(":")
+    return importlib.import_module(module_name)
+
+
+def _all_defs(source: str) -> list[str]:
+    tree = ast.parse(source)
+    return [n.name for n in tree.body if isinstance(n, ast.FunctionDef)]
+
+
+def _cases():
+    """收集全部 (工作流, 节点, DSL 正文, 迁移后函数路径)。"""
+    out = []
+    for workflow in _load_workflows().values():
+        if not workflow.source_dsl:
+            continue
+        if not (DSL_DIR / workflow.source_dsl).is_file():
+            continue
+        code_nodes = _dsl_code_nodes(workflow.source_dsl)
+        for node in workflow.nodes:
+            if node.node_type != "code":
+                continue
+            function_path = node.config.get("function")
+            if not function_path:
+                continue
+            out.append((workflow.workflow_id, node.node_id, code_nodes.get(node.node_id), function_path))
+    return out
+
+
+CASES = _cases()
+
+
+MIGRATED_CODE_NODES = 47
+"""迁移后的全部 ``code`` 节点数。
+
+台账统计的 49 个包含 ``Gemini（异常输出重试版）`` 子流程里的 2 个
+（``1777365069262`` / ``17773660491670``）。该子流程按有意差异 W2 整体归一为
+``llm_call()`` 的重试逻辑，不再作为独立工作流存在，因此它的 code 节点也不进入
+本比对——**这是有意的，不是漏迁**。47 + 2 = 49 与台账对得上。
+"""
+
+
+def test_every_code_node_is_covered():
+    """19 个工作流里 DSL 有的 code 节点，定义里都要有，且都登记了 function。"""
+    assert len(CASES) == MIGRATED_CODE_NODES, (
+        f"预期 {MIGRATED_CODE_NODES} 个 code 节点，实际 {len(CASES)}"
+    )
+    assert all(code for _, _, code, _ in CASES), "有节点取不到 DSL 正文"
+
+
+def test_migrated_plus_normalised_equals_ledger_total():
+    """47（迁移）+ 2（Gemini 重试子流程，按 W2 归一）= 台账的 49。"""
+    from customer_profile.workflows import load_all
+
+    normalised_away = {"Gemini（异常输出重试版）"}
+    migrated_names = {wf.display_name for wf in load_all().values() if wf.source_dsl}
+    assert not (migrated_names & normalised_away), (
+        "Gemini 重试子流程不应作为独立工作流出现（W2）"
+    )
+    assert len(CASES) + 2 == 49
+
+
+def _release(module) -> dict[str, dict]:
+    """取模块声明的「节点 → 函数名」映射；没有声明的模块返回空表。"""
+    return getattr(module, "CODE_SPECS", {}) or {}
+
+
+def _renamed_body(dsl_code: str, renames: dict[str, str]) -> str:
+    """把 DSL 原文里被改名的函数按 token 位置换回去，再取函数体。
+
+    只动 NAME token，字符串与注释保持不变——否则正文比对会因为改写 docstring 而失真。
+    """
+    if not renames:
+        return dsl_code
+    import tokenize
+
+    lines = dsl_code.splitlines(keepends=True)
+    offs, pos = [], 0
+    for line in lines:
+        offs.append(pos)
+        pos += len(line)
+
+    def abspos(rc):
+        return offs[rc[0] - 1] + rc[1]
+
+    edits = []
+    for tok in tokenize.generate_tokens(io.StringIO(dsl_code).readline):
+        if tok.type == tokenize.NAME and tok.string in renames:
+            edits.append((abspos(tok.start), abspos(tok.end), renames[tok.string]))
+    for start, end, replacement in reversed(edits):
+        dsl_code = dsl_code[:start] + replacement + dsl_code[end:]
+    return dsl_code
+
+
+@pytest.mark.parametrize(
+    "workflow_id,node_id,dsl_code,function_path",
+    CASES,
+    ids=[f"{w}:{n}" for w, n, _, _ in CASES],
+)
+def test_code_node_body_is_verbatim(workflow_id, node_id, dsl_code, function_path):
+    """``main`` 的函数体必须与 DSL 逐字符一致（除函数名与 docstring）。"""
+    _, _, function_name = function_path.partition(":")
+    module = _module_of(function_path)
+    spec = _release(module).get(node_id) or {}
+    if spec:
+        assert spec.get("main") == function_name, (
+            f"{workflow_id} 节点 {node_id} 的 CODE_SPECS 声明与 function 不一致："
+            f"{spec.get('main')!r} vs {function_name!r}"
+        )
+    dsl_code = _renamed_body(dsl_code, spec.get("renames") or {})
+    migrated = _import_function(module, function_name)
+    assert _function_body(migrated, function_name) == _function_body(dsl_code, "main"), (
+        f"{workflow_id} 节点 {node_id} 的 {function_name} 函数体与 DSL 不一致"
+    )
+
+
+@pytest.mark.parametrize(
+    "workflow_id,node_id,dsl_code,function_path",
+    CASES,
+    ids=[f"{w}:{n}" for w, n, _, _ in CASES],
+)
+def test_code_node_helpers_are_verbatim(workflow_id, node_id, dsl_code, function_path):
+    """同一节点里的辅助函数也必须逐字符一致。
+
+    跨节点重名的辅助函数在迁移时只**改函数名**以避免模块内互相覆盖（函数体一字未动）。
+    名字取自模块声明的 ``CODE_SPECS``，不靠猜：早先按 ``hasattr`` 试探的写法会挑中
+    另一个节点的同名函数，把「名字不同」误报成「正文不同」。
+    """
+    module = _module_of(function_path)
+    spec = _release(module).get(node_id) or {}
+    renames = spec.get("renames") or {}
+    if not spec:
+        # 未声明 CODE_SPECS 的模块（辅助函数不与别处重名，无需改名）
+        renames = {}
+
+    helper_names = {v: k for k, v in renames.items()}
+    renamed_code = _renamed_body(dsl_code, renames)
+
+    for name in _all_defs(dsl_code):
+        if name == "main":
+            continue
+        target = renames.get(name, name)
+        assert hasattr(module, target), (
+            f"{workflow_id} 节点 {node_id} 的辅助函数 {name}（迁移后叫 {target}）在模块里找不到"
+        )
+        assert helper_names.get(target, name) == name
+        migrated = _import_function(module, target)
+        assert _function_body(migrated, target) == _function_body(renamed_code, target), (
+            f"{workflow_id} 节点 {node_id} 的辅助函数 {name}（迁移后叫 {target}）与 DSL 不一致"
+        )

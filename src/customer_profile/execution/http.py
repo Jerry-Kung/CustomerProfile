@@ -59,6 +59,17 @@ class HttpAttempt:
     status_code: int | None = None
     response_headers: dict[str, str] = field(default_factory=dict)
     response_text: str | None = None
+    """响应体的文本形态。二进制响应经 httpx 解码后**会失真**，不要拿它当文件内容。"""
+
+    response_bytes: bytes | None = None
+    """响应体的原始字节。图片/文件下载的**唯一可信来源**。
+
+    为什么必须单独存一份：``response.text`` 会把二进制按文本编码解码，再把解码结果
+    重新编码成 base64，得到的 data URI 与真实文件**不一致**（实测 PNG 头
+    ``iVBORw0KGgo`` 变成 ``77+9UE5HDQoaCg``）。视觉节点把这段坏 base64 发给模型，
+    模型侧只会报一个语焉不详的下载失败。
+    """
+
     duration_ms: int = 0
     error: str | None = None
     error_code: str | None = None
@@ -78,6 +89,9 @@ class HttpAttempt:
             "status_code": self.status_code,
             "response_headers": self.response_headers,
             "response_text": self.response_text,
+            # ``response_bytes`` 刻意不进 asdict：留痕与 fixture 都以文本为准，
+            # 二进制只在**同一次运行内**供 files 字段使用。
+            "response_size": len(self.response_bytes) if self.response_bytes else None,
             "duration_ms": self.duration_ms,
             "error": self.error,
             "error_code": self.error_code,
@@ -112,6 +126,8 @@ class HttpClient:
         self._recorder = recorder
         self._clients: dict[str, httpx.AsyncClient] = {}
         self._lock = asyncio.Lock()
+        self._auc: Any = None
+        """AUC 云服务客户端，惰性构造（见 ``_auc_client``）。"""
 
     # ------------------------------------------------------------ 客户端
 
@@ -139,10 +155,31 @@ class HttpClient:
                 )
         return self._clients[key]
 
+    def _auc_client(self) -> Any:
+        """惰性构造 AUC 云服务客户端。
+
+        只在这里构造、只在 ``service="auc"`` 时用到，因此其他服务不会因此多出一个
+        httpx 连接池。复用同一份 transport / 回放 / 限流 / 留痕，口径与其它服务一致。
+        """
+        if self._auc is None:
+            from .auc import AucClient
+
+            self._auc = AucClient(
+                self._settings,
+                transport=self._transport,
+                replay=self._replay,
+                request_limiter=self._limiter,
+                recorder=self._recorder,
+            )
+        return self._auc
+
     async def aclose(self) -> None:
         for client in self._clients.values():
             await client.aclose()
         self._clients.clear()
+        if self._auc is not None:
+            await self._auc.aclose()
+            self._auc = None
 
     # ------------------------------------------------------------ 调用
 
@@ -165,7 +202,29 @@ class HttpClient:
 
         重试策略：GET 类幂等方法按配置重试；写方法默认不重试，除非显式传
         ``retry_enabled=True``（调用方需自行确认接口幂等，规划 Q2）。
+
+        ``service="auc"`` 时转交 :class:`~customer_profile.execution.auc.AucClient`：
+        该服务的真实实现对内是「一次调用内跑完提交 + 轮询」，与逐次请求的模型不同，
+        见 ``execution/auc.py`` 的说明。转交只影响传输，节点定义与下游 code 节点不变。
         """
+        if service == "auc":
+            from .auc import AucClient
+
+            client = self._auc_client()
+            return await client.request(
+                method,
+                path,
+                service=service,
+                headers=headers,
+                params=params,
+                json_body=json_body,
+                content=content,
+                ssl_verify=ssl_verify,
+                retry_enabled=retry_enabled,
+                retry_max=retry_max,
+                node_ref=node_ref,
+            )
+
         method = method.upper()
         attempts: list[HttpAttempt] = []
         max_attempts = self._resolve_attempts(method, retry_enabled, retry_max)
@@ -242,6 +301,12 @@ class HttpClient:
             attempt.status_code = int(frame.get("status_code", 200))
             attempt.response_text = frame.get("text", "")
             attempt.response_headers = frame.get("headers", {}) or {}
+            encoded = frame.get("bytes_base64")
+            if encoded:
+                # 录制二进制响应用 base64 承载：fixture 是 JSON，塞不下裸字节
+                import base64 as _b64
+
+                attempt.response_bytes = _b64.b64decode(encoded)
             attempt.duration_ms = _ms(started)
             return attempt
 
@@ -276,6 +341,7 @@ class HttpClient:
         attempt.status_code = response.status_code
         attempt.response_headers = redact_headers(dict(response.headers))
         attempt.response_text = response.text
+        attempt.response_bytes = response.content
         if response.status_code >= 400:
             attempt.error = f"HTTP {response.status_code}"
             attempt.error_code = f"http_{response.status_code}"

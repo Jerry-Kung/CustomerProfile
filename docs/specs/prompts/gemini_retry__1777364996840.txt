@@ -1,0 +1,2 @@
+You are a helpful AI assistant.
+{{#1777362439109.input_prompt#}}

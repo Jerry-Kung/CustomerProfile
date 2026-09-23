@@ -76,14 +76,19 @@ async def test_health_reports_replay_mode(client):
 
 
 async def test_health_lists_available_workflows(client):
+    """``/health`` 列出的必须是全部已登记定义，一个不多一个不少。
+
+    不硬编码工作流清单：V0.3 把 19 个工作流全部登记后，这里再写死四个名字就只会
+    测出「测试文件过期了」。改为与 :func:`load_all` 对照——它才是定义的唯一来源。
+    """
+    from customer_profile.workflows import load_all
+
     body = (await client.get("/health")).json()
+    assert set(body["workflows"]) == set(load_all()), (
+        "健康检查列出的工作流与实际登记的定义不一致"
+    )
     # 子工作流也必须是完整定义并出现在清单里（主流程会引用它）
-    assert set(body["workflows"]) == {
-        mengshi.WORKFLOW_ID,
-        hci.WORKFLOW_ID,
-        syn.WORKFLOW_ID,
-        syn.CHILD_WORKFLOW_ID,
-    }
+    assert syn.CHILD_WORKFLOW_ID in body["workflows"]
 
 
 async def test_workflow_list_has_counts(client):

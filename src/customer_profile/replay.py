@@ -48,6 +48,8 @@ class HttpFrame:
     status_code: int = 200
     text: str = ""
     headers: dict[str, str] = field(default_factory=dict)
+    bytes_base64: str | None = None
+    """二进制响应的 base64。图片下载专用——JSON fixture 放不下裸字节。"""
 
     @classmethod
     def from_raw(cls, raw: Mapping[str, Any]) -> "HttpFrame":
@@ -55,6 +57,7 @@ class HttpFrame:
             status_code=int(raw.get("status_code", 200)),
             text=raw.get("text", ""),
             headers=dict(raw.get("headers") or {}),
+            bytes_base64=raw.get("bytes_base64"),
         )
 
 
@@ -207,6 +210,9 @@ class ReplaySource:
         return {
             "status_code": frame.status_code,
             "text": frame.text,
+            # 二进制响应（图片下载）用 base64 承载：fixture 是 JSON，放不下裸字节。
+            # 没有它，录制的图片回放时会退回文本形态，与真实字节不一致。
+            "bytes_base64": frame.bytes_base64,
             "headers": dict(frame.headers),
         }
 

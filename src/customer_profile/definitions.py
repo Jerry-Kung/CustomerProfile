@@ -97,6 +97,24 @@ class NodeDef:
     predecessors: tuple[str, ...] = ()
     """直接前置节点 ID。承载数据依赖与纯执行顺序依赖两类边。"""
 
+    branch_from: tuple[str, str] | None = None
+    """本节点只在某个 ``if-else`` 前置的**指定分支**上执行。
+
+    形如 ``(if_else_node_id, "true")`` 或 ``(..., "false")``。``None`` 表示无条件执行。
+
+    DSL 的边用 ``sourceHandle`` 区分分支（实测 55 条分支边），而迁移后的
+    ``after=`` 只记了「有这条边」、丢了「走哪一支」。不还原这一位，两条分支会**同时执行**：
+    截图类流程里表现为「文件不存在」与「文件存在」两条路一起跑，后者对着空串解析 JSON
+    直接抛 :class:`JSONDecodeError`（V0.3 真实冒烟时实测到）。
+    """
+
+    branch_gates: tuple[tuple[str, str], ...] = ()
+    """前置节点 ID → 必须走到的分支名。
+
+    与 :attr:`branch_from` 的区别：那个只描述**唯一**那个分支前置，本字段是多条前置各带
+    自己的门槛。调度层按本字段判定「这条边会不会来」，不会来就把该边标为失效。
+    """
+
     bindings: tuple[Binding, ...] = ()
     """输入绑定。"""
 
@@ -115,12 +133,18 @@ class NodeDef:
         if not self.node_type:
             raise ValueError(f"节点 {self.node_id} 缺少 node_type")
 
+    @property
+    def branch_gates_map(self) -> dict[str, str]:
+        """``{前置节点 ID: 分支名}``。普通前置不在其中（视为无条件）。"""
+        return {k: v for k, v in self.branch_gates}
+
     def asdict(self) -> dict[str, Any]:
         return {
             "node_id": self.node_id,
             "title": self.title,
             "type": self.node_type,
             "direct_predecessors": list(self.predecessors),
+            "branch_gates": self.branch_gates_map,
             "bindings": [b.asdict() for b in self.bindings],
             "outputs": list(self.outputs),
             "config": self.config,
@@ -157,6 +181,10 @@ class WorkflowDef:
     def node_map(self) -> dict[str, NodeDef]:
         return {n.node_id: n for n in self.nodes}
 
+    def branch_gate_map(self) -> dict[str, dict[str, str]]:
+        """节点 ID → {前置节点 ID: 必须走到的分支名}。供调度层判定边是否失效。"""
+        return {n.node_id: n.branch_gates_map for n in self.nodes if n.branch_gates}
+
     def successors(self) -> dict[str, set[str]]:
         succ: dict[str, set[str]] = {n.node_id: set() for n in self.nodes}
         for node in self.nodes:
@@ -191,9 +219,17 @@ class WorkflowDef:
         )
 
     def edge_list(self) -> list[dict[str, str]]:
-        """扁平边表，语义与 DSL 的 ``graph.edges`` 一致。"""
+        """扁平边表，语义与 DSL 的 ``graph.edges`` 一致。
+
+        ``source_handle`` 保留分支名（``true`` / ``false`` / ``fail-branch``），
+        与台账 ``node_ledger.json`` 的字段同名同义；普通边为 ``"source"``。
+        """
         return [
-            {"source": pred, "target": node.node_id}
+            {
+                "source": pred,
+                "target": node.node_id,
+                "source_handle": node.branch_gates_map.get(pred, "source"),
+            }
             for node in self.nodes
             for pred in node.predecessors
         ]
@@ -245,6 +281,7 @@ class WorkflowDef:
                     outputs=node.outputs,
                     config=dict(node.config),
                     coords=node.coords,
+                    branch_gates=tuple(node.branch_gates),
                 )
             )
         cleaned.sort(key=lambda n: order.get(n.node_id, 0))
@@ -275,9 +312,14 @@ def make_node(
     inputs: Mapping[str, Selector | str | Sequence[str]] | None = None,
     outputs: Iterable[str] = (),
     coords: tuple[float, float] | None = None,
+    on_branch: tuple[str, str] | None = None,
     **config: Any,
 ) -> NodeDef:
-    """构造节点的简写。``inputs`` 的值可以是 ``(node_id, field)`` 或 ``'node_id.field'``。"""
+    """构造节点的简写。``inputs`` 的值可以是 ``(node_id, field)`` 或 ``'node_id.field'``。
+
+    ``on_branch`` 声明「只在某个 ``if-else`` 的某一支上执行」，形如
+    ``on_branch=("1775703027681", "true")``（DSL 的 ``sourceHandle``）。
+    """
     bindings: list[Binding] = []
     for target, selector in (inputs or {}).items():
         bindings.append(
@@ -287,6 +329,9 @@ def make_node(
                 is_config=target.startswith("@"),
             )
         )
+    gates: tuple[tuple[str, str], ...] = ()
+    if on_branch is not None:
+        gates = ((on_branch[0], on_branch[1]),)
     return NodeDef(
         node_id=node_id,
         title=title,
@@ -296,6 +341,8 @@ def make_node(
         outputs=tuple(outputs),
         config=dict(config),
         coords=coords,
+        branch_from=on_branch,
+        branch_gates=gates,
     )
 
 

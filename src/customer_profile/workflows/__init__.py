@@ -17,6 +17,22 @@ WORKFLOW_MODULES: tuple[str, ...] = (
     "customer_profile.workflows.mengshi_it_system_data",
     "customer_profile.workflows.human_corrected_info",
     "customer_profile.workflows.synthetic_fanout",
+    "customer_profile.workflows.moments_info",
+    "customer_profile.workflows.wechat_search_homepage",
+    "customer_profile.workflows.wechat_homepage",
+    "customer_profile.workflows.xiaohongshu_homepage",
+    "customer_profile.workflows.douyin_homepage",
+    "customer_profile.workflows.alipay_homepage",
+    "customer_profile.workflows.test_drive_audio",
+    "customer_profile.workflows.outbound_call_audio",
+    "customer_profile.workflows.audio_content_extract",
+    "customer_profile.workflows.jiguang_data",
+    "customer_profile.workflows.chat_history_data",
+    "customer_profile.workflows.user_feedback_data",
+    "customer_profile.workflows.profile_features_analysis",
+    "customer_profile.workflows.evidence_subagent",
+    "customer_profile.workflows.customer_profile_production",
+    "customer_profile.workflows.customer_profile_entry",
 )
 
 

@@ -234,3 +234,11 @@ data/
 
 # 测试产物
 .pytest_cache/
+
+# 真实客户数据：录制得到的回放 fixture 可能含姓名/手机号/地址，禁止入库。
+# 只有人工复核确认脱敏后的 fixture 才可单独用 `git add -f` 加入。
+tests/fixtures/replay/*.json
+!tests/fixtures/replay/human_corrected_info.json
+
+# 迁移期间的临时脚本与中间产物
+.tmp_*
