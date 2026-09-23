@@ -39,6 +39,15 @@
 | W13 | 迭代节点的「收集哪个字段」以 `@output` **绑定**声明，不使用 `config["output"]`（后者是聚合结果的字段名）。校验层对迭代节点的 `@output` 指向循环体节点作豁免 | 迁移实测 | 已确认 |
 | W14 | AUC 语音识别由**内网自建服务**改为**火山引擎云服务**（`openspeech.bytedance.com`）：云服务异步提交 + 由调用方轮询、状态在响应头`X-Api-Status-Code`、`task_id` 由调用方生成，与 DSL 契约不同。`src/customer_profile/execution/auc.py` 做协议适配，**保持**`/submit_analyze` 与 `/query_analyze` 两个节点及其下游 code 节点不变 |用户 2026-09-23 决定（内网服务长期不可达） | 已确认。真实录音冒烟通过，见`v0.3_smoke_report.md` |
 
+## 1.2 V0.4 新增的有意差异
+
+| 编号 | 差异 | 依据 | 状态 |
+|---|---|---|---|
+| W15 | **布局改为自动计算，放弃复用 DSL 坐标。** `NodeDef.coords` 字段保留（有值时优先），但 285 个节点中仅 22 个有值，不再回填 | 用户 2026-09-23 决定：回填会产生一份与 DSL 强相关的派生物，与「纯代码构建、与 Dify 解关联」的初衷相悖 | 已确认。算法见 `V0.4只读运行台.md` §2.2，测试见 `tests/test_layout.py` |
+| W16 | **前端构建产物 `frontend/dist/` 入库。** 仓库根 `.gitignore` 与 `frontend/.gitignore` 各加例外 | `V0.4只读运行台.md` §4：运行台要能在未安装 node 的机器上直接启动 | 已确认。代价是改前端必须重新构建并提交产物，见 `frontend/README.md` |
+| W17 | `SERVE_UI` 缺省 **false**：不托管前端时服务照常启动；置 true 但未构建时打印告警并跳过，**不**启动失败 | 「可选功能不应变成硬依赖」，同 W10 的取向 | 已确认 |
+| W18 | 设计文档初稿称「迭代节点带环」，实测 **20 个定义全部无环**；布局按 DAG 设计，不实现断环语义 | 实现时实测（`structural_order()` 逐个成功） | 已确认。环普查由 `tests/test_layout.py::test_no_real_workflow_is_cyclic` 断言 |
+
 ## 2. 未知运行语义（DSL 无法确认）
 
 ### 2.1 外部接口与协议

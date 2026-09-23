@@ -20,6 +20,7 @@ from .execution.http import HttpClient
 from .execution.llm import LlmClient
 from .execution.scheduler import RunOutcome, RunRequest, Scheduler
 from .execution.subworkflow import register_tool_executor
+from .layout import attach_layout
 from .persistence import RunTracker
 from .persistence.store import Store
 from .replay import ReplaySource, http_key
@@ -122,8 +123,13 @@ class Service:
             ) from exc
 
     def topology(self, workflow_id: str) -> dict[str, Any]:
-        """导出拓扑，供只读前端使用（V0.4 复用同一份定义，不维护第二张图）。"""
-        return self.require_workflow(workflow_id).asdict()
+        """导出拓扑，供只读前端使用（V0.4 复用同一份定义，不维护第二张图）。
+
+        ``asdict()`` 的 ``coords`` 保持原样（声明），算出来的展示坐标放在独立的
+        ``layout`` 字段。两者分开：一个是人定的，一个是算的，混在一起就分不清了。
+        """
+        workflow = self.require_workflow(workflow_id)
+        return attach_layout(workflow.asdict(), workflow)
 
 
 async def build_service(

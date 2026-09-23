@@ -1,0 +1,137 @@
+/* 全局样式。运行台是内部工具，取「信息密度优先、克制」的取向。 */
+
+:root {
+  --bg: #f8fafc;
+  --panel: #ffffff;
+  --border: #e2e8f0;
+  --text: #0f172a;
+  --muted: #64748b;
+  --accent: #2563eb;
+  --danger: #dc2626;
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    'Microsoft YaHei',
+    sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app-header {
+  align-items: center;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 12px 20px;
+}
+
+.app-header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.app-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.app-controls label {
+  color: var(--muted);
+}
+
+.app-controls select {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 14px;
+  max-width: 420px;
+  padding: 4px 8px;
+}
+
+.app-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.app-error {
+  background: #fef2f2;
+  border-bottom: 1px solid #fecaca;
+  color: var(--danger);
+  padding: 8px 20px;
+}
+
+.app-placeholder {
+  color: var(--muted);
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.app-body {
+  /* min-height:0 让 flex 子项在内容超高时正确地收缩，否则 React Flow 的
+     画布会把页面整体撑高，控件随之被推出视口。 */
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.graph-canvas {
+  height: 100%;
+  width: 100%;
+}
+
+/* 图上的节点卡片 */
+.node-card {
+  text-align: left;
+}
+
+.node-title {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  /* 中文节点名很长（「（新）SubAgent - 朋友圈信息提取」），限行避免卡片被撑爆。 */
+  overflow-wrap: anywhere;
+}
+
+.node-type {
+  color: var(--muted);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.node-meta {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 2px;
+}

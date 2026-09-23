@@ -107,6 +107,13 @@ class Settings(BaseSettings):
     replay_strict: bool = True
     """固定响应未命中时是否直接失败。默认严格，避免「静默走过」被误当成等价验证。"""
 
+    serve_ui: bool = False
+    """是否由后端托管前端构建产物（``frontend/dist``）。
+
+    缺省 **false**：托管要求先跑过 ``npm run build``，而测试与无前端环境不应因此失败。
+    置 true 时在 ``/`` 挂载静态资源，见 ``docs/specs/V0.4只读运行台.md`` §4。
+    """
+
     interrupt_on_start: bool = True
     """启动时把上次进程遗留的 running 运行标记为 interrupted（§7.3）。"""
 

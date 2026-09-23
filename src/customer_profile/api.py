@@ -11,12 +11,15 @@ from __future__ import annotations
 import asyncio
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Mapping
 
 from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .definitions import RunStatus
+from .definitions import NodeDef, RunStatus, WorkflowDef
+from .layout import layout
 from .runner import Service, build_service
 from .settings import get_settings
 
@@ -57,6 +60,26 @@ class RunDetail(RunSummary):
     child_run_ids: list[str] = Field(default_factory=list)
 
 
+class RunGraph(BaseModel):
+    """运行详情页的主数据：当次版本的图 + 节点状态 + 子运行映射。
+
+    图与状态分开两个字段，不合并成「带状态的节点列表」：图属定义层（可能与当前代码
+    不同版本），状态属运行层。合并后「这个节点在图里存在但没执行」和「执行了但已不在
+    图里」会无从分辨。
+    """
+
+    run: RunSummary
+    definition_version_id: int | None = None
+    definition: dict[str, Any] = Field(
+        default_factory=dict, description="当次定义快照，含 layout 字段"
+    )
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    child_runs: dict[str, dict[str, Any]] = Field(
+        default_factory=dict, description="触发节点 ID → 子运行摘要"
+    )
+    is_replay: bool = False
+
+
 def create_app(service_factory: Any = None) -> FastAPI:
     """构造 FastAPI 应用。
 
@@ -83,10 +106,12 @@ def create_app(service_factory: Any = None) -> FastAPI:
                 if service.store is not None:
                     service.store.close()
 
+    description = "潜在目标客户人设画像分析工作流 —— 最小执行器与留痕 API"
+
     app = FastAPI(
         title="Customer Profile",
-        version="0.2.0",
-        description="潜在目标客户人设画像分析工作流 —— 最小执行器与留痕 API",
+        version="0.4.1",
+        description=description,
         lifespan=lifespan,
     )
 
@@ -157,6 +182,34 @@ def create_app(service_factory: Any = None) -> FastAPI:
             return service.topology(workflow_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/definition-versions/{version_id}", tags=["meta"])
+    async def definition_version(version_id: int) -> dict[str, Any]:
+        """取一份定义快照，并附加布局坐标。
+
+        运行详情展示的是**当时的**图与提示词版本，因此前端取图走这里而不是当前定义。
+        快照已在每次运行开始时由留痕层写入（``definition_versions`` 表）。
+
+        返回形状与 ``/runs/{id}/graph`` 一致——图**嵌套**在 ``definition`` 键下。
+        两个端点返回同一类东西，形状不同会让前端出现两套取图代码；嵌套也让
+        「快照缺失时 ``definition`` 为空字典」这一情形有稳定的形状可断言。
+        """
+        service = get_service()
+        if service.store is None:
+            raise HTTPException(status_code=503, detail="未启用留痕存储")
+        row = await service.store.definition_version(version_id)
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail=f"定义版本 {version_id} 不存在"
+            )
+        return {
+            "version_id": version_id,
+            "workflow_id": row.get("workflow_id"),
+            "definition_hash": row.get("definition_hash"),
+            "code_commit": row.get("code_commit"),
+            "created_at_ms": row.get("created_at_ms"),
+            "definition": _with_layout(row, service),
+        }
 
     # ------------------------------------------------------------ 运行
 
@@ -232,6 +285,51 @@ def create_app(service_factory: Any = None) -> FastAPI:
             child_run_ids=[child["run_id"] for child in children],
         )
 
+    @app.get("/runs/{run_id}/graph", response_model=RunGraph, tags=["runs"])
+    async def get_run_graph(run_id: str) -> RunGraph:
+        """运行详情页的主数据：当次版本的图 + 节点状态 + 子运行映射。
+
+        一次返回，避免前端为了同一张图做三次往返（拿运行、拿图、拿子运行）。
+        图来自 ``definition_versions`` 快照，不是当前定义——否则历史运行会被新版本覆盖。
+        """
+        service = get_service()
+        if service.store is None:
+            raise HTTPException(status_code=503, detail="未启用留痕存储")
+        row = await service.store.get_run(run_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"运行 {run_id} 不存在")
+
+        version_id = row.get("definition_version_id")
+        definition: dict[str, Any] = {}
+        if version_id is not None:
+            version_row = await service.store.definition_version(version_id)
+            if version_row is not None:
+                definition = _with_layout(version_row, service)
+
+        nodes = await service.store.list_node_executions(run_id)
+        children = await service.store.list_child_runs(run_id)
+
+        # 子运行按「触发它的父节点」索引，前端点节点即可下钻，不必自己再查一次。
+        child_by_node: dict[str, dict[str, Any]] = {}
+        for child in children:
+            parent_node = child.get("parent_node_id")
+            if parent_node:
+                child_by_node[parent_node] = {
+                    "run_id": child["run_id"],
+                    "workflow_id": child.get("workflow_id"),
+                    "status": child.get("status"),
+                    "duration_ms": child.get("duration_ms"),
+                }
+
+        return RunGraph(
+            run=_summary_of(row),
+            definition_version_id=version_id,
+            definition=definition,
+            nodes=nodes,
+            child_runs=child_by_node,
+            is_replay=bool(row.get("is_replay")),
+        )
+
     @app.post("/runs/{run_id}/cancel", tags=["runs"])
     async def cancel_run(run_id: str) -> dict[str, Any]:
         """请求取消一个仍在运行的运行。"""
@@ -245,7 +343,31 @@ def create_app(service_factory: Any = None) -> FastAPI:
             )
         return {"run_id": run_id, "cancelled": True}
 
+    # 静态挂载最后加：放在所有 API 路由注册之后，避免 ``/`` 的前缀匹配盖住 API。
+    if service_factory is None:
+        _mount_ui(app, get_settings())
+
     return app
+
+
+def _mount_ui(app: FastAPI, settings: Any) -> None:
+    """把前端构建产物挂到根路径。未构建或未开启时安静跳过。
+
+    **不做成启动失败**：没有前端是合法状态（只跑 API、跑测试、未装 node），
+    让它把服务拖住起不来是把可选功能变成了硬依赖。
+    """
+    if not settings.serve_ui:
+        return
+    dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    if not (dist / "index.html").is_file():
+        print(
+            f"[前端] SERVE_UI=true 但未找到构建产物：{dist}；"
+            f"请先执行 cd frontend && npm run build",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    app.mount("/", StaticFiles(directory=str(dist), html=True), name="ui")
 
 
 def _summary_of(row: Mapping[str, Any]) -> RunSummary:
@@ -260,6 +382,47 @@ def _summary_of(row: Mapping[str, Any]) -> RunSummary:
         error=row.get("error"),
         is_replay=bool(row.get("is_replay")),
     )
+
+
+def _with_layout(
+    version_row: Mapping[str, Any], service: Service
+) -> dict[str, Any]:
+    """给一份**历史定义快照**附加布局坐标。
+
+    快照是经 JSON 往返的普通 dict，不是 :class:`~customer_profile.WorkflowDef`，因此
+    不能直接复用 :func:`layout.attach_layout`（它按 ``NodeDef`` 工作）。这里从 dict 取
+    出分层所需的最小信息（节点 ID 与前置关系），复用同一个分层函数算坐标。
+
+    只有 ``predecessors`` 参与分层，不用 ``bindings``：展示坐标不关心变量绑定。
+    """
+    definition = dict(version_row.get("definition") or {})
+    nodes = definition.get("nodes") or []
+
+    # 用 NodeDef 的最小投影喂给分层函数，避免为 dict 再写一套分层逻辑。
+    projected = WorkflowDef(
+        workflow_id=definition.get("workflow_id") or "",
+        display_name=definition.get("display_name") or "",
+        nodes=tuple(
+            NodeDef(
+                node_id=n["node_id"],
+                title=n.get("title") or n["node_id"],
+                node_type=n.get("type") or "code",
+                predecessors=tuple(n.get("direct_predecessors") or ()),
+                coords=(
+                    tuple(n["coords"])  # type: ignore[arg-type]
+                    if n.get("coords")
+                    else None
+                ),
+            )
+            for n in nodes
+            if n.get("node_id")
+        ),
+    )
+    definition["layout"] = {
+        node_id: [round(x, 2), round(y, 2)]
+        for node_id, (x, y) in layout(projected).items()
+    }
+    return definition
 
 
 app = create_app()

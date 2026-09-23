@@ -11,6 +11,9 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+# 例外：运行台的前端构建产物刻意入库（docs/specs/V0.4只读运行台.md §4），
+# 使未安装 node 的机器也能直接起服务。
+!frontend/dist/
 downloads/
 eggs/
 .eggs/
