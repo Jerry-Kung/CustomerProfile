@@ -1,0 +1,16 @@
+{
+  "朋友圈截图内容信息": "{{ moments_result }}",
+  "微信手机号搜索界面信息": "{{ wechat_search_homepage_result }}",
+  "微信主页截图信息": "{{ wechat_homepage_result }}",
+  "试驾录音信息": "{{ test_drive_result }}",
+  "外呼录音信息": "{{ outbound_call_result }}",
+  "支付宝主页截图信息": "{{ alipay_homepage_result }}",
+  "小红书主页截图信息": "{{ xiaohongshu_homepage_result }}",
+  "抖音主页截图信息": "{{ douyin_homepage_result }}",
+  "手机号归属地信息": "{{ phone_result }}",
+  "关联企业信息": "{{ phone_result }}",
+  "销售人员人工确认的客户Notes信息": "{{ locked_notes_result }}",
+  "客户留存在我方销售数据系统中的信息记录":"{{ it_system_result }}",
+  "客户与我方销售人员的聊天记录信息":"{{ chat_history_result }}",
+  "销售人员对当前客户历史画像数据的反馈记录":"{{ feedback_result }}"
+}

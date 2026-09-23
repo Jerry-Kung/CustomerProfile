@@ -1,0 +1,946 @@
+{
+  "note": "Prompt/template fingerprints. Bodies are not stored in this file; run with --dump-prompts to write them verbatim to docs/specs/prompts/.",
+  "total": 81,
+  "entries": [
+    {
+      "workflow_file": "Gemini（异常输出重试版）.yml",
+      "node_id": "1777364996840",
+      "title": "LLM执行",
+      "node_type": "llm",
+      "chars": 76,
+      "lines": 4,
+      "sha256": "154a6f279aedd3c594d679f3b730066cea4ce1a7d2a293825089b57c5b45eec4",
+      "variables": [
+        "1777362439109.input_prompt"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "Gemini（异常输出重试版）.yml",
+      "node_id": "17773660256620",
+      "title": "LLM执行 (1)",
+      "node_type": "llm",
+      "chars": 76,
+      "lines": 4,
+      "sha256": "154a6f279aedd3c594d679f3b730066cea4ce1a7d2a293825089b57c5b45eec4",
+      "variables": [
+        "1777362439109.input_prompt"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "Gemini（异常输出重试版）.yml",
+      "node_id": "17773660323920",
+      "title": "LLM执行 (2)",
+      "node_type": "llm",
+      "chars": 76,
+      "lines": 4,
+      "sha256": "154a6f279aedd3c594d679f3b730066cea4ce1a7d2a293825089b57c5b45eec4",
+      "variables": [
+        "1777362439109.input_prompt"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "录音文件内容抽取（纯识别，无加工）.yml",
+      "node_id": "1773135369428",
+      "title": "LLM 识别结果校对",
+      "node_type": "llm",
+      "chars": 1328,
+      "lines": 43,
+      "sha256": "fef87661790920e2fa0161978a5037b6d11e739fbe8b3b33e3fad7b6d97bad22",
+      "variables": [
+        "1773125494862.auc_result"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "录音文件内容抽取（纯识别，无加工）.yml",
+      "node_id": "17732152003520",
+      "title": "LLM 内容有效性判断",
+      "node_type": "llm",
+      "chars": 651,
+      "lines": 33,
+      "sha256": "1e3c3db731b4147d88a02ab587a6878ee752cae48c444d0939ac9006cd51a738",
+      "variables": [
+        "1773135369428.text"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "录音文件内容抽取（纯识别，无加工）.yml",
+      "node_id": "1776152619357",
+      "title": "模板转换",
+      "node_type": "template-transform",
+      "chars": 18,
+      "lines": 1,
+      "sha256": "b2c8d0adf2b67471293cc6591a75647c45f5af76b4ee7c4d8b5fa956940d6021",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 人设特征判断.yml",
+      "node_id": "17767601866080",
+      "title": "人设特征推断",
+      "node_type": "llm",
+      "chars": 2569,
+      "lines": 82,
+      "sha256": "190857b47a0d3e245a3cbf5afb277fc25d57e5842ff6b8032342f02494a38f51",
+      "variables": [
+        "1776670030415.evidence_items"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 人设特征判断.yml",
+      "node_id": "17767606554420",
+      "title": "消费者风格推断",
+      "node_type": "llm",
+      "chars": 3014,
+      "lines": 100,
+      "sha256": "051549a3d50d309f5759585cc1ee2856e853a883d812173583c4c4301f0b2287",
+      "variables": [
+        "1776670030415.evidence_items",
+        "1776760253638.output"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 人设特征判断.yml",
+      "node_id": "17767606912710",
+      "title": "兴趣&关注点推断",
+      "node_type": "llm",
+      "chars": 3101,
+      "lines": 102,
+      "sha256": "7c12e975057d4b58342fdb1b0e87bb05ae95915f3883373b48ab58a7228beb66",
+      "variables": [
+        "1776670030415.evidence_items",
+        "1776760253638.output"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 人设特征判断.yml",
+      "node_id": "1777427777301",
+      "title": "人设特征推断 Prompt",
+      "node_type": "template-transform",
+      "chars": 2684,
+      "lines": 81,
+      "sha256": "fc9c0583acf6788e6875bd40b7cf1aaff61bfe77db74db004168515eff2c8742",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 人设特征判断.yml",
+      "node_id": "1777427950125",
+      "title": "消费者风格推断Prompt",
+      "node_type": "template-transform",
+      "chars": 3131,
+      "lines": 98,
+      "sha256": "ba113a09e0b7e9c642db0fce5d449de833fa30365c06b0eef44ce5354b31ce7a",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 人设特征判断.yml",
+      "node_id": "1777427955726",
+      "title": "兴趣&关注点推断Prompt",
+      "node_type": "template-transform",
+      "chars": 3220,
+      "lines": 100,
+      "sha256": "40630d157caffafabdda60034fc5c4f8384b77a29c405aa8b913a370ffc4457e",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 外呼录音信息提取.yml",
+      "node_id": "1775641360812",
+      "title": "无数据，输出默认信息",
+      "node_type": "template-transform",
+      "chars": 16,
+      "lines": 1,
+      "sha256": "5e208c6e73e5dc9b7649b2444138f3c2ba4695384c79e6ec64a70d3ce8fe0356",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 外呼录音信息提取.yml",
+      "node_id": "1775811655657",
+      "title": "多文件内容聚合",
+      "node_type": "template-transform",
+      "chars": 22,
+      "lines": 1,
+      "sha256": "9d25d3cdda84feb89a0cdb481610636689b0419ff215f3105a25f2ccf172a48d",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 外呼录音信息提取.yml",
+      "node_id": "17760451317570",
+      "title": "录音文件分析",
+      "node_type": "llm",
+      "chars": 955,
+      "lines": 43,
+      "sha256": "62c337580c3102fa261ebac0bfb6d7de13e346d07aa50f1c94588a7e23f7677c",
+      "variables": [
+        "1775811655657.output"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 外呼录音信息提取.yml",
+      "node_id": "1776149288520",
+      "title": "录音文件分析 Gemini",
+      "node_type": "llm",
+      "chars": 950,
+      "lines": 42,
+      "sha256": "f06f9cf664ee41c71804a5c628dd3b0ab57c35bf95f1ca9bdbd0e350117aa173",
+      "variables": [
+        "1776135353554.file_content"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 外呼录音信息提取.yml",
+      "node_id": "17767643097270",
+      "title": "录音文件分析",
+      "node_type": "llm",
+      "chars": 950,
+      "lines": 42,
+      "sha256": "f06f9cf664ee41c71804a5c628dd3b0ab57c35bf95f1ca9bdbd0e350117aa173",
+      "variables": [
+        "1776135353554.file_content"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 小红书个人页信息提取.yml",
+      "node_id": "1775641360812",
+      "title": "无数据，输出默认信息",
+      "node_type": "template-transform",
+      "chars": 20,
+      "lines": 1,
+      "sha256": "4a34bedbaa3edcaefb4929c4297156fd937478c31f02a598e58f7ba89d9828eb",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 小红书个人页信息提取.yml",
+      "node_id": "1775717096663",
+      "title": "小红书个人页内容解析",
+      "node_type": "llm",
+      "chars": 338,
+      "lines": 13,
+      "sha256": "8def2ed9278d2a8ee2a0e36c2ead2e650ecc56efbc4abcb7531536ae1327aac2",
+      "variables": [],
+      "vision_enabled": true
+    },
+    {
+      "workflow_file": "（新）SubAgent - 小红书个人页信息提取.yml",
+      "node_id": "1775811114840",
+      "title": "小红书个人页内容解析",
+      "node_type": "llm",
+      "chars": 338,
+      "lines": 13,
+      "sha256": "8def2ed9278d2a8ee2a0e36c2ead2e650ecc56efbc4abcb7531536ae1327aac2",
+      "variables": [],
+      "vision_enabled": true
+    },
+    {
+      "workflow_file": "（新）SubAgent - 小红书个人页信息提取.yml",
+      "node_id": "1775811655657",
+      "title": "多张图片内容聚合",
+      "node_type": "template-transform",
+      "chars": 22,
+      "lines": 1,
+      "sha256": "9d25d3cdda84feb89a0cdb481610636689b0419ff215f3105a25f2ccf172a48d",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 小红书个人页信息提取.yml",
+      "node_id": "17760451317570",
+      "title": "多图片内容总结",
+      "node_type": "llm",
+      "chars": 396,
+      "lines": 15,
+      "sha256": "f6198396df70ca85265caccd84070831f879601b180b50eed07e2aa33905b6c7",
+      "variables": [
+        "1775811655657.output"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 微信主页信息提取.yml",
+      "node_id": "1775641360812",
+      "title": "无数据，输出默认信息",
+      "node_type": "template-transform",
+      "chars": 22,
+      "lines": 1,
+      "sha256": "39f4aca475d9e886abad6ca57fce1ad6580edd925e6999f71adafaf34ec2098d",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 微信主页信息提取.yml",
+      "node_id": "1775717096663",
+      "title": "微信主页截图内容解析",
+      "node_type": "llm",
+      "chars": 951,
+      "lines": 28,
+      "sha256": "415170f035b1beceba5efb1838e368bc5c6f6c0d99a5a814a47027d8f8bf961d",
+      "variables": [],
+      "vision_enabled": true
+    },
+    {
+      "workflow_file": "（新）SubAgent - 微信主页信息提取.yml",
+      "node_id": "1775811114840",
+      "title": "微信主页截图内容解析",
+      "node_type": "llm",
+      "chars": 951,
+      "lines": 28,
+      "sha256": "415170f035b1beceba5efb1838e368bc5c6f6c0d99a5a814a47027d8f8bf961d",
+      "variables": [],
+      "vision_enabled": true
+    },
+    {
+      "workflow_file": "（新）SubAgent - 微信主页信息提取.yml",
+      "node_id": "1775811655657",
+      "title": "多张图片内容聚合",
+      "node_type": "template-transform",
+      "chars": 22,
+      "lines": 1,
+      "sha256": "9d25d3cdda84feb89a0cdb481610636689b0419ff215f3105a25f2ccf172a48d",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 微信主页信息提取.yml",
+      "node_id": "17760451317570",
+      "title": "多图片内容总结",
+      "node_type": "llm",
+      "chars": 388,
+      "lines": 15,
+      "sha256": "abbb574daceaac1bc17240e5d93bd3eca36f1ddb354362ccaa4d0d4b79354a86",
+      "variables": [
+        "1775811655657.output"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 微信手机号搜索截图信息提取.yml",
+      "node_id": "1775641360812",
+      "title": "无数据，输出默认信息",
+      "node_type": "template-transform",
+      "chars": 22,
+      "lines": 1,
+      "sha256": "39f4aca475d9e886abad6ca57fce1ad6580edd925e6999f71adafaf34ec2098d",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 微信手机号搜索截图信息提取.yml",
+      "node_id": "1775717096663",
+      "title": "微信手机号搜索截图内容解析",
+      "node_type": "llm",
+      "chars": 1000,
+      "lines": 29,
+      "sha256": "ba166615dac64ff4abb312c818cd67fe9361b985dc4aff6c2e509626b69d08c8",
+      "variables": [],
+      "vision_enabled": true
+    },
+    {
+      "workflow_file": "（新）SubAgent - 微信手机号搜索截图信息提取.yml",
+      "node_id": "1775811114840",
+      "title": "微信手机号搜索截图内容解析",
+      "node_type": "llm",
+      "chars": 1000,
+      "lines": 29,
+      "sha256": "ba166615dac64ff4abb312c818cd67fe9361b985dc4aff6c2e509626b69d08c8",
+      "variables": [],
+      "vision_enabled": true
+    },
+    {
+      "workflow_file": "（新）SubAgent - 微信手机号搜索截图信息提取.yml",
+      "node_id": "1775811655657",
+      "title": "多张图片内容聚合",
+      "node_type": "template-transform",
+      "chars": 22,
+      "lines": 1,
+      "sha256": "9d25d3cdda84feb89a0cdb481610636689b0419ff215f3105a25f2ccf172a48d",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 微信手机号搜索截图信息提取.yml",
+      "node_id": "17760451317570",
+      "title": "多图片内容总结",
+      "node_type": "llm",
+      "chars": 388,
+      "lines": 15,
+      "sha256": "abbb574daceaac1bc17240e5d93bd3eca36f1ddb354362ccaa4d0d4b79354a86",
+      "variables": [
+        "1775811655657.output"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 抖音个人页信息提取.yml",
+      "node_id": "1775641360812",
+      "title": "无数据，输出默认信息",
+      "node_type": "template-transform",
+      "chars": 19,
+      "lines": 1,
+      "sha256": "2d5b2f1315059cef010a645f0a0beaa15fc542c794d8e9b9e4e7694874058536",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 抖音个人页信息提取.yml",
+      "node_id": "1775717096663",
+      "title": "抖音个人页内容解析",
+      "node_type": "llm",
+      "chars": 332,
+      "lines": 13,
+      "sha256": "789b5b9b6c5150820b77a7b3db71b9ee02f916f9fe26c2d2bccc94e945501c25",
+      "variables": [],
+      "vision_enabled": true
+    },
+    {
+      "workflow_file": "（新）SubAgent - 抖音个人页信息提取.yml",
+      "node_id": "1775811114840",
+      "title": "抖音个人页内容解析",
+      "node_type": "llm",
+      "chars": 332,
+      "lines": 13,
+      "sha256": "789b5b9b6c5150820b77a7b3db71b9ee02f916f9fe26c2d2bccc94e945501c25",
+      "variables": [],
+      "vision_enabled": true
+    },
+    {
+      "workflow_file": "（新）SubAgent - 抖音个人页信息提取.yml",
+      "node_id": "1775811655657",
+      "title": "多张图片内容聚合",
+      "node_type": "template-transform",
+      "chars": 22,
+      "lines": 1,
+      "sha256": "9d25d3cdda84feb89a0cdb481610636689b0419ff215f3105a25f2ccf172a48d",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 抖音个人页信息提取.yml",
+      "node_id": "17760451317570",
+      "title": "多图片内容总结",
+      "node_type": "llm",
+      "chars": 393,
+      "lines": 15,
+      "sha256": "c46a6111e0d564ea1d5f451712bfc9fcbb44f3af1978bff5d5061d7d11127115",
+      "variables": [
+        "1775811655657.output"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 支付宝个人页信息提取.yml",
+      "node_id": "1775641360812",
+      "title": "无数据，输出默认信息",
+      "node_type": "template-transform",
+      "chars": 20,
+      "lines": 1,
+      "sha256": "7cc13f44c381d9786959ecfc17a45ac2f6b87db174952deee647c2acaa3ce314",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 支付宝个人页信息提取.yml",
+      "node_id": "1775717096663",
+      "title": "朋友圈内容解析",
+      "node_type": "llm",
+      "chars": 404,
+      "lines": 13,
+      "sha256": "c5a5549cf4c1036299c301d973e4bd2923bb9a9cd89cfa81a5694b3cec9f3baa",
+      "variables": [],
+      "vision_enabled": true
+    },
+    {
+      "workflow_file": "（新）SubAgent - 支付宝个人页信息提取.yml",
+      "node_id": "1775811114840",
+      "title": "支付宝个人页内容解析",
+      "node_type": "llm",
+      "chars": 404,
+      "lines": 13,
+      "sha256": "c5a5549cf4c1036299c301d973e4bd2923bb9a9cd89cfa81a5694b3cec9f3baa",
+      "variables": [],
+      "vision_enabled": true
+    },
+    {
+      "workflow_file": "（新）SubAgent - 支付宝个人页信息提取.yml",
+      "node_id": "1775811655657",
+      "title": "多张图片内容聚合",
+      "node_type": "template-transform",
+      "chars": 22,
+      "lines": 1,
+      "sha256": "9d25d3cdda84feb89a0cdb481610636689b0419ff215f3105a25f2ccf172a48d",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 支付宝个人页信息提取.yml",
+      "node_id": "17760451317570",
+      "title": "多图片内容总结",
+      "node_type": "llm",
+      "chars": 396,
+      "lines": 15,
+      "sha256": "341a5e58345a67e63750d6c2387772c742e97bd9a69b6359021b8041f246704c",
+      "variables": [
+        "1775811655657.output"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 朋友圈信息提取.yml",
+      "node_id": "1775641360812",
+      "title": "无数据，输出默认信息",
+      "node_type": "template-transform",
+      "chars": 19,
+      "lines": 1,
+      "sha256": "03407c2d59e5d14728431f860a0c310a7c344f2b0c4582d2dc6112d6abd8f426",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 朋友圈信息提取.yml",
+      "node_id": "1775717096663",
+      "title": "朋友圈内容解析",
+      "node_type": "llm",
+      "chars": 367,
+      "lines": 13,
+      "sha256": "1311243c5f56ac29fb0af86dd95e3096c37a899b96a5590ec09aa8008be47ec3",
+      "variables": [],
+      "vision_enabled": true
+    },
+    {
+      "workflow_file": "（新）SubAgent - 朋友圈信息提取.yml",
+      "node_id": "1775811114840",
+      "title": "朋友圈内容解析",
+      "node_type": "llm",
+      "chars": 367,
+      "lines": 13,
+      "sha256": "1311243c5f56ac29fb0af86dd95e3096c37a899b96a5590ec09aa8008be47ec3",
+      "variables": [],
+      "vision_enabled": true
+    },
+    {
+      "workflow_file": "（新）SubAgent - 朋友圈信息提取.yml",
+      "node_id": "1775811655657",
+      "title": "多张图片内容聚合",
+      "node_type": "template-transform",
+      "chars": 22,
+      "lines": 1,
+      "sha256": "9d25d3cdda84feb89a0cdb481610636689b0419ff215f3105a25f2ccf172a48d",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 朋友圈信息提取.yml",
+      "node_id": "17760451317570",
+      "title": "多图片内容总结",
+      "node_type": "llm",
+      "chars": 387,
+      "lines": 15,
+      "sha256": "47fc29d7578cb49a22ee96f3bee83080de7dfe8edf55be8a55162d8fd8ba2b5b",
+      "variables": [
+        "1775811655657.output"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 极光数据（生产环境）.yml",
+      "node_id": "1777286944456",
+      "title": "模板转换",
+      "node_type": "template-transform",
+      "chars": 20,
+      "lines": 1,
+      "sha256": "af1974d1aec1dd90632e009fce10b42a8e87a3c9fd10683a9fbb6b102889c38c",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 极光数据（生产环境）.yml",
+      "node_id": "17772881985510",
+      "title": "模板转换 (1)",
+      "node_type": "template-transform",
+      "chars": 12,
+      "lines": 1,
+      "sha256": "f7619860eb636692bb3c4069e4ac298778a49808d3c06dec877b94e579cd18e6",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 用户人工Feedback数据提取.yml",
+      "node_id": "1779414698011",
+      "title": "模板转换",
+      "node_type": "template-transform",
+      "chars": 20,
+      "lines": 1,
+      "sha256": "d9cc99e8e53c5350faec0fcb0edab0ca54f57b167884591d0e1d77a6d0d0057f",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 用户人工Feedback数据提取.yml",
+      "node_id": "1779414703703",
+      "title": "模板转换 2",
+      "node_type": "template-transform",
+      "chars": 692,
+      "lines": 35,
+      "sha256": "2a00ba884f198a11b336e39bb9692a959176eed0d57b2e98463ec97f98f45568",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1776755019648",
+      "title": "标签库预置",
+      "node_type": "template-transform",
+      "chars": 14539,
+      "lines": 824,
+      "sha256": "e8e1b1caaaa9d36ae4317365d698c3e1df891b29fba349db2ec7b91f4ab2a86c",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1776828395715",
+      "title": "信息输入包整合",
+      "node_type": "template-transform",
+      "chars": 152,
+      "lines": 8,
+      "sha256": "82dad4a33ebee0ea084df4db559128c34efdc4a1063d037a9d8166ae33cc38c2",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1776828906716",
+      "title": "证据线索数据格式预置",
+      "node_type": "template-transform",
+      "chars": 659,
+      "lines": 20,
+      "sha256": "7cb195756e700776deec897a3d416767fbb5eb9416d0dd4d464a0a7a01326f85",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1776829070283",
+      "title": "特征画像数据格式预置",
+      "node_type": "template-transform",
+      "chars": 485,
+      "lines": 14,
+      "sha256": "2c4471fe7992faf766c0d0347b07af31d895e5cd3e41df8828693397aa53d340",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1776853902103",
+      "title": "产品信息及卖点预置",
+      "node_type": "template-transform",
+      "chars": 981,
+      "lines": 47,
+      "sha256": "cf376d786e6bd4bfccf943361319922f025dbb41ec29fb3691006c23e93913da",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1776855531118",
+      "title": "产品信息及卖点预置（速查简化版）",
+      "node_type": "template-transform",
+      "chars": 2163,
+      "lines": 60,
+      "sha256": "b43c644bca260972ab5409b6907bcef7ebc909d9b64f717cad458913acf8f740",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1776934470389",
+      "title": "邀约策略&话术预置",
+      "node_type": "template-transform",
+      "chars": 2263,
+      "lines": 72,
+      "sha256": "52b462b82c431e4fe88664cb2f329dabe0cc6a2b29c8bda44d0a3a5b1b64ba6d",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1777368178554",
+      "title": "客户试驾情绪分析prompt",
+      "node_type": "template-transform",
+      "chars": 4780,
+      "lines": 154,
+      "sha256": "067fc2f9fc60647b146aa7db43d42cdf8a0ca0b3b731da49ba19be98e00bd739",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1777371012576",
+      "title": "客户沟通话术生成Prompt",
+      "node_type": "template-transform",
+      "chars": 2010,
+      "lines": 83,
+      "sha256": "68049946fcb91d6c36dbdbfcb4f54f5f251b13ad313fb2aa120105c5306ba3f2",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1777371789490",
+      "title": "客户用车场景生成Prompt",
+      "node_type": "template-transform",
+      "chars": 1795,
+      "lines": 71,
+      "sha256": "02ffc1ae3da31630e7b0aca889f482dfb590729f8d59d72cfb1734c3a916abc4",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1777371976537",
+      "title": "客户标签生成Prompt",
+      "node_type": "template-transform",
+      "chars": 2136,
+      "lines": 82,
+      "sha256": "659185a012fa5c74636bf1eaf0fab2bfe8f6a20678f63fbe63f7c536e607612c",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1777372465294",
+      "title": "Notes审核Prompt",
+      "node_type": "template-transform",
+      "chars": 9642,
+      "lines": 267,
+      "sha256": "0b2218edc85eab8dfc5a429e9cb887df9bde21ce08d3b77bb14d424cce2b4563",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1777372805721",
+      "title": "Notes生成Prompt",
+      "node_type": "template-transform",
+      "chars": 5568,
+      "lines": 160,
+      "sha256": "9432628df8289cd2cb6b6fa6e8ab4d1e024bc801902b12ac8c81603549baf08d",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1777373071079",
+      "title": "客户等级及成交概率计算Prompt",
+      "node_type": "template-transform",
+      "chars": 5960,
+      "lines": 218,
+      "sha256": "41e88bcd6049e5dc1c69e90cc4163ac220ac460075931aa8f4f5588cff4888b8",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1777373266562",
+      "title": "客户销售线索生成Prompt",
+      "node_type": "template-transform",
+      "chars": 3266,
+      "lines": 146,
+      "sha256": "d26fc456aadb10bc39da85156821e08434059195f9be9ab5d1330b4dc3ff5103",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1777373490558",
+      "title": "客户总体信息生成Prompt",
+      "node_type": "template-transform",
+      "chars": 1904,
+      "lines": 75,
+      "sha256": "32ccd932d81f1016ddad9b8b5a8d792f990456494fbce675ea312b487e2547c9",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1777373766807",
+      "title": "客户销售线索分析Prompt",
+      "node_type": "template-transform",
+      "chars": 3748,
+      "lines": 154,
+      "sha256": "b0be134c7512aad0f41237441d9328571612fe2c718ea64abd3bf5059e396b65",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1777374152638",
+      "title": "客户标签初筛Prompt",
+      "node_type": "template-transform",
+      "chars": 1386,
+      "lines": 52,
+      "sha256": "7ade823fcaf62456aad97ca2aba14011c15fbc702a875aff0f155aed3f64c289",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "node_id": "1790051917170",
+      "title": "LLM",
+      "node_type": "llm",
+      "chars": 122,
+      "lines": 7,
+      "sha256": "2dd88b93a1bd593d0d86f5cf74c9bd370c6ae36890e607762761cab320b2ca9f",
+      "variables": [
+        "1777372470283.result"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 聊天记录数据信息.yml",
+      "node_id": "1778808975421",
+      "title": "无数据，输出默认信息",
+      "node_type": "template-transform",
+      "chars": 21,
+      "lines": 1,
+      "sha256": "33d54d7a215eb3fc91f7034a2c708ef04de8e52340b30266a6fd5167d1000f41",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 聊天记录数据信息.yml",
+      "node_id": "1778809002515",
+      "title": "数据深度清洗Prompt",
+      "node_type": "template-transform",
+      "chars": 2948,
+      "lines": 241,
+      "sha256": "e66032755f1922e5c05f16f65f51ca3f7075e76d9be3573009d62495702435ed",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 证据线索汇总（生产环境）.yml",
+      "node_id": "1776069633580",
+      "title": "客户数据聚合",
+      "node_type": "template-transform",
+      "chars": 657,
+      "lines": 16,
+      "sha256": "d3c1054751301306f781961054b42db6dcfef8218dbf1f1668c643dddbeb4d4c",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 证据线索汇总（生产环境）.yml",
+      "node_id": "1777366329758",
+      "title": "证据线索整理Prompt",
+      "node_type": "template-transform",
+      "chars": 2814,
+      "lines": 77,
+      "sha256": "125440b3eeb5dd9504f8b197396f3b90d1dcb9ea72566a99df14ec08cb3639c1",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 证据线索汇总（生产环境）.yml",
+      "node_id": "1789985109360",
+      "title": "手机号特征分析",
+      "node_type": "llm",
+      "chars": 422,
+      "lines": 19,
+      "sha256": "ac887ec26fb245202edd54099645408ac2995a91c5cf8769a99ddad1223344e4",
+      "variables": [
+        "1775638842380.phone_number",
+        "1789985056439.operator_location"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 证据线索汇总（生产环境）.yml",
+      "node_id": "1789985119700",
+      "title": "企业信息分析",
+      "node_type": "llm",
+      "chars": 290,
+      "lines": 13,
+      "sha256": "07ef8457d6bff94801d07ad8c112e78f227dd2913740780809a59c1452b08a7b",
+      "variables": [
+        "1789985056439.affiliated_company"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 试驾录音信息提取.yml",
+      "node_id": "1775641360812",
+      "title": "无数据，输出默认信息",
+      "node_type": "template-transform",
+      "chars": 20,
+      "lines": 1,
+      "sha256": "77b2c894ce7066564fa0838b7fa732f8d6e49f0db819bbfc49c6613ef1e607a4",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 试驾录音信息提取.yml",
+      "node_id": "1775811655657",
+      "title": "多文件内容聚合",
+      "node_type": "template-transform",
+      "chars": 22,
+      "lines": 1,
+      "sha256": "9d25d3cdda84feb89a0cdb481610636689b0419ff215f3105a25f2ccf172a48d",
+      "variables": [],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 试驾录音信息提取.yml",
+      "node_id": "17760451317570",
+      "title": "录音文件分析",
+      "node_type": "llm",
+      "chars": 1170,
+      "lines": 50,
+      "sha256": "bc6c0f1476a7c657e5e07ec73a1fa55b54885bca8da10da940f030575f68a154",
+      "variables": [
+        "1775811655657.output"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 试驾录音信息提取.yml",
+      "node_id": "1776149288520",
+      "title": "录音文件分析 Gemini",
+      "node_type": "llm",
+      "chars": 1165,
+      "lines": 49,
+      "sha256": "06e5f6fac2f1ddb5c8a02d646b43e19b49fc9bc80861b679a3e0ec05267d8721",
+      "variables": [
+        "1776135353554.file_content"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 试驾录音信息提取.yml",
+      "node_id": "17767640208110",
+      "title": "录音文件分析",
+      "node_type": "llm",
+      "chars": 1165,
+      "lines": 49,
+      "sha256": "06e5f6fac2f1ddb5c8a02d646b43e19b49fc9bc80861b679a3e0ec05267d8721",
+      "variables": [
+        "1776135353554.file_content"
+      ],
+      "vision_enabled": false
+    }
+  ]
+}

@@ -1,0 +1,320 @@
+{
+  "workflows": [
+    {
+      "file": "Gemini（异常输出重试版）.yml",
+      "display_name": "Gemini（异常输出重试版）",
+      "nodes": 11,
+      "edges": 10,
+      "sequence_only_edges": 5,
+      "by_type": {
+        "code": 2,
+        "end": 3,
+        "if-else": 2,
+        "llm": 3,
+        "start": 1
+      }
+    },
+    {
+      "file": "录音文件内容抽取（纯识别，无加工）.yml",
+      "display_name": "录音文件内容抽取（纯识别，无加工）",
+      "nodes": 12,
+      "edges": 11,
+      "sequence_only_edges": 5,
+      "by_type": {
+        "code": 3,
+        "end": 2,
+        "http-request": 2,
+        "if-else": 1,
+        "llm": 2,
+        "start": 1,
+        "template-transform": 1
+      }
+    },
+    {
+      "file": "（新）SubAgent - 人工确认信息提取（生产环境）.yml",
+      "display_name": "（新）SubAgent - 人工确认信息提取（生产环境）",
+      "nodes": 4,
+      "edges": 3,
+      "sequence_only_edges": 1,
+      "by_type": {
+        "code": 1,
+        "end": 1,
+        "http-request": 1,
+        "start": 1
+      }
+    },
+    {
+      "file": "（新）SubAgent - 人设特征判断.yml",
+      "display_name": "（新）SubAgent - 人设特征判断",
+      "nodes": 16,
+      "edges": 19,
+      "sequence_only_edges": 9,
+      "by_type": {
+        "code": 1,
+        "end": 1,
+        "if-else": 2,
+        "llm": 3,
+        "start": 1,
+        "template-transform": 3,
+        "tool": 3,
+        "variable-aggregator": 2
+      }
+    },
+    {
+      "file": "（新）SubAgent - 外呼录音信息提取.yml",
+      "display_name": "（新）SubAgent - 外呼录音信息提取",
+      "nodes": 20,
+      "edges": 21,
+      "sequence_only_edges": 14,
+      "by_type": {
+        "code": 3,
+        "end": 1,
+        "if-else": 3,
+        "iteration": 1,
+        "iteration-start": 1,
+        "llm": 3,
+        "start": 1,
+        "template-transform": 2,
+        "tool": 2,
+        "variable-aggregator": 3
+      }
+    },
+    {
+      "file": "（新）SubAgent - 小红书个人页信息提取.yml",
+      "display_name": "（新）SubAgent - 小红书个人页信息提取",
+      "nodes": 18,
+      "edges": 18,
+      "sequence_only_edges": 12,
+      "by_type": {
+        "code": 3,
+        "end": 1,
+        "http-request": 2,
+        "if-else": 2,
+        "iteration": 1,
+        "iteration-start": 1,
+        "llm": 3,
+        "start": 1,
+        "template-transform": 2,
+        "variable-aggregator": 2
+      }
+    },
+    {
+      "file": "（新）SubAgent - 微信主页信息提取.yml",
+      "display_name": "（新）SubAgent - 微信主页信息提取",
+      "nodes": 18,
+      "edges": 18,
+      "sequence_only_edges": 12,
+      "by_type": {
+        "code": 3,
+        "end": 1,
+        "http-request": 2,
+        "if-else": 2,
+        "iteration": 1,
+        "iteration-start": 1,
+        "llm": 3,
+        "start": 1,
+        "template-transform": 2,
+        "variable-aggregator": 2
+      }
+    },
+    {
+      "file": "（新）SubAgent - 微信手机号搜索截图信息提取.yml",
+      "display_name": "（新）SubAgent - 微信手机号搜索截图信息提取",
+      "nodes": 18,
+      "edges": 18,
+      "sequence_only_edges": 12,
+      "by_type": {
+        "code": 3,
+        "end": 1,
+        "http-request": 2,
+        "if-else": 2,
+        "iteration": 1,
+        "iteration-start": 1,
+        "llm": 3,
+        "start": 1,
+        "template-transform": 2,
+        "variable-aggregator": 2
+      }
+    },
+    {
+      "file": "（新）SubAgent - 抖音个人页信息提取.yml",
+      "display_name": "（新）SubAgent - 抖音个人页信息提取",
+      "nodes": 18,
+      "edges": 18,
+      "sequence_only_edges": 12,
+      "by_type": {
+        "code": 3,
+        "end": 1,
+        "http-request": 2,
+        "if-else": 2,
+        "iteration": 1,
+        "iteration-start": 1,
+        "llm": 3,
+        "start": 1,
+        "template-transform": 2,
+        "variable-aggregator": 2
+      }
+    },
+    {
+      "file": "（新）SubAgent - 支付宝个人页信息提取.yml",
+      "display_name": "（新）SubAgent - 支付宝个人页信息提取",
+      "nodes": 18,
+      "edges": 18,
+      "sequence_only_edges": 12,
+      "by_type": {
+        "code": 3,
+        "end": 1,
+        "http-request": 2,
+        "if-else": 2,
+        "iteration": 1,
+        "iteration-start": 1,
+        "llm": 3,
+        "start": 1,
+        "template-transform": 2,
+        "variable-aggregator": 2
+      }
+    },
+    {
+      "file": "（新）SubAgent - 朋友圈信息提取.yml",
+      "display_name": "（新）SubAgent - 朋友圈信息提取",
+      "nodes": 18,
+      "edges": 18,
+      "sequence_only_edges": 12,
+      "by_type": {
+        "code": 3,
+        "end": 1,
+        "http-request": 2,
+        "if-else": 2,
+        "iteration": 1,
+        "iteration-start": 1,
+        "llm": 3,
+        "start": 1,
+        "template-transform": 2,
+        "variable-aggregator": 2
+      }
+    },
+    {
+      "file": "（新）SubAgent - 极光数据（生产环境）.yml",
+      "display_name": "（新）SubAgent - 极光数据（生产环境）",
+      "nodes": 7,
+      "edges": 7,
+      "sequence_only_edges": 5,
+      "by_type": {
+        "code": 1,
+        "end": 1,
+        "if-else": 1,
+        "start": 1,
+        "template-transform": 2,
+        "variable-aggregator": 1
+      }
+    },
+    {
+      "file": "（新）SubAgent - 猛士IT系统数据信息.yml",
+      "display_name": "（新）SubAgent - 猛士IT系统数据信息",
+      "nodes": 4,
+      "edges": 3,
+      "sequence_only_edges": 1,
+      "by_type": {
+        "code": 2,
+        "end": 1,
+        "start": 1
+      }
+    },
+    {
+      "file": "（新）SubAgent - 用户人工Feedback数据提取.yml",
+      "display_name": "（新）SubAgent - 用户人工Feedback数据提取",
+      "nodes": 11,
+      "edges": 12,
+      "sequence_only_edges": 5,
+      "by_type": {
+        "code": 3,
+        "end": 1,
+        "http-request": 1,
+        "if-else": 1,
+        "start": 1,
+        "template-transform": 2,
+        "tool": 1,
+        "variable-aggregator": 1
+      }
+    },
+    {
+      "file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）.yml",
+      "display_name": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）",
+      "nodes": 41,
+      "edges": 55,
+      "sequence_only_edges": 3,
+      "by_type": {
+        "code": 7,
+        "end": 1,
+        "http-request": 2,
+        "llm": 1,
+        "start": 1,
+        "template-transform": 18,
+        "tool": 11
+      }
+    },
+    {
+      "file": "（新）SubAgent - 聊天记录数据信息.yml",
+      "display_name": "（新）SubAgent - 聊天记录数据信息",
+      "nodes": 9,
+      "edges": 9,
+      "sequence_only_edges": 5,
+      "by_type": {
+        "code": 2,
+        "end": 1,
+        "if-else": 1,
+        "start": 1,
+        "template-transform": 2,
+        "tool": 1,
+        "variable-aggregator": 1
+      }
+    },
+    {
+      "file": "（新）SubAgent - 证据线索汇总（生产环境）.yml",
+      "display_name": "（新）SubAgent - 证据线索汇总（生产环境）",
+      "nodes": 24,
+      "edges": 39,
+      "sequence_only_edges": 3,
+      "by_type": {
+        "code": 3,
+        "end": 1,
+        "http-request": 1,
+        "llm": 2,
+        "start": 1,
+        "template-transform": 2,
+        "tool": 14
+      }
+    },
+    {
+      "file": "（新）SubAgent - 试驾录音信息提取.yml",
+      "display_name": "（新）SubAgent - 试驾录音信息提取",
+      "nodes": 20,
+      "edges": 21,
+      "sequence_only_edges": 14,
+      "by_type": {
+        "code": 3,
+        "end": 1,
+        "if-else": 3,
+        "iteration": 1,
+        "iteration-start": 1,
+        "llm": 3,
+        "start": 1,
+        "template-transform": 2,
+        "tool": 2,
+        "variable-aggregator": 3
+      }
+    },
+    {
+      "file": "（新）客户初始画像（生产环境）.yml",
+      "display_name": "（新）客户初始画像（生产环境）",
+      "nodes": 6,
+      "edges": 6,
+      "sequence_only_edges": 3,
+      "by_type": {
+        "end": 1,
+        "start": 1,
+        "tool": 4
+      }
+    }
+  ]
+}

@@ -1,0 +1,115 @@
+{
+  "note": "tool_name -> local DSL file. Reference counts are measured.",
+  "entries": [
+    {
+      "tool_name": "gemini_retry_2_times",
+      "dsl_file": "Gemini（异常输出重试版）",
+      "mapped": true,
+      "static_references": 17
+    },
+    {
+      "tool_name": "audio_content_extract",
+      "dsl_file": "录音文件内容抽取（纯识别，无加工）",
+      "mapped": true,
+      "static_references": 4
+    },
+    {
+      "tool_name": "customer_profile_production",
+      "dsl_file": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）",
+      "mapped": true,
+      "static_references": 2
+    },
+    {
+      "tool_name": "Alipay_homepage_info_extract",
+      "dsl_file": "（新）SubAgent - 支付宝个人页信息提取",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "Douyin_homepage_info_extract",
+      "dsl_file": "（新）SubAgent - 抖音个人页信息提取",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "Outbound_call_info_extract",
+      "dsl_file": "（新）SubAgent - 外呼录音信息提取",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "Xiaohongshu_homepage_info_extract",
+      "dsl_file": "（新）SubAgent - 小红书个人页信息提取",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "chat_history_data",
+      "dsl_file": "（新）SubAgent - 聊天记录数据信息",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "evidence_subagent_production",
+      "dsl_file": "（新）SubAgent - 证据线索汇总（生产环境）",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "human_corrected_info_new",
+      "dsl_file": "（新）SubAgent - 人工确认信息提取（生产环境）",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "jiguang_data_production",
+      "dsl_file": "（新）SubAgent - 极光数据（生产环境）",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "mengshi_it_system_data",
+      "dsl_file": "（新）SubAgent - 猛士IT系统数据信息",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "moments_info_extract",
+      "dsl_file": "（新）SubAgent - 朋友圈信息提取",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "profile_features_analysis",
+      "dsl_file": "（新）SubAgent - 人设特征判断",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "subagent_user_feedback_data",
+      "dsl_file": "（新）SubAgent - 用户人工Feedback数据提取",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "test_drive_audio_analysis",
+      "dsl_file": "（新）SubAgent - 试驾录音信息提取",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "wechat_homepage_info_extract",
+      "dsl_file": "（新）SubAgent - 微信主页信息提取",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
+      "tool_name": "wechat_search_homepage_info_extract",
+      "dsl_file": "（新）SubAgent - 微信手机号搜索截图信息提取",
+      "mapped": true,
+      "static_references": 1
+    }
+  ],
+  "unmapped_tool_names": [],
+  "mapped_but_unreferenced": []
+}
