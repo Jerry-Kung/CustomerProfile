@@ -166,3 +166,39 @@ async def test_history_view_is_not_overwritten_by_new_definitions(client):
     once = (await client.get(f"/definition-versions/{version_id}")).json()
     twice = (await client.get(f"/definition-versions/{version_id}")).json()
     assert once == twice, "同一版本的两次读取结果不同"
+
+
+# ---------------------------------------------------------------- 子运行下钻
+
+
+async def test_child_runs_are_indexed_by_triggering_node(client):
+    """``/runs/{id}/graph`` 的 ``child_runs`` 以**触发它的父节点**为键。
+
+    v0.4.3 的验收标准「子运行可下钻」全靠这条通路：详情页点节点后按 ``node_id``
+    查 ``child_runs``，查到才显示下钻入口。键若是父节点 ID 之外的东西，入口永远不出现，
+    而界面上看不出错。用一个人造扇出图跑出真实子运行来验证。
+    """
+    from customer_profile.workflows import synthetic_fanout as syn
+
+    run_id = await _run_to_completion(
+        client, syn.WORKFLOW_ID, syn.default_inputs()
+    )
+    body = (await client.get(f"/runs/{run_id}/graph")).json()
+
+    assert body["child_runs"], "没有子运行被索引到，下钻入口不会出现"
+
+    for parent_node_id, child in body["child_runs"].items():
+        # 键必须是图里真实存在的节点
+        assert parent_node_id in {n["node_id"] for n in body["definition"]["nodes"]}
+        # 值要够前端显示入口文案
+        assert child["run_id"]
+        assert child["status"]
+
+    # 触发子运行的父节点自身要带 sub_run_id，前端据此判断该节点可下钻
+    triggering = [
+        n for n in body["nodes"] if n["sub_run_id"]
+    ]
+    assert triggering, "父节点没有 sub_run_id，前端无法判断哪个节点能下钻"
+    assert triggering[0]["node_id"] in body["child_runs"], (
+        "带 sub_run_id 的节点没有出现在 child_runs 里，下钻入口对不上"
+    )

@@ -106,6 +106,27 @@ export interface ChildRunBrief {
   duration_ms: number | null
 }
 
+/** 一次外部请求尝试。`request_json` 的形状随 `kind` 不同（llm 有 model/messages，http 有 method/url）。 */
+export interface RequestAttempt {
+  attempt_id: number
+  run_id: string
+  node_id: string
+  call_path: string
+  attempt_no: number
+  kind: 'llm' | 'http' | string
+  target: string | null
+  request_json: Record<string, unknown> | null
+  response_text: string | null
+  status_code: number | null
+  duration_ms: number | null
+  error: string | null
+  error_code: string | null
+  usage_json: Record<string, unknown> | null
+  provider_request_id: string | null
+  replayed: number
+  created_at_ms: number
+}
+
 /** 一个工作流的元信息，用于结构页的下拉选择。 */
 export interface WorkflowBrief {
   workflow_id: string
@@ -158,6 +179,20 @@ export const api = {
 
   runGraph: (runId: string) =>
     getJson<RunGraph>(`/runs/${encodeURIComponent(runId)}/graph`),
+
+  /**
+   * 某个节点的每一次外部请求尝试。
+   *
+   * 按节点懒加载而不并进 `/graph`：`response_text` 单条可达上万字符，主入口跑一次有
+   * 17 处 LLM 调用，全部内联会让详情页首屏为了画一张图加载好几 MB。节点行已带
+   * `attempt_count`，据此决定是否需要拉。
+   */
+  nodeAttempts: (runId: string, nodeId: string, callPath?: string) => {
+    const query = callPath ? `?call_path=${encodeURIComponent(callPath)}` : ''
+    return getJson<RequestAttempt[]>(
+      `/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/attempts${query}`,
+    )
+  },
 
   listRuns: (params: {
     workflow_id?: string

@@ -467,6 +467,7 @@ class Store:
         started_at_ms: int | None = None,
         duration_ms: int | None = None,
         sub_run_id: str | None = None,
+        attempt_count: int | None = None,
     ) -> None:
         """写入或更新一条节点执行记录。
 
@@ -477,13 +478,14 @@ class Store:
             "INSERT INTO node_executions (run_id, node_id, node_title, node_type, "
             " call_path, status, branch, inputs_json, outputs_json, error, queued_at_ms, "
             " started_at_ms, duration_ms, sub_run_id, attempt_count) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0)) "
             "ON CONFLICT (run_id, node_id, call_path) DO UPDATE SET "
             " status = excluded.status, branch = excluded.branch, "
             " inputs_json = COALESCE(excluded.inputs_json, node_executions.inputs_json), "
             " outputs_json = COALESCE(excluded.outputs_json, node_executions.outputs_json), "
             " error = excluded.error, duration_ms = excluded.duration_ms, "
-            " sub_run_id = COALESCE(excluded.sub_run_id, node_executions.sub_run_id)",
+            " sub_run_id = COALESCE(excluded.sub_run_id, node_executions.sub_run_id), "
+            " attempt_count = COALESCE(excluded.attempt_count, node_executions.attempt_count)",
             (
                 run_id,
                 node_id,
@@ -499,6 +501,7 @@ class Store:
                 started_at_ms,
                 duration_ms,
                 sub_run_id,
+                attempt_count,
             ),
         )
 
@@ -568,26 +571,60 @@ class Store:
         )
 
     async def list_attempts(
-        self, run_id: str, *, node_id: str | None = None
+        self,
+        run_id: str,
+        *,
+        node_id: str | None = None,
+        call_path: str | None = None,
     ) -> list[dict[str, Any]]:
-        if node_id:
-            rows = await self._read(
-                "SELECT * FROM request_attempts WHERE run_id = ? AND node_id = ? "
-                "ORDER BY attempt_id",
-                (run_id, node_id),
-            )
-        else:
-            rows = await self._read(
-                "SELECT * FROM request_attempts WHERE run_id = ? ORDER BY attempt_id",
-                (run_id,),
-            )
+        """取一次运行的外部请求尝试。
+
+        ``call_path`` 与 ``node_id`` 一起用才精确：迭代类工作流的**同一个静态节点 ID**
+        在每轮都会重新执行，只按 ``node_id`` 过滤会把各轮尝试混成一堆，看不出哪次属于
+        哪一轮。节点的 ``call_path`` 就在 ``node_executions`` 行里，调用方直接传回即可。
+        """
+        clauses = ["run_id = ?"]
+        params: list[Any] = [run_id]
+        if node_id is not None:
+            clauses.append("node_id = ?")
+            params.append(node_id)
+        if call_path is not None:
+            clauses.append("call_path = ?")
+            params.append(call_path)
+        rows = await self._read(
+            f"SELECT * FROM request_attempts WHERE {' AND '.join(clauses)} "
+            "ORDER BY attempt_id",
+            params,
+        )
         return [
             _row_to_dict(r, json_fields=("request_json", "usage_json")) for r in rows
         ]
 
-    async def count_attempts(self, run_id: str) -> int:
+    async def count_attempts(
+        self,
+        run_id: str,
+        *,
+        node_id: str | None = None,
+        call_path: str | None = None,
+    ) -> int:
+        """该运行（可限定到节点/调用路径）的尝试条数。
+
+        ``node_finished`` 用它在节点行上落一个**派生**的 ``attempt_count``，而不是在
+        记录每次尝试时自增。派生与来源表天然一致；自增强调「每次尝试恰好加一」，
+        一旦某条路径漏记或多记就永久偏移，且从行上看不出错——本项目已两次踩到
+        「看起来记了、其实没记」。
+        """
+        clauses = ["run_id = ?"]
+        params: list[Any] = [run_id]
+        if node_id is not None:
+            clauses.append("node_id = ?")
+            params.append(node_id)
+        if call_path is not None:
+            clauses.append("call_path = ?")
+            params.append(call_path)
         rows = await self._read(
-            "SELECT COUNT(*) AS n FROM request_attempts WHERE run_id = ?", (run_id,)
+            f"SELECT COUNT(*) AS n FROM request_attempts WHERE {' AND '.join(clauses)}",
+            params,
         )
         return int(rows[0]["n"]) if rows else 0
 

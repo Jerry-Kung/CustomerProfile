@@ -11,6 +11,7 @@ import { useEffect, useState } from 'react'
 import { api, type Definition, type WorkflowBrief } from './api/client'
 import { TopologyGraph } from './components/TopologyGraph'
 import { RunList } from './components/RunList'
+import { RunDetail } from './components/RunDetail'
 
 type Tab = 'structure' | 'runs'
 
@@ -20,6 +21,15 @@ function App() {
   const [selected, setSelected] = useState<string>('')
   const [definition, setDefinition] = useState<Definition | null>(null)
   const [error, setError] = useState<string>('')
+
+  /**
+   * 运行详情的导航栈。
+   *
+   * 用栈而不是单个 runId：子运行可继续下钻（主入口 → 画像生成 → 其子流程），
+   * 单值会让「返回」只能退回列表，看不到上一层。
+   */
+  const [runStack, setRunStack] = useState<string[]>([])
+  const currentRun = runStack[runStack.length - 1] ?? ''
 
   useEffect(() => {
     api
@@ -93,14 +103,30 @@ function App() {
       {error && <div className="app-error">{error}</div>}
 
       <main className="app-body">
-        {tab === 'structure' ? (
+        {tab === 'structure' && (
           definition ? (
             <TopologyGraph definition={definition} />
           ) : (
             <div className="app-placeholder">正在加载工作流结构…</div>
           )
-        ) : (
-          <RunList onOpenRun={(runId) => console.info('查看运行', runId)} />
+        )}
+
+        {tab === 'runs' && !currentRun && (
+          <RunList
+            onOpenRun={(runId) => {
+              setRunStack([runId])
+            }}
+          />
+        )}
+
+        {tab === 'runs' && currentRun && (
+          <RunDetail
+            runId={currentRun}
+            onDrillDown={(runId) => setRunStack((stack) => [...stack, runId])}
+            onBack={() =>
+              setRunStack((stack) => (stack.length > 1 ? stack.slice(0, -1) : []))
+            }
+          />
         )}
       </main>
     </div>

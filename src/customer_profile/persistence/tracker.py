@@ -103,13 +103,32 @@ class RunTracker:
             self._report("node_started", node.node_id, exc)
 
     async def node_finished(self, run: Any, execution: NodeExecution) -> None:
+        """收尾一条节点记录，并把 ``attempt_count`` **派生**出来落库。
+
+        为什么在这里派生而不是在 ``attempt_recorded`` 里自增：``fork_iteration``
+        复制父上下文的 ``call_path``，而迭代循环体节点在库里是按
+        ``<父路径>/iter:<id>/<n>`` 存的。按 ``node_ref.call_path`` 自增会更新到
+        **零行**——静默失效，行上仍显示 0，且看不出哪里错了。这里用节点行自己的
+        ``call_path`` 去数来源表，键必然对得上。
+        """
+        call_path = getattr(execution, "call_path", None) or run.call_path
+        try:
+            attempt_count = await self.store.count_attempts(
+                run.run_id,
+                node_id=execution.node_id,
+                call_path=call_path,
+            )
+        except Exception as exc:
+            # 数不出来不该让节点记录写不进去；保持原值（插入时为 0）。
+            self._report("count_attempts", execution.node_id, exc)
+            attempt_count = None
         try:
             await self.store.upsert_node_execution(
                 run_id=run.run_id,
                 node_id=execution.node_id,
                 node_title=execution.title,
                 node_type=execution.node_type,
-                call_path=getattr(execution, "call_path", None) or run.call_path,
+                call_path=call_path,
                 status=execution.status,
                 branch=execution.branch,
                 outputs=execution.outputs,
@@ -118,6 +137,7 @@ class RunTracker:
                 started_at_ms=execution.started_at_ms,
                 duration_ms=execution.duration_ms,
                 sub_run_id=execution.sub_run_id,
+                attempt_count=attempt_count,
             )
         except Exception as exc:
             self._report("node_finished", execution.node_id, exc)

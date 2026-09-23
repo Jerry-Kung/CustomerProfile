@@ -2,6 +2,32 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-09-23 — V0.4.3 运行详情：节点状态叠加、尝试与子运行下钻
+
+- **修正一个 V0.4 期间引入的缺陷：`attempt_count` 恒为 0。** 节点行上的这一列是
+  详情页判断「要不要去拉尝试」的依据，而后端**从无生产代码写它**——`bump_attempt_count`
+  只有自己的单测在调（`test_persistence.py:177`）。后果是数据在库里、界面永远空白，
+  且不报任何错。修复采用**派生**而非自增：`node_finished` 收尾时用节点行自己的
+  ``call_path`` 去数 `request_attempts`（`store.count_attempts` 新增按节点/调用路径过滤）。
+  不用自增的原因很具体：`fork_iteration` 复制父上下文的 `call_path`，而迭代循环体节点
+  在库里是按 `<父路径>/iter:<id>/<n>` 存的，按 `node_ref.call_path` 自增会更新到**零行**，
+  静默失效。派生与来源表天然一致，键必然对得上。
+- **新增 `GET /runs/{run_id}/nodes/{node_id}/attempts`**：节点级尝试，供详情页按需拉取。
+  **不并进 `/graph`**：`response_text` 单条可达上万字符，主入口跑一次有 17 处 LLM 调用，
+  全部内联会让首屏为了一张图加载好几 MB。`call_path` 可选传入以区分迭代各轮。
+- **新增 `frontend/src/components/RunDetail.tsx`**：节点状态叠加到**当次定义快照**的图上
+  （详情页从不请求当前定义的拓扑）；点节点看输入输出、错误、实际 requests 与
+  每次尝试的响应/用量/错误；带 `sub_run_id` 的节点可进入子运行。
+  - 长文本折叠显示（默认 1200 字符，可展开），避免一条 LLM 响应把面板撑成几屏。
+  - 运行仍在跑时 2s 轮询，进入终态即停。
+  - App 用**导航栈**而非单个 runId：主入口 → 画像生成 → 其子流程可逐层下钻，
+    单值会让「返回」只能退回列表。
+- **测试自身的缺陷一并修正**：新用例原先用 `next(...)` 扫生成器取带尝试的节点，
+  没有匹配时抛 `StopIteration`，在协程里变成
+  `RuntimeError: coroutine raised StopIteration`——报错信息完全指不到「计数没被写」
+  这个真实原因。改为显式断言并打印各节点计数，且**先断言计数非零再验证内容**。
+- 测试 **379 项**（23 个文件）全绿，13 skipped。新增 `tests/test_node_attempts.py`（7 项）。
+
 ## 2026-09-23 — V0.4.2 任务列表：筛选、排序与分页
 
 - **`GET /runs` 扩展**：新增 `created_after_ms` / `created_before_ms` / `order_by`。

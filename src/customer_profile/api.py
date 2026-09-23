@@ -367,6 +367,30 @@ def create_app(service_factory: Any = None) -> FastAPI:
             is_replay=bool(row.get("is_replay")),
         )
 
+    @app.get("/runs/{run_id}/nodes/{node_id}/attempts", tags=["runs"])
+    async def node_attempts(
+        run_id: str,
+        node_id: str,
+        call_path: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """某个节点的每一次外部请求尝试（V0.4.3 的「看到每次尝试」）。
+
+        **按节点懒加载，不塞进 ``/graph``**：``response_text`` 可以很大（单次 LLM 响应
+        上万字符，主入口跑一次有 17 处 LLM 调用），全部内联到详情页首屏会让页面为了
+        一张图加载好几 MB。节点行里已有 ``attempt_count``，前端据此决定是否要拉。
+
+        ``call_path`` 由节点行带回来，用于区分迭代各轮——只按 ``node_id`` 会把多轮尝试
+        混在一起。不传则返回该节点全部轮的尝试。
+        """
+        service = get_service()
+        if service.store is None:
+            raise HTTPException(status_code=503, detail="未启用留痕存储")
+        if await service.store.get_run(run_id) is None:
+            raise HTTPException(status_code=404, detail=f"运行 {run_id} 不存在")
+        return await service.store.list_attempts(
+            run_id, node_id=node_id, call_path=call_path
+        )
+
     @app.post("/runs/{run_id}/cancel", tags=["runs"])
     async def cancel_run(run_id: str) -> dict[str, Any]:
         """请求取消一个仍在运行的运行。"""
