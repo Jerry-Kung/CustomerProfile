@@ -135,3 +135,182 @@ body {
   font-size: 11px;
   margin-top: 2px;
 }
+
+/* ---------------------------------------------------------------- 标签页 */
+
+.app-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.app-tabs button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px 12px;
+}
+
+.app-tabs button.active {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- 任务列表 */
+
+.run-list {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.run-filters {
+  align-items: center;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 20px;
+}
+
+.run-filters label {
+  color: var(--muted);
+}
+
+.run-filters select,
+.run-filters input[type='text'] {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 14px;
+  padding: 4px 8px;
+}
+
+.run-filters input[type='text'] {
+  width: 140px;
+}
+
+.run-filters button {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+  padding: 4px 12px;
+}
+
+.run-filters button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.run-checkbox {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+}
+
+.run-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.run-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.run-table th {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-weight: 600;
+  padding: 8px 12px;
+  position: sticky;
+  text-align: left;
+  top: 0;
+}
+
+.run-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
+  vertical-align: top;
+}
+
+.run-table tbody tr {
+  cursor: pointer;
+}
+
+.run-table tbody tr:hover {
+  background: #f1f5f9;
+}
+
+.cell-error {
+  color: var(--muted);
+  max-width: 420px;
+  overflow-wrap: anywhere;
+}
+
+.cell-empty {
+  color: var(--muted);
+  padding: 32px;
+  text-align: center;
+}
+
+/* 状态徽标。颜色与图上的节点着色同一套语义，便于两处对照。 */
+.status-pill {
+  border-radius: 10px;
+  color: #fff;
+  display: inline-block;
+  font-size: 12px;
+  padding: 1px 8px;
+}
+
+.status-succeeded { background: #22c55e; }
+.status-failed { background: #ef4444; }
+.status-running { background: #3b82f6; }
+.status-queued { background: #9ca3af; }
+.status-cancelled { background: #6b7280; }
+.status-skipped { background: #a855f7; }
+.status-interrupted { background: #f97316; }
+
+.tag-replay {
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  margin-left: 6px;
+  padding: 0 4px;
+}
+
+.run-pager {
+  align-items: center;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  display: flex;
+  gap: 12px;
+  padding: 8px 20px;
+}
+
+.run-pager button {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 4px 12px;
+}
+
+.run-pager button:disabled {
+  color: #cbd5e1;
+  cursor: default;
+}

@@ -163,6 +163,10 @@ export const api = {
     workflow_id?: string
     status?: string
     business_ref?: string
+    include_children?: boolean
+    created_after_ms?: number
+    created_before_ms?: number
+    order_by?: string
     limit?: number
     offset?: number
   } = {}) => {
@@ -172,5 +176,27 @@ export const api = {
     }
     const suffix = query.toString() ? `?${query}` : ''
     return getJson<RunSummary[]>(`/runs${suffix}`)
+  },
+
+  /**
+   * 与 `listRuns` **同一组筛选条件**下的总数，供分页算页数。
+   *
+   * 参数必须与 `listRuns` 一起传，且共用同一个对象——条件分叉会让总页数与实际
+   * 数据不匹配，表现为翻到后半段是空页。
+   */
+  countRuns: (params: {
+    workflow_id?: string
+    status?: string
+    business_ref?: string
+    include_children?: boolean
+    created_after_ms?: number
+    created_before_ms?: number
+  } = {}) => {
+    const query = new URLSearchParams()
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== '') query.set(key, String(value))
+    }
+    const suffix = query.toString() ? `?${query}` : ''
+    return getJson<{ total: number }>(`/runs/count${suffix}`).then((r) => r.total)
   },
 }

@@ -242,9 +242,17 @@ def create_app(service_factory: Any = None) -> FastAPI:
         status: str | None = None,
         business_ref: str | None = None,
         include_children: bool = False,
+        created_after_ms: int | None = None,
+        created_before_ms: int | None = None,
+        order_by: str = "created_desc",
         limit: int = Query(default=50, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
     ) -> list[RunSummary]:
+        """任务列表。返回**裸数组**，总数走 ``GET /runs/count``。
+
+        刻意不改成 ``{items, total}`` 信封：现有调用方与测试都按数组取（`test_api.py`），
+        改形状是破坏性变更，而分页所需的只是多一个数字。
+        """
         service = get_service()
         if service.store is None:
             raise HTTPException(status_code=503, detail="未启用留痕存储")
@@ -253,10 +261,39 @@ def create_app(service_factory: Any = None) -> FastAPI:
             status=status,
             business_ref=business_ref,
             include_children=include_children,
+            created_after_ms=created_after_ms,
+            created_before_ms=created_before_ms,
+            order_by=order_by,
             limit=limit,
             offset=offset,
         )
         return [_summary_of(row) for row in rows]
+
+    @app.get("/runs/count", tags=["runs"])
+    async def count_runs(
+        workflow_id: str | None = None,
+        status: str | None = None,
+        business_ref: str | None = None,
+        include_children: bool = False,
+        created_after_ms: int | None = None,
+        created_before_ms: int | None = None,
+    ) -> dict[str, int]:
+        """满足**同一组筛选条件**的运行总数，供分页控件算页数。
+
+        必须与 ``GET /runs`` 用同一组参数：条件分叉会让总页数与实际数据不匹配。
+        """
+        service = get_service()
+        if service.store is None:
+            raise HTTPException(status_code=503, detail="未启用留痕存储")
+        total = await service.store.count_runs(
+            workflow_id=workflow_id,
+            status=status,
+            business_ref=business_ref,
+            include_children=include_children,
+            created_after_ms=created_after_ms,
+            created_before_ms=created_before_ms,
+        )
+        return {"total": total}
 
     @app.get("/runs/{run_id}", response_model=RunDetail, tags=["runs"])
     async def get_run(run_id: str) -> RunDetail:

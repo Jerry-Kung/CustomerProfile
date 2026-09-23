@@ -37,6 +37,64 @@ _SHUTDOWN = object()
 """投进命令队列即要求工作线程退出。"""
 
 
+DEFAULT_RUN_ORDER = "created_desc"
+"""运行列表的缺省排序。最新优先，与「先看刚跑的那次」的使用习惯一致。"""
+
+_RUN_ORDERINGS: dict[str, str] = {
+    "created_desc": "created_at_ms DESC",
+    "created_asc": "created_at_ms ASC",
+    "duration_desc": "COALESCE(duration_ms, 0) DESC, created_at_ms DESC",
+    "duration_asc": "COALESCE(duration_ms, 0) ASC, created_at_ms DESC",
+}
+
+
+def _run_order_by(order_by: str) -> str:
+    """把排序键翻成 ``ORDER BY`` 子句。
+
+    **白名单，不是拼接**。``order_by`` 来自查询参数，直接插进 SQL 就是注入点；
+    未知取值回落到缺省而不是报错——排序参数写错不该让整个列表打不开。
+    """
+    return _RUN_ORDERINGS.get(order_by, _RUN_ORDERINGS[DEFAULT_RUN_ORDER])
+
+
+def _run_filter_clause(
+    *,
+    workflow_id: str | None = None,
+    status: str | None = None,
+    business_ref: str | None = None,
+    include_children: bool = False,
+    created_after_ms: int | None = None,
+    created_before_ms: int | None = None,
+) -> tuple[str, list[Any]]:
+    """构造 ``WHERE`` 子句与参数。
+
+    列表与计数**共用**本函数，是刻意的：两者条件一旦分叉，分页的总页数会与实际数据
+    不匹配，表现为「翻到后半段是空页」，且看起来像后端丢了数据。
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if workflow_id:
+        clauses.append("workflow_id = ?")
+        params.append(workflow_id)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if business_ref:
+        clauses.append("business_ref = ?")
+        params.append(business_ref)
+    if not include_children:
+        clauses.append("parent_run_id IS NULL")
+    if created_after_ms is not None:
+        clauses.append("created_at_ms >= ?")
+        params.append(created_after_ms)
+    if created_before_ms is not None:
+        clauses.append("created_at_ms <= ?")
+        params.append(created_before_ms)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, params
+
+
 class _ConnectionThread:
     """独占一个 ``sqlite3.Connection`` 的工作线程。
 
@@ -313,37 +371,56 @@ class Store:
         status: str | None = None,
         business_ref: str | None = None,
         include_children: bool = False,
+        created_after_ms: int | None = None,
+        created_before_ms: int | None = None,
+        order_by: str = DEFAULT_RUN_ORDER,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        clauses: list[str] = []
-        params: list[Any] = []
-        if workflow_id:
-            clauses.append("workflow_id = ?")
-            params.append(workflow_id)
-        if status:
-            clauses.append("status = ?")
-            params.append(status)
-        if business_ref:
-            clauses.append("business_ref = ?")
-            params.append(business_ref)
-        if not include_children:
-            clauses.append("parent_run_id IS NULL")
-
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        where, params = _run_filter_clause(
+            workflow_id=workflow_id,
+            status=status,
+            business_ref=business_ref,
+            include_children=include_children,
+            created_after_ms=created_after_ms,
+            created_before_ms=created_before_ms,
+        )
         params.extend([max(1, min(limit, 500)), max(0, offset)])
         rows = await self._read(
             f"SELECT * FROM workflow_runs {where} "
-            "ORDER BY created_at_ms DESC LIMIT ? OFFSET ?",
+            f"ORDER BY {_run_order_by(order_by)} LIMIT ? OFFSET ?",
             params,
         )
         return [
             _row_to_dict(r, json_fields=("inputs_json", "outputs_json")) for r in rows
         ]
 
-    async def count_runs(self, *, include_children: bool = False) -> int:
-        where = "" if include_children else "WHERE parent_run_id IS NULL"
-        rows = await self._read(f"SELECT COUNT(*) AS n FROM workflow_runs {where}")
+    async def count_runs(
+        self,
+        *,
+        workflow_id: str | None = None,
+        status: str | None = None,
+        business_ref: str | None = None,
+        include_children: bool = False,
+        created_after_ms: int | None = None,
+        created_before_ms: int | None = None,
+    ) -> int:
+        """与 :meth:`list_runs` **共用同一套筛选条件**的总数。
+
+        刻意不保留「不带筛选的总数」这条捷径：分页控件要的是「当前筛选下共几页」，
+        两者用不同条件算出的数字会让翻页在后半段变成空白页，且看着像后端丢了数据。
+        """
+        where, params = _run_filter_clause(
+            workflow_id=workflow_id,
+            status=status,
+            business_ref=business_ref,
+            include_children=include_children,
+            created_after_ms=created_after_ms,
+            created_before_ms=created_before_ms,
+        )
+        rows = await self._read(
+            f"SELECT COUNT(*) AS n FROM workflow_runs {where}", params
+        )
         return int(rows[0]["n"]) if rows else 0
 
     async def mark_running_as_interrupted(self) -> int:
