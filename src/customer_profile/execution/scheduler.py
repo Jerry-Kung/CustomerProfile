@@ -448,6 +448,14 @@ class Scheduler:
             queued_at_ms=queued_ms,
         )
         started = self._clock()
+        started_ms = now_ms()
+        """节点的**墙钟**开始时间。
+
+        与 ``started``（单调钟）分开：``duration_ms`` 必须用单调钟算，墙钟会被系统时间
+        调整影响、算出负时长；而时间线要的是墙钟——只有墙钟才能和运行行、其它节点的
+        时间放在同一条轴上比较。两者此前被写成同一行表达式，``started_at_ms`` 因此等于
+        ``duration_ms``，时间线无从绘制（V0.4.4 实测发现）。
+        """
         # 留痕时使用覆盖后的调用路径。记录句柄是每次运行一份、循环体串行执行，
         # 因此临时替换再还原是安全的。
         original_call_path = record.call_path
@@ -464,7 +472,7 @@ class Scheduler:
         except asyncio.CancelledError:
             execution.status = NodeStatus.FAILED
             execution.error = "节点执行被取消"
-            execution.started_at_ms = int((self._clock() - started) * 1000)
+            execution.started_at_ms = started_ms
             execution.duration_ms = int((self._clock() - started) * 1000)
             if call_path_override:
                 execution.call_path = call_path_override
@@ -487,7 +495,7 @@ class Scheduler:
             execution.sub_run_id = outcome.meta.get("sub_run_id")
             execution.call_path = record.call_path if call_path_override else ""
 
-        execution.started_at_ms = int((self._clock() - started) * 1000)
+        execution.started_at_ms = started_ms
         execution.duration_ms = int((self._clock() - started) * 1000)
         if call_path_override:
             execution.call_path = call_path_override

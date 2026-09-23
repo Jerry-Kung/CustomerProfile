@@ -110,7 +110,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
 
     app = FastAPI(
         title="Customer Profile",
-        version="0.4.1",
+        version="0.4.4",
         description=description,
         lifespan=lifespan,
     )

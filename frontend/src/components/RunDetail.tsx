@@ -20,6 +20,7 @@ import {
   type RunGraph,
 } from '../api/client'
 import { TopologyGraph } from './TopologyGraph'
+import { RunTimeline } from './RunTimeline'
 
 const STATUS_LABEL: Record<string, string> = {
   queued: '排队中',
@@ -140,6 +141,9 @@ export function RunDetail({ runId, onDrillDown, onBack }: RunDetailProps) {
   const [selected, setSelected] = useState<NodeExecution | null>(null)
   const [attempts, setAttempts] = useState<RequestAttempt[]>([])
   const [loadingAttempts, setLoadingAttempts] = useState(false)
+  // 图与时间线并排切换，而不是只留一个：图表达依赖，时间线表达并发，
+  // 两者缺一就看不出「并行跑的」与「有依赖所以先后跑」的区别（§2.3）。
+  const [view, setView] = useState<'graph' | 'timeline'>('graph')
 
   const load = useCallback(async () => {
     setError('')
@@ -225,11 +229,36 @@ export function RunDetail({ runId, onDrillDown, onBack }: RunDetailProps) {
 
       <div className="detail-body">
         <div className="detail-graph">
-          <TopologyGraph
-            definition={graph.definition}
-            executions={graph.nodes}
-            onSelectNode={(id) => void openNode(id)}
-          />
+          <div className="view-switch">
+            <button
+              type="button"
+              className={view === 'graph' ? 'active' : ''}
+              onClick={() => setView('graph')}
+            >
+              依赖图
+            </button>
+            <button
+              type="button"
+              className={view === 'timeline' ? 'active' : ''}
+              onClick={() => setView('timeline')}
+            >
+              执行顺序
+            </button>
+          </div>
+          {view === 'graph' ? (
+            <TopologyGraph
+              definition={graph.definition}
+              executions={graph.nodes}
+              onSelectNode={(id) => void openNode(id)}
+            />
+          ) : (
+            <RunTimeline
+              nodes={graph.nodes}
+              runStartedAtMs={graph.run.started_at_ms}
+              runDurationMs={graph.run.duration_ms}
+              onSelectNode={(id) => void openNode(id)}
+            />
+          )}
         </div>
 
         <aside className="detail-panel">

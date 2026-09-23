@@ -1,6 +1,6 @@
 [project]
 name = "customer-profile"
-version = "0.4.1"
+version = "0.4.4"
 description = "潜在目标客户人设画像分析工作流（Dify 迁移后的 Python 实现）"
 requires-python = ">=3.11"
 

@@ -485,7 +485,9 @@ class Store:
             " outputs_json = COALESCE(excluded.outputs_json, node_executions.outputs_json), "
             " error = excluded.error, duration_ms = excluded.duration_ms, "
             " sub_run_id = COALESCE(excluded.sub_run_id, node_executions.sub_run_id), "
-            " attempt_count = COALESCE(excluded.attempt_count, node_executions.attempt_count)",
+            " attempt_count = COALESCE(excluded.attempt_count, node_executions.attempt_count), "
+            " started_at_ms = COALESCE(excluded.started_at_ms, node_executions.started_at_ms), "
+            " queued_at_ms = COALESCE(excluded.queued_at_ms, node_executions.queued_at_ms)",
             (
                 run_id,
                 node_id,
