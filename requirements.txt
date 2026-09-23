@@ -1,0 +1,15 @@
+# Customer Profile —— 运行时依赖（V0.2 起）
+#
+# V0.1 的盘点脚本只依赖 PyYAML，见 scripts/requirements.txt。
+# 本文件是 V0.2 执行器的依赖，安装：pip install -r requirements.txt
+
+fastapi>=0.115
+uvicorn>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+httpx>=0.27
+jinja2>=3.1
+
+# 开发
+pytest>=8.0
+pytest-asyncio>=0.23

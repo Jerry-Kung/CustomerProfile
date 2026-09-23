@@ -1,0 +1,34 @@
+{
+  "_note": "（新）SubAgent - 人工确认信息提取（生产环境）的固定响应。来自 mhero 客户画像接口的应答结构，字段为脱敏样例，不含真实客户数据。",
+  "llm": {},
+  "http": {
+    "GET /api/v1/remote/data/profile/13800000001": [
+      {
+        "status_code": 200,
+        "text": "{\"basic_notes\": {\"customer_name\": {\"value\": \"张三\", \"is_locked\": 1}, \"customer_nick\": {\"value\": \"小张\", \"is_locked\": 0}, \"customer_address\": {\"value\": \"武汉市\", \"is_locked\": true}, \"customer_remark\": {\"value\": \"\", \"is_locked\": 0}}, \"other_section\": {\"ignored\": true}}",
+        "headers": {"content-type": "application/json"}
+      }
+    ],
+    "GET /api/v1/remote/data/profile/13800000002": [
+      {
+        "status_code": 200,
+        "text": "{\"basic_notes\": {}}",
+        "headers": {"content-type": "application/json"}
+      }
+    ],
+    "GET /api/v1/remote/data/profile/13800000003": [
+      {
+        "status_code": 200,
+        "text": "```json\n{\"basic_notes\": {\"customer_phone_brand\": {\"value\": \"华为\", \"is_locked\": \"1\"}}}\n```",
+        "headers": {"content-type": "application/json"}
+      }
+    ],
+    "GET /api/v1/remote/data/profile/13800000004": [
+      {
+        "status_code": 404,
+        "text": "{\"code\": 404, \"message\": \"customer not found\"}",
+        "headers": {"content-type": "application/json"}
+      }
+    ]
+  }
+}
