@@ -202,3 +202,99 @@ async def test_child_runs_are_indexed_by_triggering_node(client):
     assert triggering[0]["node_id"] in body["child_runs"], (
         "带 sub_run_id 的节点没有出现在 child_runs 里，下钻入口对不上"
     )
+
+
+# ---------------------------------------------------------------- 历史版本不被覆盖（行为级）
+
+
+async def test_a_new_definition_version_does_not_change_an_old_run(tmp_path):
+    """**行为级**验证：登记一份新定义后，旧运行的展示必须纹丝不动。
+
+    与 ``test_history_view_is_not_overwritten_by_new_definitions`` 的区别：那条只断言
+    「同一个 version_id 两次读取一致」，**不等于**「定义变了之后旧运行仍显示旧图」——
+    它没有真的让定义发生变化。这条补上：跑一次拿到版本 A，登记一份**内容不同**的定义
+    产生版本 B，再回头查旧运行，必须仍指向 A 且节点集合不含新增节点。
+
+    交付报告 §4.1 把这一条列为未完成项（证据强度不足），此处收口。
+    """
+    from customer_profile.replay import ReplaySource
+    from customer_profile.runner import build_service
+    from customer_profile.api import create_app
+    from customer_profile.workflows import human_corrected_info as hci_mod
+
+    settings = make_settings(tmp_path)
+    service_obj = await build_service(
+        settings, replay=ReplaySource.from_file(FIXTURE, strict=True)
+    )
+
+    async def factory():
+        return service_obj
+
+    app = create_app(service_factory=factory)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        async with app.router.lifespan_context(app):
+            # ---- 1. 跑一次，拿到版本 A 与当时的节点集合
+            run_id = (
+                await c.post(
+                    "/runs",
+                    json={
+                        "workflow_id": hci_mod.WORKFLOW_ID,
+                        "inputs": {"phone_number": "13800000001"},
+                    },
+                )
+            ).json()["run_id"]
+            import asyncio
+            import time
+
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                detail = (await c.get(f"/runs/{run_id}")).json()
+                if detail.get("status") in TERMINAL:
+                    break
+                await asyncio.sleep(0.02)
+
+            graph_a = (await c.get(f"/runs/{run_id}/graph")).json()
+            version_a = graph_a["definition_version_id"]
+            nodes_a = {n["node_id"] for n in graph_a["definition"]["nodes"]}
+            assert version_a is not None
+
+            # ---- 2. 登记一份**内容不同**的定义，产生版本 B
+            modified = dict(hci_mod.WORKFLOW.asdict())
+            modified["nodes"] = list(modified["nodes"]) + [
+                {
+                    "node_id": "FAKE_NEW_NODE",
+                    "title": "新增的节点（只存在于新版本）",
+                    "type": "code",
+                    "direct_predecessors": [],
+                    "branch_gates": {},
+                    "bindings": [],
+                    "outputs": [],
+                    "config": {},
+                    "coords": None,
+                }
+            ]
+            version_b = await service_obj.store.ensure_definition_version(
+                hci_mod.WORKFLOW_ID, modified
+            )
+            assert version_b != version_a, "内容已变却复用了同一版本号，快照机制失效"
+
+            # ---- 3. 旧运行的展示不能被版本 B 影响
+            graph_a2 = (await c.get(f"/runs/{run_id}/graph")).json()
+            assert graph_a2["definition_version_id"] == version_a, (
+                "旧运行指向了新版本——历史运行的图被新定义覆盖了"
+            )
+            assert {n["node_id"] for n in graph_a2["definition"]["nodes"]} == nodes_a
+            assert "FAKE_NEW_NODE" not in {
+                n["node_id"] for n in graph_a2["definition"]["nodes"]
+            }, "旧运行的图里出现了新版本才有的节点"
+
+            # ---- 4. 而版本 B 自身可查，内容确实是新的
+            fetched_b = (await c.get(f"/definition-versions/{version_b}")).json()
+            assert "FAKE_NEW_NODE" in {
+                n["node_id"] for n in fetched_b["definition"]["nodes"]
+            }
+            fetched_a = (await c.get(f"/definition-versions/{version_a}")).json()
+            assert "FAKE_NEW_NODE" not in {
+                n["node_id"] for n in fetched_a["definition"]["nodes"]
+            }
