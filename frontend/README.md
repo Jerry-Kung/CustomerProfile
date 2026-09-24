@@ -1,8 +1,11 @@
-# 客户画像运行台（只读前端）
+# 客户画像运行台
 
-V0.4 的运行台前端。Vite + React + TypeScript + [@xyflow/react](https://reactflow.dev)（React Flow 12）。
+V0.4 起的工作台前端。Vite + React + TypeScript + [@xyflow/react](https://reactflow.dev)（React Flow 12）。
 
-设计依据：`docs/specs/V0.4只读运行台.md`。**只读**——没有编辑、没有重跑、没有拖拽保存（`Dify迁移任务说明.md` §8）。
+设计依据：`docs/specs/V0.4只读运行台.md`（结构/列表/详情）、`docs/specs/V0.5工作台任务触发入口.md`（提交入口）。
+
+**仍然只读的是「图」**：没有拖拽保存、没有连线编辑、没有工作流编辑（`Dify迁移任务说明.md` §8）。
+V0.5.1 起增加了**唯一的写操作**——提交任务（`POST /runs`），页面为「提交任务」标签页。
 
 ## 构建与入库约定（重要）
 
@@ -40,8 +43,18 @@ npm run dev          # Vite dev server，API 请求按 vite.config.ts 的 proxy 
 2. **图与状态分两个字段**（`definition` / `nodes`）。不要合并：合并后「图里有但没执行」
    与「执行了但已不在图里」无从分辨。
 
-相关端点：`GET /workflows`、`GET /workflows/{id}/topology`、`GET /definition-versions/{id}`、
-`GET /runs/{id}/graph`。
+相关端点（读）：`GET /workflows`、`GET /workflows/{id}/topology`、`GET /definition-versions/{id}`、
+`GET /runs/{id}/graph`、`GET /runtime`。
+相关端点（写）：`POST /runs` —— 前端**唯一**的写操作，由 `api/client.ts` 的 `submitRun` 调用。
+
+提交入口有三条约定值得记住：
+
+1. **只服务主入口的手机号触发**，不做通用入参表单——其它工作流（录音类要 `customer_data` /
+   `data_source`）入参契约不同，一个「什么都能填」的表单等于假装它们同构。
+2. **前端也校验手机号**，但**不替代**后端那条（`api.py` 的 `PHONE_PATTERN`）。前端那道只为
+   省一次往返。
+3. **回写开关要在界面上可见**（`GET /runtime` 的 `writeback_enabled`）。`WRITEBACK_ENABLED=false`
+   时回写被跳过而运行仍显示成功——不标出来会被读成「画像已写进生产库」。
 
 ## 数据边界
 

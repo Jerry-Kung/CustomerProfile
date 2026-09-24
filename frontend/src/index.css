@@ -594,3 +594,123 @@ body {
   text-align: right;
   width: 70px;
 }
+
+/* ---------------------------------------------------------------- 提交任务 */
+
+.submit-run {
+  display: flex;
+  gap: 24px;
+  padding: 20px;
+  align-items: flex-start;
+}
+
+.submit-form {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 420px;
+  padding: 16px 20px;
+}
+
+.submit-form h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.submit-form label {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.submit-form input[type='text'] {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 14px;
+  padding: 6px 8px;
+}
+
+.submit-form input[type='text']:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.submit-form button {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 14px;
+  margin-top: 12px;
+  padding: 6px 12px;
+}
+
+.submit-form button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.submit-hint {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+
+.submit-warn {
+  color: #b45309;
+  font-size: 12px;
+}
+
+.submit-error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  color: var(--danger);
+  font-size: 12px;
+  margin-top: 8px;
+  padding: 6px 8px;
+  word-break: break-all;
+}
+
+.submit-runtime {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 260px;
+  padding: 16px 20px;
+}
+
+.submit-runtime h3 {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+
+.submit-runtime dl {
+  display: grid;
+  font-size: 13px;
+  gap: 4px 12px;
+  grid-template-columns: auto 1fr;
+  margin: 0;
+}
+
+.submit-runtime dt {
+  color: var(--muted);
+}
+
+.submit-runtime dd {
+  margin: 0;
+}
+
+/* 回写关闭是要让人注意到的事，不藏在中性色里。 */
+.runtime-off {
+  color: #b45309;
+  font-weight: 600;
+}

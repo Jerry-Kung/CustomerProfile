@@ -127,6 +127,26 @@ export interface RequestAttempt {
   created_at_ms: number
 }
 
+/** 提交一次运行的返回值。 */
+export interface SubmitResult {
+  run_id: string
+  workflow_id: string
+}
+
+/** 当前运行态。**只有配置，没有凭据**——三个 API Key 一律不在此。 */
+export interface RuntimeInfo {
+  replay_mode: 'off' | 'fixture' | string
+  /** 回写开关。false 时回写节点只产出「已跳过」的结果，运行仍可能 succeeded。 */
+  writeback_enabled: boolean
+  llm_model: string
+  max_active_runs: number | null
+  max_concurrent_requests: number | null
+  /** 当前占用的运行名额；未装闸门时为 null。 */
+  active_runs: number | null
+  available_run_slots: number | null
+  serve_ui: boolean
+}
+
 /** 一个工作流的元信息，用于结构页的下拉选择。 */
 export interface WorkflowBrief {
   workflow_id: string
@@ -166,8 +186,52 @@ async function getJson<T>(path: string): Promise<T> {
   return (await response.json()) as T
 }
 
+/**
+ * 提交一次运行。这是前端**唯一**的写操作。
+ *
+ * 与 `getJson` 分开而不是合并成一个通用 `request`：写与读的失败语义不同——提交被拒
+ * （429 并发已满 / 422 入参非法）必须把后端的 `detail` 原样带给用户，那是用户唯一能
+ * 据以纠正的线索。
+ *
+ * 对外契约由后端保证：拿到 `run_id` 时运行记录**已经落库**，因此可以立刻跳到详情页开始轮询。
+ */
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    let detail = ''
+    try {
+      const payload = await response.json()
+      detail = typeof payload?.detail === 'string' ? payload.detail : ''
+    } catch {
+      detail = ''
+    }
+    throw new Error(detail || `请求失败：${response.status} ${path}`)
+  }
+  return (await response.json()) as T
+}
+
 export const api = {
   listWorkflows: () => getJson<WorkflowBrief[]>('/workflows'),
+
+  /** 当前运行态（回放模式、回写开关、并发上限）。 */
+  runtime: () => getJson<RuntimeInfo>('/runtime'),
+
+  /**
+   * 提交一次运行，返回 `run_id`。
+   *
+   * `business_ref` 缺省传手机号：列表页按业务标识检索，子运行也会自动带上它
+   * （后端从 `inputs["phone_number"]` 派生）。不传的话，父运行在列表里显示 `—`，
+   * 而它的子运行却带着号码。
+   */
+  submitRun: (payload: {
+    workflow_id: string
+    inputs: Record<string, unknown>
+    business_ref?: string
+  }) => postJson<SubmitResult>('/runs', payload),
 
   topology: (workflowId: string) =>
     getJson<Definition>(

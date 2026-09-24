@@ -1,19 +1,25 @@
 /**
  * 运行台主界面。
  *
- * 两个标签页：工作流结构（v0.4.1）与任务列表（v0.4.2）。运行详情（v0.4.3）从列表
- * 点入后占同一位置。刻意不引入路由库——三个视图、无深链接需求，一个状态变量够用，
- * 加一个依赖就要多解释一层。
+ * 三个标签页：工作流结构（v0.4.1）、任务列表（v0.4.2）、提交任务（v0.5.1）。
+ * 运行详情（v0.4.3）从列表点入后占同一位置。刻意不引入路由库——四个视图、无深链接需求，
+ * 一个状态变量够用，加一个依赖就要多解释一层。
  */
 
 import { useEffect, useState } from 'react'
 
-import { api, type Definition, type WorkflowBrief } from './api/client'
+import {
+  api,
+  type Definition,
+  type RuntimeInfo,
+  type WorkflowBrief,
+} from './api/client'
 import { TopologyGraph } from './components/TopologyGraph'
 import { RunList } from './components/RunList'
 import { RunDetail } from './components/RunDetail'
+import { SubmitRun } from './components/SubmitRun'
 
-type Tab = 'structure' | 'runs'
+type Tab = 'structure' | 'runs' | 'submit'
 
 function App() {
   const [tab, setTab] = useState<Tab>('structure')
@@ -21,6 +27,7 @@ function App() {
   const [selected, setSelected] = useState<string>('')
   const [definition, setDefinition] = useState<Definition | null>(null)
   const [error, setError] = useState<string>('')
+  const [runtime, setRuntime] = useState<RuntimeInfo | null>(null)
 
   /**
    * 运行详情的导航栈。
@@ -43,6 +50,15 @@ function App() {
       .catch((exc: unknown) =>
         setError(exc instanceof Error ? exc.message : String(exc)),
       )
+  }, [])
+
+  // 运行态只拉一次：它描述的是进程配置，运行期不会变。
+  // 失败不覆盖全局错误条——提交页缺了这份信息仍可提交，不该因此挡住整个界面。
+  useEffect(() => {
+    api
+      .runtime()
+      .then(setRuntime)
+      .catch(() => setRuntime(null))
   }, [])
 
   useEffect(() => {
@@ -74,6 +90,13 @@ function App() {
             onClick={() => setTab('runs')}
           >
             任务列表
+          </button>
+          <button
+            type="button"
+            className={tab === 'submit' ? 'active' : ''}
+            onClick={() => setTab('submit')}
+          >
+            提交任务
           </button>
         </nav>
         {tab === 'structure' && (
@@ -109,6 +132,18 @@ function App() {
           ) : (
             <div className="app-placeholder">正在加载工作流结构…</div>
           )
+        )}
+
+        {tab === 'submit' && (
+          <SubmitRun
+            runtime={runtime}
+            onSubmitted={(runId) => {
+              // 提交后直接落到该运行的详情页并开始轮询。
+              // 后端保证此时运行记录已落库，因此详情页立刻查得到。
+              setRunStack([runId])
+              setTab('runs')
+            }}
+          />
         )}
 
         {tab === 'runs' && !currentRun && (

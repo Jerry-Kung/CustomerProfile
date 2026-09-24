@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,8 +21,40 @@ from pydantic import BaseModel, Field
 
 from .definitions import NodeDef, RunStatus, WorkflowDef
 from .layout import layout
-from .runner import Service, build_service
+from .runner import RunSlotUnavailable, Service, build_service
 from .settings import get_settings
+
+
+ENTRY_WORKFLOW_ID = "customer_profile_entry"
+"""主入口工作流 ID。手机号校验只对它启用，不把入口契约硬编码给全部工作流。"""
+
+PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
+"""中国大陆手机号。与 ``scripts/smoke_run.py`` 的脱敏正则同一形状，此处锚定整串。"""
+
+
+def _validate_entry_inputs(workflow_id: str, inputs: Mapping[str, Any]) -> None:
+    """在主入口上做提交前入参校验。
+
+    此前**没有任何前置校验**：``start`` 节点的必填性在执行期才由 ``execute_start`` 检查，
+    于是少传或传错手机号会变成一个失败运行，而不是一个可解释的 4xx。手机号还会进
+    ``business_ref`` 与多个下游 HTTP 路径（``/data/history/{phone}``、``/data/profile/{phone}``），
+    空串或带斜杠的值会在外部服务上变成难以归因的 404。
+
+    只校验主入口：其它工作流（如 ``evidence_subagent``、录音类）的入参契约不同，
+    在这里一并约束会把它们的合法调用挡掉。
+    """
+    if workflow_id != ENTRY_WORKFLOW_ID:
+        return
+    phone = inputs.get("phone_number")
+    if phone is None:
+        raise HTTPException(
+            status_code=422, detail=f"{ENTRY_WORKFLOW_ID} 缺少必填入参 phone_number"
+        )
+    if not isinstance(phone, str) or not PHONE_PATTERN.match(phone):
+        raise HTTPException(
+            status_code=422,
+            detail=f"phone_number 须为 11 位中国大陆手机号（1 开头，第二位 3-9），实际为 {phone!r}",
+        )
 
 
 class SubmitRequest(BaseModel):
@@ -110,7 +143,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
 
     app = FastAPI(
         title="Customer Profile",
-        version="0.4.4",
+        version="0.5.1",
         description=description,
         lifespan=lifespan,
     )
@@ -158,6 +191,32 @@ def create_app(service_factory: Any = None) -> FastAPI:
             "replay_mode": service.settings.replay_mode,
             "workflows": sorted(service.definitions),
             "definition_issues": service.issue_report,
+        }
+
+    @app.get("/runtime", tags=["meta"])
+    async def runtime() -> dict[str, Any]:
+        """当前运行态，供运行台显示。
+
+        **只报配置，不报凭据。** ``llm_model`` 是配置项而非密钥（``.env.example`` 已公开其
+        占位），三个 API Key 一律不出现在返回值里。
+
+        存在的理由：回写被 ``WRITEBACK_ENABLED=false`` 拦下时，节点只产出「已跳过」的结果，
+        运行却仍显示 succeeded。没有这个端点，界面上「成功」会被读成「已写进生产库」，
+        而实际上没有任何生产副作用——这正是 ``smoke_run.py`` 在报告里显式记 ``writeback_enabled``
+        的理由，只是那个记录在 CLI 里，运行台上看不到。
+        """
+        service = get_service()
+        settings = service.settings
+        slots = service.run_slots
+        return {
+            "replay_mode": settings.replay_mode,
+            "writeback_enabled": settings.writeback_enabled,
+            "llm_model": settings.llm_model,
+            "max_active_runs": settings.max_active_runs,
+            "max_concurrent_requests": settings.max_concurrent_requests,
+            "active_runs": slots.active if slots is not None else None,
+            "available_run_slots": slots.available if slots is not None else None,
+            "serve_ui": settings.serve_ui,
         }
 
     @app.get("/workflows", tags=["meta"])
@@ -221,6 +280,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
         数据库里查不到」的情况。
         """
         service = get_service()
+        _validate_entry_inputs(payload.workflow_id, payload.inputs)
         try:
             run_id = await service.submit(
                 payload.workflow_id,
@@ -229,6 +289,14 @@ def create_app(service_factory: Any = None) -> FastAPI:
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RunSlotUnavailable as exc:
+            # 并发满时明确拒绝（429），不排队：排队会让调用方拿到 run_id 却迟迟不开始，
+            # 看上去像提交失败。带上上限与当前在飞数，便于调用方判断该等还是该扩。
+            raise HTTPException(
+                status_code=429,
+                detail=str(exc),
+                headers={"Retry-After": "30"},
+            ) from exc
 
         # 等运行记录真正落库再返回。「先落库再返回 run_id」这条要求不能只靠「任务已
         # 创建」来满足——调用方拿到 ID 立刻查询也必须查得到，否则契约不成立。

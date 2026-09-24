@@ -2,6 +2,57 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-09-24 — V0.5.1 工作台任务触发入口（V0.5 开工）
+
+- **需求**：在 V0.4 只读运行台上增加任务触发入口——输入 `phone_number` 提交任务，
+  就地观察完整运行过程与结果。**范围决定（用户）**：V0.5 只做触发入口，迁移规划里
+  原定的「生产运行保障」（持久化队列、独立 worker、全局配额、幂等回写、影子运行）
+  整体后移（差异 W19）。
+- **盘点后有意外收获：缺口比预想的小。** `POST /runs` 早在 V0.2 就存在，V0.4 明确
+  「不改动」它（不是删掉），且已满足「先落库再返回 run_id」。过程展示也齐备
+  （`/runs/{id}/graph` + 节点尝试 + 子运行下钻 + 时间线），`RunDetail` 已有运行中 2s 轮询。
+  **真缺口只有两处**：前端没有任何写方法，以及 `MAX_ACTIVE_RUNS` 是死配置。
+  因此本次**不新增提交端点**。
+- **`MAX_ACTIVE_RUNS` 由死配置改为生效**（差异 W20）。它此前只在 `settings.py` 声明、
+  `.env.example` 写了语义、`.env` 里配了值，而**全仓无任何读取方**——唯一真正生效的并发
+  限制是 `Scheduler._active_slot`（`MAX_ACTIVE_NODES`，限制一次运行**内部**的节点数）。
+  新增 `runner.RunSlotGate`，装在**服务层**（对 CLI 与 API 同样生效），满则抛
+  `RunSlotUnavailable` → API 翻成 **HTTP 429**，**不排队**：排队会让调用方拿到 run_id
+  却迟迟不开始，看上去像提交失败。
+  - 用**计数器而非 `Semaphore`**：申请严格非阻塞（满了立刻抛），而 `Semaphore` 没有
+    非阻塞 `acquire`，用它就得去动 `_value` 私有属性。
+  - **子运行不占名额**：它们由 `SubWorkflowRunner` 直接调 `Scheduler.run`，不走
+    `Service.submit`——主入口一次扇出十几个子运行，若子运行也申请名额，上限一低就自锁。
+  - 名额在 `add_done_callback` 里释放；`_active` 对多余释放**直接忽略**，掉到负数会让
+    闸门永久多放行若干个运行，比少放行危险。
+- **手机号提交前校验**（差异 W21）：此前**无任何前置校验**，`start` 节点的必填性在执行期
+  才检查，于是少传或传错会变成一个**失败的运行**而非可解释的 4xx。现在主入口的
+  `phone_number` 按 `^1[3-9]\d{9}$` 校验，失败返回 422。**只对主入口生效**——其它工作流
+  （录音类要 `customer_data` / `data_source`）入参契约不同，一并约束会挡掉合法调用。
+  手机号还会进 `business_ref` 与下游 HTTP 路径（`/data/history/{phone}`），
+  空串或带斜杠的值会在外部服务上变成难以归因的 404。
+- **新增只读端点 `GET /runtime`**（差异 W22）：报出回放模式、**回写开关**、模型名与并发上限，
+  **不含任何凭据**（由测试断言）。存在的理由很具体：`WRITEBACK_ENABLED=false` 时回写节点
+  只产出「已跳过」的结果，**而运行仍显示 succeeded**。不在界面上显式标出，用户会把「成功」
+  读成「画像已写进生产库」。这正是 `smoke_run.py` 在报告里记 `writeback_enabled` 的理由，
+  只是那份记录在 CLI 里，运行台上看不到。
+- **前端**：`api/client.ts` 新增 `postJson` / `submitRun` / `runtime`；新增
+  `components/SubmitRun.tsx`（手机号 + 批次号，提交中禁用按钮，错误就地显示，并显示运行态
+  面板、回写关闭时明确标注）；`App.tsx` 新增「提交任务」标签页，提交成功后直接落到该运行的
+  详情页开始轮询。`business_ref` 取手机号——子运行会自动派生它，父运行不设会让列表里
+  父运行显示 `—` 而子运行带着号码。
+- **一处实现失误，记录备查**：改写 `runner.py` 时用「从 `class RunSlotGate:` 到
+  `async def build_service(`」的范围做替换，而 `Service` 类定义在 `RunSlotGate` **之前**，
+  于是整个 `Service` 被删掉（首次表现为 5 个测试文件 collection error）。从 `git show HEAD`
+  取回时又漏了它上面的 `@dataclass` 装饰器（表现为 `TypeError: Service() takes no arguments`
+  与 16 failed / 48 errors）。两处均已修正，最终 diff 只剩意图内的增补。
+- 测试 **398 项**（25 个文件）全绿，13 skipped。新增 `tests/test_submit_gate.py`（12 项）。
+  基线 386 项，增量 12 项，对得上。
+- 版本号 `0.4.4` → `0.5.1`（`pyproject.toml` 与 FastAPI `version`）。
+- 文档：新增 `docs/specs/V0.5工作台任务触发入口.md`；`differences.md` 新增 W19–W22；
+  `.env.example` §6 补记 `MAX_ACTIVE_RUNS` 的真实语义与 429 行为；
+  `frontend/README.md` 不再称前端为「只读」。
+
 ## 2026-09-23 — V0.4.4 执行顺序时间线 + 静态资源托管（V0.4 收口）
 
 - **修正一个更早的缺陷：节点 `started_at_ms` 从未落库，且语义是错的。**

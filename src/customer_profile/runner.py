@@ -45,6 +45,8 @@ class Service:
     scheduler: Scheduler | None = None
     llm_client: LlmClient | None = None
     http_client: HttpClient | None = None
+    run_slots: "RunSlotGate | None" = None
+    """同时运行的工作流数上限（``MAX_ACTIVE_RUNS``）。见 :class:`RunSlotGate`。"""
     issue_report: dict[str, list[str]] = field(default_factory=dict)
     """校验发现，按工作流 ID 归档。error 级发现的工作流不进入 ``definitions``。"""
 
@@ -77,7 +79,11 @@ class Service:
         business_ref: str | None = None,
         run_id: str | None = None,
     ) -> str:
-        """异步提交一个工作流，立即返回 ``run_id``。"""
+        """异步提交一个工作流，立即返回 ``run_id``。
+
+        名额已满时抛 :class:`RunSlotUnavailable`——**明确拒绝，不排队**。排队会让调用方
+        拿到一个 run_id 却迟迟不开始，看上去像提交失败；拒绝则是可解释的即时反馈。
+        """
         if self.scheduler is None:
             raise RuntimeError("服务尚未 initialize()")
         workflow = self.require_workflow(workflow_id)
@@ -87,7 +93,16 @@ class Service:
             business_ref=business_ref,
             run_id=run_id or "",
         )
-        task = await self.scheduler.submit(request)
+        if self.run_slots is not None:
+            self.run_slots.acquire()
+        try:
+            task = await self.scheduler.submit(request)
+        except BaseException:
+            # 提交本身失败（或协程被取消）时名额必须还回去，否则会永久泄漏一个并发位。
+            if self.run_slots is not None:
+                self.run_slots.release()
+            raise
+        task.add_done_callback(lambda _t: self.run_slots and self.run_slots.release())
         return task.get_name().split(":", 1)[1]
 
     async def wait_until_recorded(self, run_id: str, timeout: float = 5.0) -> bool:
@@ -131,6 +146,68 @@ class Service:
         workflow = self.require_workflow(workflow_id)
         return attach_layout(workflow.asdict(), workflow)
 
+
+
+class RunSlotUnavailable(RuntimeError):
+    """同时运行的工作流数已达上限，本次提交被拒绝。"""
+
+    def __init__(self, limit: int, active: int) -> None:
+        self.limit = limit
+        self.active = active
+        super().__init__(
+            f"同时运行的工作流数已达上限（{active}/{limit}）；请等已有运行结束后再提交"
+        )
+
+
+class RunSlotGate:
+    """同时运行的**工作流数**上限，取值来自 ``MAX_ACTIVE_RUNS``。
+
+    与 :class:`~customer_profile.execution.scheduler.Scheduler` 的 ``active_slot`` 是两件事：
+
+    - ``active_slot``（``MAX_ACTIVE_NODES``）限制**一次运行内部**同时执行的节点数；
+    - 本闸门限制**同时跑多少个运行**，与 HTTP 形态无关，因此放在服务层，对 CLI 与 API 同样生效。
+
+    两者都不是速率限制（RPM/TPM 属 V0.5 生产保障，本次不做）。
+
+    **用计数器而不是** ``asyncio.Semaphore``：这里的申请是严格非阻塞的——满了就立刻抛
+    :class:`RunSlotUnavailable`，从不等待。``Semaphore`` 没有非阻塞的 ``acquire``，要用它就得
+    去动 ``_value`` 私有属性；既然不需要排队，一个整数就够，也少一处依赖实现细节的地方。
+
+    **子运行不经过这里**：它们由 ``SubWorkflowRunner`` 直接调 ``Scheduler.run``，不走
+    ``Service.submit``。这是刻意的——主入口一次运行会扇出十几个子运行，若子运行也申请名额，
+    上限一低就会自锁。
+    """
+
+    def __init__(self, limit: int) -> None:
+        if limit < 1:
+            raise ValueError(f"运行名额上限至少为 1，实际为 {limit}")
+        self.limit = limit
+        self._active = 0
+
+    @property
+    def active(self) -> int:
+        """当前占用名额的运行数。"""
+        return self._active
+
+    @property
+    def available(self) -> int:
+        return max(0, self.limit - self._active)
+
+    def acquire(self) -> None:
+        """申请一个名额；无空闲时抛 :class:`RunSlotUnavailable`。不阻塞。"""
+        if self._active >= self.limit:
+            raise RunSlotUnavailable(self.limit, self._active)
+        self._active += 1
+
+    def release(self) -> None:
+        """归还一个名额。
+
+        幂等：``_active`` 掉到 0 以下会让闸门**永久多放行**若干运行，比少放行危险得多，
+        因此这里对多余释放直接忽略。
+        """
+        if self._active <= 0:
+            return
+        self._active -= 1
 
 async def build_service(
     settings: Settings | None = None,
@@ -201,6 +278,12 @@ async def build_service(
 
     definitions, issues = _load_definitions()
 
+    run_slots = (
+        RunSlotGate(max(1, settings.max_active_runs))
+        if settings.max_active_runs is not None
+        else None
+    )
+
     scheduler = Scheduler(
         registry,
         runtime,
@@ -224,6 +307,7 @@ async def build_service(
         scheduler=scheduler,
         llm_client=llm_client,
         http_client=http_client,
+        run_slots=run_slots,
         issue_report=issues,
     )
     # tracker 需要访问调度器的运行上下文以快照入参
@@ -314,6 +398,8 @@ def replay_key_for_llm(payload: Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "RunSlotGate",
+    "RunSlotUnavailable",
     "Service",
     "build_service",
     "replay_key_for_llm",
