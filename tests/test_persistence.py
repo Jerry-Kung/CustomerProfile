@@ -108,7 +108,12 @@ async def test_run_finished_updates_status_and_outputs(store):
 
 
 async def test_interrupted_runs_are_marked_on_startup(store):
-    """进程重启：残留的 running/queued 标为 interrupted，且保留原错误以外的信息。"""
+    """进程重启：残留的 **running** 标为 interrupted，**queued 保持不动**。
+
+    queued 是持久化队列里等待被领取的任务。若一并标成中断，「先持久化入队再返回
+    run_id」就失去了意义——worker 一重启，所有还没开始的任务都变成需要人工处理的
+    中断态。所以这里断言 queued **存活**，它会由 worker 下一轮领走。
+    """
     await store.insert_run(
         RunRecordRow(run_id="live", workflow_id="wf", status=RunStatus.RUNNING)
     )
@@ -120,10 +125,12 @@ async def test_interrupted_runs_are_marked_on_startup(store):
     )
 
     marked = await store.mark_running_as_interrupted()
-    assert marked == 2
+    assert marked == 1, "只应标记 running"
 
     assert (await store.get_run("live"))["status"] == RunStatus.INTERRUPTED
-    assert (await store.get_run("waiting"))["status"] == RunStatus.INTERRUPTED
+    assert (await store.get_run("waiting"))["status"] == RunStatus.QUEUED, (
+        "queued 被标成中断了——「worker 重启不丢任务」随之不成立"
+    )
     assert (await store.get_run("done"))["status"] == RunStatus.SUCCEEDED
 
 

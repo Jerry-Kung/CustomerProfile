@@ -224,6 +224,12 @@ export function RunDetail({ runId, onDrillDown, onBack }: RunDetailProps) {
         )}
       </div>
 
+      {graph.run.status === 'queued' && (
+        <div className="detail-hint">
+          排队中：已持久化入队，等待执行 worker 领取。此阶段尚无节点执行记录，
+          图上的节点均为「待执行」。
+        </div>
+      )}
       {graph.run.error && <div className="app-error">{graph.run.error}</div>}
       {error && <div className="app-error">{error}</div>}
 

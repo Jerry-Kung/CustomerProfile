@@ -190,12 +190,14 @@ class LlmClient:
         replay: Any = None,
         request_limiter: Any = None,
         recorder: Any = None,
+        quota: Any = None,
     ) -> None:
         self._settings = settings
         self._transport = transport
         self._replay = replay
         self._limiter = request_limiter
         self._recorder = recorder
+        self._quota = quota
         self._client: Any = None
         self._lock = asyncio.Lock()
 
@@ -357,6 +359,17 @@ class LlmClient:
             )
             return attempt
 
+        # 速率额度在**并发名额之前**申请：速率等待可能长达数十秒，若先占住并发名额
+        # 等待，会把其它本可以出网的请求一起堵住。
+        #
+        # 接线点必须在**每次真实出网**这一层（即 _single_attempt），不能放在 llm_call
+        # 的循环外层——那样 3 次尝试只会记 1 个请求，配额被系统性低估 3 倍。
+        #
+        # 回放模式已在上面提前返回，因此不会走到这里：回放不是真实请求，不该消耗额度。
+        reserved = 0.0
+        if self._quota is not None:
+            reserved = await self._quota.acquire(payload)
+
         try:
             if self._limiter is not None:
                 async with self._limiter:
@@ -389,6 +402,11 @@ class LlmClient:
             attempt.provider_request_id or body.get("id")
         )
         attempt.usage = Usage.from_raw(body.get("usage"))
+        # 按真实用量校正 TPM 预扣。放在解析出 usage 之后、返回之前：校正本身是记账，
+        # 不该影响这次尝试的成败判定。失败路径（非 2xx、坏响应）不校正——「未知」
+        # 不能当成 0 退还，那会凭空放大可用额度。
+        if self._quota is not None and reserved:
+            await self._quota.settle(reserved, attempt.usage)
         choice = (body.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         attempt.response_text = message.get("content")

@@ -5,6 +5,9 @@
 1. **并发上限只写在配置里。** ``MAX_ACTIVE_RUNS`` 在 v0.5.1 之前**没有任何读取方**——
    声明了、文档写了，而运行时完全不生效。这里用「上限为 1 时第二次提交必须被拒」来证明它
    真的接上了，而不是只断言配置项存在。
+   **V0.5.2 起该闸门只作用于进程内路径**（``Service.submit_local``）：队列模型下
+   ``Service.submit`` 只入队、执行由 worker 负责，API 侧改为按队列深度拒绝（差异 W23）。
+   因此下面这些用例走 ``submit_local``。
 2. **被拒的提交留下半条记录。** 若先落库再判名额，拒绝就会在库里留下一个永远不跑的运行——
    列表上看得见、状态永远 queued。因此要断言被拒后**记录数不变**。
 3. **手机号校验在执行期才报错。** 校验若只靠 ``start`` 节点，少传或传错会变成一个**失败的运行**
@@ -120,8 +123,12 @@ async def test_submit_is_refused_when_slots_are_exhausted(tmp_path):
         service.run_slots.acquire()
         assert service.run_slots.active == 1
 
+        # 用 submit_local 而非 submit：V0.5.2 起后者只入队、不过名额闸门，
+        # 名额限制作用于**进程内执行路径**（差异 W23）。
         with pytest.raises(RunSlotUnavailable):
-            await service.submit(ENTRY_WORKFLOW_ID, {"phone_number": "13800000001"})
+            await service.submit_local(
+                ENTRY_WORKFLOW_ID, {"phone_number": "13800000001"}
+            )
 
         assert _count_runs_in_db(tmp_path) == 0, (
             "被拒的提交留下了运行记录——列表上会出现一个永远不跑的运行"
@@ -141,7 +148,7 @@ async def test_releasing_a_slot_lets_the_next_submit_through(tmp_path):
         service.run_slots.release()
         assert service.run_slots.active == 0
 
-        run_id = await service.submit(
+        run_id = await service.submit_local(
             ENTRY_WORKFLOW_ID, {"phone_number": "13800000001"}
         )
         assert run_id

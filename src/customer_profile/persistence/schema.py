@@ -46,6 +46,10 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         finished_at_ms    INTEGER,
         duration_ms       INTEGER,
         is_replay         INTEGER NOT NULL DEFAULT 0,
+        queued_at_ms      INTEGER,
+        claimed_at_ms     INTEGER,
+        claimed_by        TEXT,
+        lease_expires_at_ms INTEGER,
         created_at_ms     INTEGER NOT NULL
     )
     """,
@@ -116,6 +120,10 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS idx_runs_status ON workflow_runs (status)
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_runs_queue
+        ON workflow_runs (status, created_at_ms) WHERE parent_run_id IS NULL
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_nodes_run ON node_executions (run_id)
     """,
     """
@@ -146,6 +154,19 @@ class RunRecordRow:
     is_replay: bool = False
     created_at_ms: int = 0
 
+    # ---- 队列（V0.5.2）。持久化队列复用本表，故这四个字段与运行记录同表。
+    queued_at_ms: int | None = None
+    """入队时刻。与 ``created_at_ms`` 分开：一次运行可能被重新入队。"""
+
+    claimed_at_ms: int | None = None
+    """被 worker 领取的时刻。"""
+
+    claimed_by: str | None = None
+    """领取它的 worker 标识（``主机名:pid``），用于区分「谁在跑」。"""
+
+    lease_expires_at_ms: int | None = None
+    """租约到期时刻。worker 崩溃后过期即可被重新领取——这是「重启不丢任务」的实现点。"""
+
     @property
     def is_child(self) -> bool:
         return self.parent_run_id is not None
@@ -168,6 +189,10 @@ class RunRecordRow:
             "finished_at_ms": self.finished_at_ms,
             "duration_ms": self.duration_ms,
             "is_replay": self.is_replay,
+            "queued_at_ms": self.queued_at_ms,
+            "claimed_at_ms": self.claimed_at_ms,
+            "claimed_by": self.claimed_by,
+            "lease_expires_at_ms": self.lease_expires_at_ms,
             "created_at_ms": self.created_at_ms,
         }
 

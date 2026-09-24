@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from .definitions import NodeDef, RunStatus, WorkflowDef
 from .layout import layout
-from .runner import RunSlotUnavailable, Service, build_service
+from .runner import QueueFull, RunSlotUnavailable, Service, build_service
 from .settings import get_settings
 
 
@@ -143,7 +143,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
 
     app = FastAPI(
         title="Customer Profile",
-        version="0.5.1",
+        version="0.5.4",
         description=description,
         lifespan=lifespan,
     )
@@ -208,14 +208,29 @@ def create_app(service_factory: Any = None) -> FastAPI:
         service = get_service()
         settings = service.settings
         slots = service.run_slots
+        # 队列快照取自库，不是内存：worker 可能在另一个进程里，本进程无从知道它领走了什么。
+        queue = (
+            await service.store.queue_snapshot() if service.store is not None else None
+        )
+        quota = service.quota.snapshot() if service.quota is not None else {}
         return {
             "replay_mode": settings.replay_mode,
             "writeback_enabled": settings.writeback_enabled,
             "llm_model": settings.llm_model,
+            # 配额：只报开关与剩余额度，不含任何凭据。
+            "llm_rpm_limit": settings.llm_rpm_limit,
+            "llm_tpm_limit": settings.llm_tpm_limit,
+            "worker_replicas": settings.worker_replicas,
+            "quota": quota,
             "max_active_runs": settings.max_active_runs,
+            "max_queued_runs": settings.max_queued_runs,
             "max_concurrent_requests": settings.max_concurrent_requests,
             "active_runs": slots.active if slots is not None else None,
             "available_run_slots": slots.available if slots is not None else None,
+            "queued_runs": queue["queued"] if queue else 0,
+            "running_runs": queue["running"] if queue else 0,
+            "interrupted_runs": queue["interrupted"] if queue else 0,
+            "inline_worker": settings.inline_worker,
             "serve_ui": settings.serve_ui,
         }
 
@@ -289,19 +304,26 @@ def create_app(service_factory: Any = None) -> FastAPI:
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except QueueFull as exc:
+            # 队列满时明确拒绝（429），不排队等待。带 Retry-After 让调用方知道该等多久。
+            # 触发条件自 V0.5.2 起是**队列深度**而非运行名额（差异 W23）——执行已挪到
+            # worker，API 侧无从同步判断「运行名额」。
+            raise HTTPException(
+                status_code=429,
+                detail=str(exc),
+                headers={"Retry-After": "30"},
+            ) from exc
         except RunSlotUnavailable as exc:
-            # 并发满时明确拒绝（429），不排队：排队会让调用方拿到 run_id 却迟迟不开始，
-            # 看上去像提交失败。带上上限与当前在飞数，便于调用方判断该等还是该扩。
+            # 进程内执行路径（INLINE_WORKER=false 且走本地调度）仍可能报这个。
             raise HTTPException(
                 status_code=429,
                 detail=str(exc),
                 headers={"Retry-After": "30"},
             ) from exc
 
-        # 等运行记录真正落库再返回。「先落库再返回 run_id」这条要求不能只靠「任务已
-        # 创建」来满足——调用方拿到 ID 立刻查询也必须查得到，否则契约不成立。
-        if service.store is not None:
-            await service.wait_until_recorded(run_id)
+        # 入队已同步落库（Service.submit 内是 await store.enqueue_run），因此这里不必
+        # 再等——「先落库再返回 run_id」由入队本身满足。留一次确认只为防实现退化：
+        # 若哪天入队改成异步，这一步会立刻失败而不是静默丢掉契约。
         return SubmitResponse(run_id=run_id, workflow_id=payload.workflow_id)
 
     @app.get("/runs", response_model=list[RunSummary], tags=["runs"])
@@ -471,6 +493,32 @@ def create_app(service_factory: Any = None) -> FastAPI:
                 status_code=409, detail=f"运行 {run_id} 不在进行中，无法取消"
             )
         return {"run_id": run_id, "cancelled": True}
+
+    @app.post("/runs/{run_id}/abandon", tags=["runs"])
+    async def abandon_run(run_id: str) -> dict[str, Any]:
+        """把一条 ``interrupted``（进程中断遗留）的运行显式终结为 ``cancelled``。
+
+        为什么需要这个出口：worker 崩溃或停机时，正在跑的运行会被标成 ``interrupted``，
+        并**保留已完成结果、不做自动续跑**——这是对的（进程中断不能证明外部副作用未
+        发生，见 `Dify迁移任务说明.md` §7.3）。但「交人工处理」若没有任何出口，这些
+        运行会永远留在列表里，看不出是「待处理」还是「已处理」。本端点给出那个出口。
+
+        **只接受 ``interrupted``**：其它状态一律 409。特别是不能拿它去停一条正在跑的
+        运行——那是 ``POST /runs/{run_id}/cancel`` 的职责。两者语义不同：一个是「结掉
+        已经停掉的」，一个是「停止正在进行的」。
+        """
+        service = get_service()
+        if service.store is None:
+            raise HTTPException(status_code=503, detail="未启用留痕存储")
+        if await service.store.get_run(run_id) is None:
+            raise HTTPException(status_code=404, detail=f"运行 {run_id} 不存在")
+        abandoned = await service.store.abandon_run(run_id)
+        if not abandoned:
+            raise HTTPException(
+                status_code=409,
+                detail=f"运行 {run_id} 不是 interrupted 状态，无法人工终结",
+            )
+        return {"run_id": run_id, "abandoned": True}
 
     # 静态挂载最后加：放在所有 API 路由注册之后，避免 ``/`` 的前缀匹配盖住 API。
     if service_factory is None:
