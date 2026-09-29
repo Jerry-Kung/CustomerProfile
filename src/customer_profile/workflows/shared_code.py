@@ -117,55 +117,6 @@ def extract_raw_payload(records: str, data_source: str) -> dict:
     return {"result": ""}
 
 
-def extract_related_enterprise(records: str) -> dict:
-    """提取关联企业信息（channel 固定为 ``RelatedEnterpriseInfo``）。
-
-    与 DSL 节点 ``1789984908249`` 的 ``main`` 逐字符一致。
-    """
-    import json
-    data_source = "RelatedEnterpriseInfo"
-
-    # 兜底：输入为空时直接返回空字符串
-    if records is None:
-        return {"result": ""}
-
-    records = records.strip()
-    if not records:
-        return {"result": ""}
-
-    # 解析 JSON 字符串
-    try:
-        data = json.loads(records)
-    except Exception:
-        return {"result": ""}
-
-    # 顶层必须是数组
-    if not isinstance(data, list):
-        return {"result": ""}
-
-    # 遍历数组元素，查找 channel == data_source
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-
-        if item.get("channel") == data_source:
-            raw_payload = item.get("raw_payload")
-
-            # 若找到目标元素，但 media_urls 为空/null，则返回空字符串
-            if raw_payload is None:
-                return {"result": ""}
-
-            # 若 media_urls 本身就是字符串，直接返回
-            if isinstance(raw_payload, str):
-                return {"result": raw_payload}
-
-            # 若 media_urls 是数组/对象，转成 JSON 字符串返回
-            return {"result": json.dumps(raw_payload, ensure_ascii=False)}
-
-    # 没找到目标元素
-    return {"result": ""}
-
-
 def extract_jiguang_tags(records: str, data_source: str) -> dict:
     """提取极光数据的 ``tags``。
 

@@ -27,6 +27,12 @@ python scripts/inventory/extract_ledger.py --dump-prompts
 
 标准输出刻意只用 ASCII，以适配 GBK 控制台；写入的文件一律 UTF-8。
 
+**`--dump-prompts` 会同时刷新包内资源与评审副本，并清理目录里对不上的旧文件。** 它复用
+`scripts/export_templates.py` 的命名与 `TEMPLATE_OVERRIDES`（已确认的正文修订，见
+`docs/specs/ledger/differences.md` W49），因此不会把修订改回 DSL 原样。
+早先的实现自行拼接文件名（显示名转写 + 哈希 + 节点类型），与包内命名不同，跑一次会在
+目录里留下一批对不上的文件——2026-09-28 实测到 81 个，已修正。
+
 ## 产出
 
 | 文件 | 内容 | 是否入库 |

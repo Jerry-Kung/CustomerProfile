@@ -41,6 +41,7 @@ SK_RE = re.compile(r"\bsk-[A-Za-z0-9]{16,}")
 # counts are recomputed from the DSL and cross-checked in cross_check().
 TOOL_MAP = {
     "evidence_subagent_production": "（新）SubAgent - 证据线索汇总（生产环境）",
+    "phone_company_analysis_new": "（新）SubAgent - 手机号&企业信息分析",
     "profile_features_analysis": "（新）SubAgent - 人设特征判断",
     "customer_profile_production": "（新）SubAgent - 画像内容生成&回写（生产环境）（新）",
     "gemini_retry_2_times": "Gemini（异常输出重试版）",
@@ -61,20 +62,24 @@ TOOL_MAP = {
 }
 
 # Counts asserted by docs/specs/V0迁移规划.md, checked -- not trusted.
+#
+# 2026-09-28: 业务方修订了三份 DSL（新增「手机号&企业信息分析」子流程、证据线索汇总的四节点
+# 迁入其中、极光数据 data_source 改名），以下是**新版 DSL 的实测值**。旧值（19/293/324 等）
+# 属 V0.1 基线，作为历史记录保留在 docs/specs/V0迁移规划.md 与 ledger/differences.md §3.1。
 ASSERTED = {
-    "workflows": 19,
-    "nodes": 293,
-    "edges": 324,
-    "tool_nodes": 38,
+    "workflows": 20,
+    "nodes": 298,
+    "edges": 328,
+    "tool_nodes": 39,
     "vision_nodes": 12,
-    "code": 49,
+    "code": 50,
     "template-transform": 46,
-    "tool": 38,
+    "tool": 39,
     "llm": 35,
     "if-else": 26,
-    "variable-aggregator": 23,
-    "end": 22,
-    "start": 19,
+    "variable-aggregator": 24,
+    "end": 23,
+    "start": 20,
     "http-request": 19,
     "iteration": 8,
     "iteration-start": 8,
@@ -534,25 +539,39 @@ def cross_check(result: dict) -> list[str]:
 
 
 def extract_prompts() -> int:
-    """Write verbatim prompt bodies to the committed docs/specs/prompts/ tree."""
+    """Write the committed review copies under docs/specs/prompts/.
+
+    Delegates naming, body extraction and override application to
+    ``scripts/export_templates.py``, so the review copies are byte-identical to
+    the package resources by construction. An earlier implementation built its
+    own filenames (sanitised display name + hash + node type) and never applied
+    TEMPLATE_OVERRIDES: one run left 81 name-mismatched files behind and could
+    revert a confirmed prompt edit (W49) back to the DSL text.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    import export_templates as et
+
     PROMPT_DUMP.mkdir(parents=True, exist_ok=True)
-    written = 0
-    for path in sorted(DSL_DIR.glob("*.yml")):
-        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-        safe = re.sub(r"[^0-9A-Za-z_.-]", "_", path.stem)[:60]
-        # Distinct workflows share long identical prefixes once sanitised, so
-        # the truncation alone collides. Suffix a hash of the full stem.
-        safe = "%s_%s" % (safe, hashlib.sha256(path.stem.encode("utf-8")).hexdigest()[:8])
-        for n in doc["workflow"]["graph"]["nodes"]:
-            body = prompt_text(n["data"])
-            if body is None:
-                continue
-            dest = PROMPT_DUMP / (
-                "%s__%s__%s.txt" % (safe, n["id"], n["data"].get("type"))
-            )
-            dest.write_text(body, encoding="utf-8")
-            written += 1
-    return written
+    expected: dict[str, str] = {}
+    for display_name, graph in et.load_workflows():
+        slug = et.slug_for(display_name)
+        for node_id, body in et.template_texts(graph):
+            name = "%s__%s.txt" % (slug, node_id)
+            expected[name] = et.apply_overrides(name, body)
+
+    for name, body in expected.items():
+        # newline="" keeps the original terminators: verbatim means verbatim.
+        with (PROMPT_DUMP / name).open("w", encoding="utf-8", newline="") as handle:
+            handle.write(body)
+
+    stale = [
+        f for f in PROMPT_DUMP.glob("*.txt")
+        if f.name not in expected
+    ]
+    for f in stale:
+        f.unlink()
+
+    return len(expected)
 
 
 def main() -> int:

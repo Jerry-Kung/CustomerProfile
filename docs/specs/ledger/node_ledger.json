@@ -5010,6 +5010,369 @@
       ]
     },
     {
+      "file": "（新）SubAgent - 手机号&企业信息分析.yml",
+      "display_name": "（新）SubAgent - 手机号&企业信息分析",
+      "mode": "workflow",
+      "dsl_version": "0.6.0",
+      "size_bytes": 15973,
+      "sha256": "4cca01149f9862e806c63e4b8d547ee55cfb60d3c0e11d445f63785d3c01efd4",
+      "counts": {
+        "nodes": 8,
+        "edges": 8,
+        "by_type": {
+          "code": 3,
+          "end": 1,
+          "llm": 2,
+          "start": 1,
+          "variable-aggregator": 1
+        }
+      },
+      "nodes": [
+        {
+          "node_id": "1773748103758",
+          "title": "用户输入",
+          "type": "start",
+          "direct_predecessors": [],
+          "input_bindings": {},
+          "binding_sources": {},
+          "literal_bindings": {
+            "phone_number": null,
+            "llm_model": null,
+            "customer_data": null,
+            "data_source": null
+          },
+          "output_fields": [],
+          "vision_enabled": false,
+          "in_iteration": false,
+          "iteration_id": null,
+          "error_strategy": null,
+          "tool_name": null,
+          "original_coords": {
+            "x": 80,
+            "y": 282
+          }
+        },
+        {
+          "node_id": "1773748343861",
+          "title": "输出",
+          "type": "end",
+          "direct_predecessors": [
+            "1774946602973"
+          ],
+          "input_bindings": {},
+          "binding_sources": {},
+          "literal_bindings": {},
+          "output_fields": [
+            "company_analysis_result",
+            "phonenumber_analysis_result"
+          ],
+          "vision_enabled": false,
+          "in_iteration": false,
+          "iteration_id": null,
+          "error_strategy": null,
+          "tool_name": null,
+          "original_coords": {
+            "x": 1958.890686420169,
+            "y": 315.3318101414506
+          }
+        },
+        {
+          "node_id": "1774941932987",
+          "title": "结果解析",
+          "type": "code",
+          "direct_predecessors": [
+            "1776328382353"
+          ],
+          "input_bindings": {
+            "@code": [],
+            "body": [
+              [
+                "1776328382353",
+                "result"
+              ]
+            ]
+          },
+          "binding_sources": {
+            "body": "variables[]",
+            "@code": "code"
+          },
+          "literal_bindings": {},
+          "output_fields": [
+            "affiliated_company",
+            "operator_location"
+          ],
+          "vision_enabled": false,
+          "in_iteration": false,
+          "iteration_id": null,
+          "error_strategy": null,
+          "tool_name": null,
+          "original_coords": {
+            "x": 388.0628662660416,
+            "y": 376.8103386486697
+          }
+        },
+        {
+          "node_id": "1774945047132",
+          "title": "变量聚合器",
+          "type": "variable-aggregator",
+          "direct_predecessors": [
+            "1789984359173",
+            "1789984439065"
+          ],
+          "input_bindings": {
+            "@group:company_result": [
+              [
+                "1789984439065",
+                "text"
+              ]
+            ],
+            "@group:phonenumber_result": [
+              [
+                "1789984359173",
+                "text"
+              ]
+            ]
+          },
+          "binding_sources": {
+            "@group:company_result": "advanced_settings.groups[]",
+            "@group:phonenumber_result": "advanced_settings.groups[]"
+          },
+          "literal_bindings": {},
+          "output_fields": [],
+          "vision_enabled": false,
+          "in_iteration": false,
+          "iteration_id": null,
+          "error_strategy": null,
+          "tool_name": null,
+          "original_coords": {
+            "x": 1225.3597944473502,
+            "y": 268.23517758657215
+          }
+        },
+        {
+          "node_id": "1774946602973",
+          "title": "聚合结果拆壳",
+          "type": "code",
+          "direct_predecessors": [
+            "1774945047132"
+          ],
+          "input_bindings": {
+            "@code": [],
+            "company_result_object": [
+              [
+                "1774945047132",
+                "company_result"
+              ]
+            ],
+            "phonenumber_result_object": [
+              [
+                "1774945047132",
+                "phonenumber_result"
+              ]
+            ]
+          },
+          "binding_sources": {
+            "company_result_object": "variables[]",
+            "phonenumber_result_object": "variables[]",
+            "@code": "code"
+          },
+          "literal_bindings": {},
+          "output_fields": [
+            "company_result",
+            "phonenumber_result"
+          ],
+          "vision_enabled": false,
+          "in_iteration": false,
+          "iteration_id": null,
+          "error_strategy": null,
+          "tool_name": null,
+          "original_coords": {
+            "x": 1664.0471753913384,
+            "y": 315.3318101414506
+          }
+        },
+        {
+          "node_id": "1776328382353",
+          "title": "代码执行 3",
+          "type": "code",
+          "direct_predecessors": [
+            "1773748103758"
+          ],
+          "input_bindings": {
+            "@code": [],
+            "data_source": [
+              [
+                "1773748103758",
+                "data_source"
+              ]
+            ],
+            "records": [
+              [
+                "1773748103758",
+                "customer_data"
+              ]
+            ]
+          },
+          "binding_sources": {
+            "records": "variables[]",
+            "data_source": "variables[]",
+            "@code": "code"
+          },
+          "literal_bindings": {},
+          "output_fields": [
+            "result"
+          ],
+          "vision_enabled": false,
+          "in_iteration": false,
+          "iteration_id": null,
+          "error_strategy": null,
+          "tool_name": null,
+          "original_coords": {
+            "x": 388.0628662660416,
+            "y": 303
+          }
+        },
+        {
+          "node_id": "1789984359173",
+          "title": "手机号特征分析",
+          "type": "llm",
+          "direct_predecessors": [
+            "1774941932987"
+          ],
+          "input_bindings": {
+            "@prompt_template": [
+              [
+                "1773748103758",
+                "phone_number"
+              ],
+              [
+                "1774941932987",
+                "operator_location"
+              ]
+            ]
+          },
+          "binding_sources": {
+            "@prompt_template": "prompt_template"
+          },
+          "literal_bindings": {},
+          "output_fields": [],
+          "vision_enabled": false,
+          "in_iteration": false,
+          "iteration_id": null,
+          "error_strategy": null,
+          "tool_name": null,
+          "original_coords": {
+            "x": 777.5384092504577,
+            "y": 198.37835853689847
+          }
+        },
+        {
+          "node_id": "1789984439065",
+          "title": "企业信息分析",
+          "type": "llm",
+          "direct_predecessors": [
+            "1774941932987"
+          ],
+          "input_bindings": {
+            "@prompt_template": [
+              [
+                "1774941932987",
+                "affiliated_company"
+              ]
+            ]
+          },
+          "binding_sources": {
+            "@prompt_template": "prompt_template"
+          },
+          "literal_bindings": {},
+          "output_fields": [],
+          "vision_enabled": false,
+          "in_iteration": false,
+          "iteration_id": null,
+          "error_strategy": null,
+          "tool_name": null,
+          "original_coords": {
+            "x": 777.5384092504577,
+            "y": 315.3318101414506
+          }
+        }
+      ],
+      "edges": [
+        {
+          "source": "1774945047132",
+          "target": "1774946602973",
+          "source_handle": "source",
+          "target_handle": "target",
+          "is_in_iteration": false,
+          "is_in_loop": false
+        },
+        {
+          "source": "1774946602973",
+          "target": "1773748343861",
+          "source_handle": "source",
+          "target_handle": "target",
+          "is_in_iteration": false,
+          "is_in_loop": false
+        },
+        {
+          "source": "1773748103758",
+          "target": "1776328382353",
+          "source_handle": "source",
+          "target_handle": "target",
+          "is_in_iteration": false,
+          "is_in_loop": false
+        },
+        {
+          "source": "1776328382353",
+          "target": "1774941932987",
+          "source_handle": "source",
+          "target_handle": "target",
+          "is_in_iteration": false,
+          "is_in_loop": false
+        },
+        {
+          "source": "1774941932987",
+          "target": "1789984359173",
+          "source_handle": "source",
+          "target_handle": "target",
+          "is_in_iteration": false,
+          "is_in_loop": false
+        },
+        {
+          "source": "1774941932987",
+          "target": "1789984439065",
+          "source_handle": "source",
+          "target_handle": "target",
+          "is_in_iteration": false,
+          "is_in_loop": false
+        },
+        {
+          "source": "1789984439065",
+          "target": "1774945047132",
+          "source_handle": "source",
+          "target_handle": "target",
+          "is_in_iteration": false,
+          "is_in_loop": false
+        },
+        {
+          "source": "1789984359173",
+          "target": "1774945047132",
+          "source_handle": "source",
+          "target_handle": "target",
+          "is_in_iteration": false,
+          "is_in_loop": false
+        }
+      ],
+      "sequence_only_edges": [
+        {
+          "source": "1774946602973",
+          "source_type": "code",
+          "target": "1773748343861",
+          "target_type": "end"
+        }
+      ]
+    },
+    {
       "file": "（新）SubAgent - 抖音个人页信息提取.yml",
       "display_name": "（新）SubAgent - 抖音个人页信息提取",
       "mode": "workflow",
@@ -7291,8 +7654,8 @@
       "display_name": "（新）SubAgent - 极光数据（生产环境）",
       "mode": "workflow",
       "dsl_version": "0.6.0",
-      "size_bytes": 9973,
-      "sha256": "f94fe0dccea032ea1e8667c4a2d523573e48edf6758fd04031f2744336dd8d7a",
+      "size_bytes": 9986,
+      "sha256": "644dbaef5ace8e38a5d3d8579adde4c26dbcd21d996e98b4e4a330ccc15d3b3e",
       "counts": {
         "nodes": 7,
         "edges": 7,
@@ -10862,19 +11225,18 @@
       "display_name": "（新）SubAgent - 证据线索汇总（生产环境）",
       "mode": "workflow",
       "dsl_version": "0.6.0",
-      "size_bytes": 86761,
-      "sha256": "b3af69c67d8db9311b879438b5c10fcd0be646e594e9b77e6f5e1236d9165833",
+      "size_bytes": 82414,
+      "sha256": "c00d22afc2f74d7bd0d5b0ce38da0b890b1c42c287338ba192615667efa5c5c3",
       "counts": {
-        "nodes": 24,
-        "edges": 39,
+        "nodes": 21,
+        "edges": 35,
         "by_type": {
-          "code": 3,
+          "code": 1,
           "end": 1,
           "http-request": 1,
-          "llm": 2,
           "start": 1,
           "template-transform": 2,
-          "tool": 14
+          "tool": 15
         }
       },
       "nodes": [
@@ -11011,11 +11373,16 @@
             "1778231153601",
             "1778809368635",
             "1779089586906",
-            "1789985109360",
-            "1789985119700"
+            "1789983285382"
           ],
           "input_bindings": {
             "@template": [],
+            "ali_data": [
+              [
+                "1777287016409",
+                "result"
+              ]
+            ],
             "alipay_homepage_result": [
               [
                 "1776325681312",
@@ -11030,8 +11397,8 @@
             ],
             "company_result": [
               [
-                "1789985119700",
-                "text"
+                "1789983285382",
+                "company_analysis_result"
               ]
             ],
             "douyin_homepage_result": [
@@ -11072,8 +11439,8 @@
             ],
             "phone_result": [
               [
-                "1789985109360",
-                "text"
+                "1789983285382",
+                "phonenumber_analysis_result"
               ]
             ],
             "test_drive_result": [
@@ -11116,6 +11483,7 @@
             "it_system_result": "variables[]",
             "chat_history_result": "variables[]",
             "feedback_result": "variables[]",
+            "ali_data": "variables[]",
             "@template": "template"
           },
           "literal_bindings": {},
@@ -11413,8 +11781,8 @@
           "error_strategy": null,
           "tool_name": "Douyin_homepage_info_extract",
           "original_coords": {
-            "x": 781.600877846759,
-            "y": 791.2488666738585
+            "x": 787.0001272470083,
+            "y": 753.454120872113
           }
         },
         {
@@ -11472,7 +11840,9 @@
             "customer_data": "tool_parameters.customer_data",
             "phone_number": "tool_parameters.phone_number"
           },
-          "literal_bindings": {},
+          "literal_bindings": {
+            "data_source": "DatametInterestPoints"
+          },
           "output_fields": [],
           "vision_enabled": false,
           "in_iteration": false,
@@ -11712,136 +12082,43 @@
           }
         },
         {
-          "node_id": "1789984908249",
-          "title": "代码执行 2",
-          "type": "code",
+          "node_id": "1789983285382",
+          "title": "（新）SubAgent - 手机号&企业信息分析",
+          "type": "tool",
           "direct_predecessors": [
             "1775638961126"
           ],
           "input_bindings": {
-            "@code": [],
-            "records": [
+            "customer_data": [
               [
                 "1775638961126",
                 "body"
               ]
-            ]
-          },
-          "binding_sources": {
-            "records": "variables[]",
-            "@code": "code"
-          },
-          "literal_bindings": {},
-          "output_fields": [
-            "result"
-          ],
-          "vision_enabled": false,
-          "in_iteration": false,
-          "iteration_id": null,
-          "error_strategy": null,
-          "tool_name": null,
-          "original_coords": {
-            "x": 274.99042164509524,
-            "y": 593.4154101160516
-          }
-        },
-        {
-          "node_id": "1789985056439",
-          "title": "代码执行 3",
-          "type": "code",
-          "direct_predecessors": [
-            "1789984908249"
-          ],
-          "input_bindings": {
-            "@code": [],
-            "body": [
-              [
-                "1789984908249",
-                "result"
-              ]
-            ]
-          },
-          "binding_sources": {
-            "body": "variables[]",
-            "@code": "code"
-          },
-          "literal_bindings": {},
-          "output_fields": [
-            "affiliated_company",
-            "operator_location"
-          ],
-          "vision_enabled": false,
-          "in_iteration": false,
-          "iteration_id": null,
-          "error_strategy": null,
-          "tool_name": null,
-          "original_coords": {
-            "x": 274.99042164509524,
-            "y": 650.8997678533651
-          }
-        },
-        {
-          "node_id": "1789985109360",
-          "title": "手机号特征分析",
-          "type": "llm",
-          "direct_predecessors": [
-            "1789985056439"
-          ],
-          "input_bindings": {
-            "@prompt_template": [
+            ],
+            "phone_number": [
               [
                 "1775638842380",
                 "phone_number"
-              ],
-              [
-                "1789985056439",
-                "operator_location"
               ]
             ]
           },
           "binding_sources": {
-            "@prompt_template": "prompt_template"
+            "customer_data": "tool_parameters.customer_data",
+            "phone_number": "tool_parameters.phone_number"
           },
-          "literal_bindings": {},
+          "literal_bindings": {
+            "data_source": "RelatedEnterpriseInfo",
+            "llm_model": ""
+          },
           "output_fields": [],
           "vision_enabled": false,
           "in_iteration": false,
           "iteration_id": null,
           "error_strategy": null,
-          "tool_name": null,
+          "tool_name": "phone_company_analysis_new",
           "original_coords": {
-            "x": 363.97005176120456,
-            "y": 721.0900100566067
-          }
-        },
-        {
-          "node_id": "1789985119700",
-          "title": "企业信息分析",
-          "type": "llm",
-          "direct_predecessors": [
-            "1789985056439"
-          ],
-          "input_bindings": {
-            "@prompt_template": [
-              [
-                "1789985056439",
-                "affiliated_company"
-              ]
-            ]
-          },
-          "binding_sources": {
-            "@prompt_template": "prompt_template"
-          },
-          "literal_bindings": {},
-          "output_fields": [],
-          "vision_enabled": false,
-          "in_iteration": false,
-          "iteration_id": null,
-          "error_strategy": null,
-          "tool_name": null,
-          "original_coords": {
-            "x": 371.5290009215537,
-            "y": 816.1167995009953
+            "x": 781.600877846759,
+            "y": 821.0682661940581
           }
         }
       ],
@@ -12112,46 +12389,14 @@
         },
         {
           "source": "1775638961126",
-          "target": "1789984908249",
+          "target": "1789983285382",
           "source_handle": "source",
           "target_handle": "target",
           "is_in_iteration": false,
           "is_in_loop": false
         },
         {
-          "source": "1789984908249",
-          "target": "1789985056439",
-          "source_handle": "source",
-          "target_handle": "target",
-          "is_in_iteration": false,
-          "is_in_loop": false
-        },
-        {
-          "source": "1789985056439",
-          "target": "1789985109360",
-          "source_handle": "source",
-          "target_handle": "target",
-          "is_in_iteration": false,
-          "is_in_loop": false
-        },
-        {
-          "source": "1789985056439",
-          "target": "1789985119700",
-          "source_handle": "source",
-          "target_handle": "target",
-          "is_in_iteration": false,
-          "is_in_loop": false
-        },
-        {
-          "source": "1789985109360",
-          "target": "1776069633580",
-          "source_handle": "source",
-          "target_handle": "target",
-          "is_in_iteration": false,
-          "is_in_loop": false
-        },
-        {
-          "source": "1789985119700",
+          "source": "1789983285382",
           "target": "1776069633580",
           "source_handle": "source",
           "target_handle": "target",
@@ -12160,12 +12405,6 @@
         }
       ],
       "sequence_only_edges": [
-        {
-          "source": "1777287016409",
-          "source_type": "tool",
-          "target": "1776069633580",
-          "target_type": "template-transform"
-        },
         {
           "source": "1778232215760",
           "source_type": "code",
@@ -13396,24 +13635,24 @@
     }
   ],
   "totals": {
-    "workflows": 19,
-    "nodes": 293,
-    "edges": 324,
+    "workflows": 20,
+    "nodes": 298,
+    "edges": 328,
     "by_type": {
-      "code": 49,
-      "end": 22,
+      "code": 50,
+      "end": 23,
       "http-request": 19,
       "if-else": 26,
       "iteration": 8,
       "iteration-start": 8,
       "llm": 35,
-      "start": 19,
+      "start": 20,
       "template-transform": 46,
-      "tool": 38,
-      "variable-aggregator": 23
+      "tool": 39,
+      "variable-aggregator": 24
     },
-    "tool_nodes": 38,
+    "tool_nodes": 39,
     "vision_nodes": 12,
-    "grouped_aggregators": 1
+    "grouped_aggregators": 2
   }
 }

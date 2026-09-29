@@ -80,6 +80,12 @@
       "static_references": 1
     },
     {
+      "tool_name": "phone_company_analysis_new",
+      "dsl_file": "（新）SubAgent - 手机号&企业信息分析",
+      "mapped": true,
+      "static_references": 1
+    },
+    {
       "tool_name": "profile_features_analysis",
       "dsl_file": "（新）SubAgent - 人设特征判断",
       "mapped": true,

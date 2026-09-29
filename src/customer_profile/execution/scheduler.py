@@ -139,9 +139,23 @@ class Scheduler:
         self._active_slot = asyncio.Semaphore(max_active_nodes)
         self._run_tasks: dict[str, asyncio.Task[Any]] = {}
         self._contexts: dict[str, RunContext] = {}
-        self._current_record: "_RunRecord | None" = None
+        self._records: dict[str, "_RunRecord"] = {}
+        """运行中的记录句柄，**按 run_id 索引**。
+
+        单槽（原先的 ``_current_record``）在本进程内不成立，两个原因：
+        - **嵌套**：子运行由 ``SubWorkflowRunner`` 另起一个 ``Scheduler``，父子各自的
+          记录句柄若共用一槽，后跑的子运行会把父留下的覆盖掉。父图之后再执行
+          iteration 节点，读到的就是别人的（或已清空的）句柄。
+        - **并发**：同一 ``Scheduler`` 上并发跑多个运行时，后启动的覆盖先启动的，循环体
+          的执行记录会被追加到**别的运行**的 ``executions`` 上（不报错，但留痕错位）。
+        """
         # 迭代执行器需要「按节点执行」这个入口，但它的签名里只有 runtime，拿不到调度器。
         # 因此把入口挂到 runtime 上，避免为这一处引入循环导入。
+        #
+        # 挂上去的这个方法**自路由**（见 run_iteration_body_node）：本进程内所有
+        # Scheduler 共用同一个 NodeRuntime，后构造的会把先前挂上去的覆盖掉；谁被挂在上面
+        # 都无所谓，因为它会按 run_id 把调用转给该运行真正的属主。否则「子运行一构造就
+        # 抢走槽位」会让父图的迭代节点调到已结束的子调度器上。
         self.runtime.iteration_node_runner = self.run_iteration_body_node
 
     def context_of(self, run_id: str) -> RunContext | None:
@@ -168,7 +182,8 @@ class Scheduler:
         ctx.bind_workflow(workflow)
         record = _RunRecord(request=request, workflow=workflow, run_id=run_id)
         self._contexts[run_id] = ctx
-        self._current_record = record
+        self._records[run_id] = record
+        self._routes()[run_id] = self
         await self.recorder.run_started(record)
 
         started = self._clock()
@@ -187,8 +202,7 @@ class Scheduler:
                 duration_ms=int((self._clock() - started) * 1000),
             )
             await self.recorder.run_finished(record, outcome)
-            self._contexts.pop(run_id, None)
-            self._current_record = None
+            self._end_run(run_id)
             raise
 
         status, outputs, error = self._summarise(workflow, ctx, executions)
@@ -203,9 +217,20 @@ class Scheduler:
             sub_run_ids=[e.sub_run_id for e in executions if e.sub_run_id],
         )
         await self.recorder.run_finished(record, outcome)
-        self._contexts.pop(run_id, None)
-        self._current_record = None
+        self._end_run(run_id)
         return outcome
+
+    def _end_run(self, run_id: str) -> None:
+        """清掉一次运行的调度状态。取消与正常结束两条路径共用。"""
+        self._contexts.pop(run_id, None)
+        self._records.pop(run_id, None)
+        self._routes().pop(run_id, None)
+
+    def _routes(self) -> dict[str, "Scheduler"]:
+        """run_id → 属主调度器。挂在共享 runtime 上，因此跨嵌套层可见。"""
+        routes = self.runtime.extra.setdefault("iteration_routes", {})
+        assert isinstance(routes, dict)
+        return routes
 
     async def submit(self, request: RunRequest) -> asyncio.Task[RunOutcome]:
         """把运行放进后台任务，立即返回 Task 供上层接 run_id。"""
@@ -269,61 +294,86 @@ class Scheduler:
         running: dict[str, asyncio.Task[NodeExecution]] = {}
         failed_upstream: set[str] = set()
 
-        while ready or running:
-            while ready:
-                node_id = ready.pop(0)
-                node = nodes[node_id]
-                record.execution_started(node)
-                task = asyncio.create_task(
-                    self._execute_node(node, ctx, record, is_child=is_child),
-                    name=f"node:{node_id}",
-                )
-                running[node_id] = task
-
-            if not running:
-                break
-
-            done, _ = await asyncio.wait(
-                running.values(), return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in done:
-                node_id = task.get_name().split(":", 1)[1]
-                running.pop(node_id, None)
-                execution = task.result()
-                executions.append(execution)
-
-                if not execution.succeeded:
-                    failed_upstream.add(node_id)
-                    await self._block_descendants(
-                        node_id, successors, remaining, failed_upstream, executions,
-                        workflow, record,
+        try:
+            while ready or running:
+                while ready:
+                    node_id = ready.pop(0)
+                    node = nodes[node_id]
+                    record.execution_started(node)
+                    task = asyncio.create_task(
+                        self._execute_node(node, ctx, record, is_child=is_child),
+                        name=f"node:{node_id}",
                     )
-                    continue
+                    running[node_id] = task
 
-                ctx.record(
-                    NodeResult(
-                        node_id=node_id,
-                        outputs=dict(execution.outputs),
-                        status=execution.status,
-                    )
+                if not running:
+                    break
+
+                done, _ = await asyncio.wait(
+                    running.values(), return_when=asyncio.FIRST_COMPLETED
                 )
-                for nxt in successors.get(node_id, ()):
-                    if nxt in failed_upstream:
-                        continue
-                    required = gates.get(nxt, {}).get(node_id)
-                    if required is not None and required != execution.branch:
-                        # 本节点走了另一支：这条边永远不会来。把该后继整棵子树标为
-                        # SKIPPED，并让它自己的后继也丢掉这条边。
-                        await self._skip_branch(
-                            nxt, node_id, successors, remaining, failed_upstream,
-                            executions, workflow, record,
+                for task in done:
+                    node_id = task.get_name().split(":", 1)[1]
+                    running.pop(node_id, None)
+                    execution = task.result()
+                    executions.append(execution)
+
+                    if not execution.succeeded:
+                        failed_upstream.add(node_id)
+                        await self._block_descendants(
+                            node_id, successors, remaining, failed_upstream, executions,
+                            workflow, record,
                         )
                         continue
-                    remaining[nxt].discard(node_id)
-                    if not remaining[nxt] and nxt not in running:
-                        ready.append(nxt)
 
-        return executions
+                    ctx.record(
+                        NodeResult(
+                            node_id=node_id,
+                            outputs=dict(execution.outputs),
+                            status=execution.status,
+                        )
+                    )
+                    for nxt in successors.get(node_id, ()):
+                        if nxt in failed_upstream:
+                            continue
+                        required = gates.get(nxt, {}).get(node_id)
+                        if required is not None and required != execution.branch:
+                            # 本节点走了另一支：这条边永远不会来。把该后继整棵子树标为
+                            # SKIPPED，并让它自己的后继也丢掉这条边。
+                            await self._skip_branch(
+                                nxt, node_id, successors, remaining, failed_upstream,
+                                executions, workflow, record,
+                            )
+                            continue
+                        remaining[nxt].discard(node_id)
+                        if not remaining[nxt] and nxt not in running:
+                            ready.append(nxt)
+
+            return executions
+        finally:
+            await self._reap_running_nodes(running)
+
+    async def _reap_running_nodes(
+        self, running: Mapping[str, asyncio.Task[NodeExecution]]
+    ) -> None:
+        """回收仍在跑的节点任务。取消与异常退出两条路径共用。
+
+        `asyncio.wait` 被取消时**不会**连带取消它等待的任务。不回收的话，调用方取消
+        一次运行（典型是带单号码超时的批量脚本）、甚至关掉存储之后，这些节点仍会继续
+        跑完：既产生无谓的外部调用（真实计费），也把留痕写进已关闭的连接而**静默**失败
+        （留痕层是 ``fail_soft``）。取消一次运行，它名下的节点就该一起停。
+        """
+        pending = [task for task in running.values() if not task.done()]
+        if not pending:
+            return
+        for task in pending:
+            task.cancel()
+        try:
+            await asyncio.gather(*pending, return_exceptions=True)
+        except asyncio.CancelledError:
+            # 外层正在取消时，这里的 await 可能再收到一次取消信号。吞掉它，让原有的取消
+            # 继续向外传播——否则 finally 里抛出的新异常会顶替掉调用方真正关心的那个。
+            pass
 
     async def _skip_branch(
         self,
@@ -415,10 +465,25 @@ class Scheduler:
         留痕的 ``call_path`` 覆盖为 ``<父路径>/iter:<iteration_id>/<index>``：同一静态
         节点 ID 每轮都会再执行一次，不区分的话 ``node_executions`` 的唯一键
         ``(run_id, node_id, call_path)`` 会把多轮记录压成一条，迭代的逐项留痕就没了。
+
+        **本方法是自路由的。** 它被挂在共享的 ``runtime.iteration_node_runner`` 上，而该
+        槽位会被本进程内后构造的每个 ``Scheduler`` 覆盖（子运行每次都会新建一个调度器）。
+        因此不能假定「我」就是发起这次迭代的那个调度器：按 ``item_ctx.run_id`` 查出属主，
+        再由属主执行。否则父图的迭代节点会调到已经结束的子调度器上——它的记录句柄早已
+        清空，于是抛「必须在一次运行内调用」。
         """
-        record = self._current_record
+        owner = self._routes().get(item_ctx.run_id)
+        if owner is not None and owner is not self:
+            return await owner.run_iteration_body_node(
+                node, item_ctx, iteration_id=iteration_id, index=index
+            )
+
+        record = self._records.get(item_ctx.run_id)
         if record is None:
-            raise RuntimeError("run_iteration_body_node 必须在一次运行内调用")
+            raise RuntimeError(
+                f"run_iteration_body_node 找不到运行 {item_ctx.run_id!r} 的记录句柄；"
+                "该运行可能已经结束，或未经过 Scheduler.run 启动"
+            )
         override = f"{record.call_path}/iter:{iteration_id}/{index}"
         execution = await self._execute_node(
             node, item_ctx, record, is_child=True, call_path_override=override

@@ -137,6 +137,20 @@
       }
     },
     {
+      "file": "（新）SubAgent - 手机号&企业信息分析.yml",
+      "display_name": "（新）SubAgent - 手机号&企业信息分析",
+      "nodes": 8,
+      "edges": 8,
+      "sequence_only_edges": 1,
+      "by_type": {
+        "code": 3,
+        "end": 1,
+        "llm": 2,
+        "start": 1,
+        "variable-aggregator": 1
+      }
+    },
+    {
       "file": "（新）SubAgent - 抖音个人页信息提取.yml",
       "display_name": "（新）SubAgent - 抖音个人页信息提取",
       "nodes": 18,
@@ -272,17 +286,16 @@
     {
       "file": "（新）SubAgent - 证据线索汇总（生产环境）.yml",
       "display_name": "（新）SubAgent - 证据线索汇总（生产环境）",
-      "nodes": 24,
-      "edges": 39,
-      "sequence_only_edges": 3,
+      "nodes": 21,
+      "edges": 35,
+      "sequence_only_edges": 2,
       "by_type": {
-        "code": 3,
+        "code": 1,
         "end": 1,
         "http-request": 1,
-        "llm": 2,
         "start": 1,
         "template-transform": 2,
-        "tool": 14
+        "tool": 15
       }
     },
     {

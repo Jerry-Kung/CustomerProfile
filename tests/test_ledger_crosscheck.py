@@ -62,6 +62,9 @@ DIFFERENCES: dict[str, dict] = {
         "added_edges": [],
         "retyped": {"1779419296890": ("tool", "llm", W2_W3_LLM_CALL)},
     },
+    # 2026-09-28 业务方修订后的 DSL 即台账基线，因此这里**没有**结构差异：
+    # 手机号/企业分析四节点随新版 DSL 迁入独立子流程 phone_company_analysis，
+    # 台账与 Python 定义两边都是新版。唯一保留的差异是 V0.3 的 W2/W3 归一。
     "evidence_subagent": {
         "removed_nodes": {},
         "removed_edges": [],
@@ -248,15 +251,15 @@ MIGRATED = _migrated_definitions()
 
 
 def test_eighteen_business_workflows_are_migrated():
-    """19 个台账工作流里，18 个作为独立图迁移；第 19 个是 Gemini 重试子流程。
+    """20 个台账工作流里，19 个作为独立图迁移；余下 1 个是 Gemini 重试子流程。
 
     ``Gemini（异常输出重试版）`` 按有意差异 W2 不再作为独立图存在——它的 17 处调用点
     与自身的 11 个节点都归一成了 ``llm_call()`` 里的重试逻辑。因此它**没有**、也不该有
-    对应的 workflow 模块。这条断言把「18 = 19 − 1」这个算术钉住：将来若有人把某个工作流
+    对应的 workflow 模块。这条断言把「19 = 20 − 1」这个算术钉住：将来若有人把某个工作流
     漏登记，或者凭空多出一个模块，都会在这里现形。
     """
-    assert len(MIGRATED) == 18, (
-        f"应由 18 个独立图带 source_dsl，实际 {len(MIGRATED)}："
+    assert len(MIGRATED) == 19, (
+        f"应由 19 个独立图带 source_dsl，实际 {len(MIGRATED)}："
         f"{sorted(w.workflow_id for w in MIGRATED)}"
     )
 
@@ -358,11 +361,15 @@ def test_mengshi_binding_sources_match_ledger(ledger):
 
 
 def test_ledger_totals_unchanged(ledger):
-    """台账本身未被改动：19 工作流 / 293 节点 / 324 边。任一变化都要复核 V0.1 结论。
+    """台账现为**新版 DSL**的实测值：20 工作流 / 298 节点 / 328 边。
 
-    这 293 个节点里，49 个是 ``code`` 节点（47 个随工作流迁移 + Gemini 子流程的 2 个，
+    相对 V0.1（19 / 293 / 324），差额全部来自业务方 2026-09-28 修订的三份 DSL：
+    新增 ``手机号&企业信息分析`` 子流程（+1 工作流 / +8 节点 / +8 边）；
+    ``证据线索汇总`` 的四节点收进该子流程（−3 节点 / −4 边，工作流数与其余节点不变）。
+
+    这 298 个节点里 50 个是 ``code`` 节点（48 个随工作流迁移 + Gemini 子流程的 2 个，
     见 ``tests/test_code_verbatim.py``）。
     """
-    assert ledger["totals"]["workflows"] == 19
-    assert ledger["totals"]["nodes"] == 293
-    assert ledger["totals"]["edges"] == 324
+    assert ledger["totals"]["workflows"] == 20
+    assert ledger["totals"]["nodes"] == 298
+    assert ledger["totals"]["edges"] == 328

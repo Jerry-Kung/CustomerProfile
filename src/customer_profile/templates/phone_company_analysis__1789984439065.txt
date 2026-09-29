@@ -6,6 +6,6 @@ You are a helpful AI assistant.
 - 用词简洁、凝练，输出内容不要包含与核心信息无关的冗余内容。
 
 以下是你的输入：
-{{#1789985056439.affiliated_company#}}
+{{#1774941932987.affiliated_company#}}
 
 请给出你的输出：

@@ -118,12 +118,15 @@ class HttpClient:
         replay: Any = None,
         request_limiter: Any = None,
         recorder: Any = None,
+        transcript_cache: Any = None,
     ) -> None:
         self._settings = settings
         self._transport = transport
         self._replay = replay
         self._limiter = request_limiter
         self._recorder = recorder
+        self._transcript_cache = transcript_cache
+        """录音转写归档，透传给 AUC 客户端。``None``（缺省）时不启用复用。"""
         self._clients: dict[str, httpx.AsyncClient] = {}
         self._lock = asyncio.Lock()
         self._auc: Any = None
@@ -170,6 +173,7 @@ class HttpClient:
                 replay=self._replay,
                 request_limiter=self._limiter,
                 recorder=self._recorder,
+                transcript_cache=self._transcript_cache,
             )
         return self._auc
 

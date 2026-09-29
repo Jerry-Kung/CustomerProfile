@@ -30,6 +30,7 @@ from customer_profile.execution.auc import (
     build_submit_body,
     parse_auc_result,
 )
+from customer_profile.execution.transcript_cache import TranscriptCache
 from customer_profile.settings import Settings
 
 from .conftest import make_settings
@@ -269,3 +270,154 @@ async def test_audio_workflow_submit_node_is_routed_to_the_cloud_client(tmp_path
     assert attempt.succeeded, attempt.error
     assert json.loads(attempt.response_text)["x_tt_logid"] == "LOGID-PROBE-123"
     assert any(path.endswith("/submit") for path, _ in transport.requests)
+
+
+# ---------------------------------------------------------------- 转写归档与复用
+
+
+class _RecordingSilentTransport(httpx.AsyncBaseTransport):
+    """静音应答，且**记录收到的请求**。
+
+    ``_SilentTransport`` 本身不记请求，因此无法断言「复用没有出网」——而那正是这里要钉的。
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[str] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request.url.path)
+        if request.url.path.endswith("/submit"):
+            return httpx.Response(200, headers={"X-Api-Status-Code": OK}, json={})
+        return httpx.Response(
+            200, headers={"X-Api-Status-Code": SILENT_AUDIO}, json={}
+        )
+
+
+def _client_with_cache(tmp_path, transport, cache) -> AucClient:
+    settings: Settings = make_settings(
+        tmp_path, auc_api_key="probe-key", auc_resource_id="volc.seedasr.auc"
+    )
+    return AucClient(settings, transport=transport, transcript_cache=cache)
+
+
+async def test_transcript_cache_miss_goes_out_and_archives_the_raw_body(tmp_path):
+    """未命中：照常出网，并把**响应体原文**归档。
+
+    归档的必须是原文而不是裁剪后的六字段数组——复用路径要复用同一个解析函数，原文也
+    是语音识别的原始结论。这里用「原文里有六字段之外的 ``result`` 包装」来断言这一点。
+    """
+    cache = TranscriptCache(tmp_path / "cache")
+    transport = _StubTransport()
+    client = _client_with_cache(tmp_path, transport, cache)
+
+    url = "https://x/miss.mp3"
+    first = await client.request("POST", SUBMIT, json_body={"file_url": url})
+    assert first.replayed is False, "空缓存时不应标记为复用"
+    second = await client.request("POST", QUERY, json_body={})
+    assert second.succeeded, second.error
+
+    assert len(transport.requests) == 2, "未命中必须真实出网（提交 + 查询）"
+    assert cache.stats.writes == 1, "真实识别后应归档一条"
+
+    entry = cache.load(url, build_submit_body(url)["request"])
+    assert entry is not None, "未命中路径应写入归档"
+    body = json.loads(entry.raw_json)
+    assert "result" in body and body["result"]["utterances"], (
+        "归档的是云响应原文，而不是裁剪后的数组"
+    )
+
+
+async def test_transcript_cache_hit_skips_the_network_entirely(tmp_path):
+    """命中：提交与查询都**一次网都不出**，且下游看到的结果与真实路径逐字节一致。
+
+    这是本能力的核心断言。复用若改变了 ``auc_result``，历史基线与新运行就不可比了。
+    """
+    url = "https://x/hit.mp3"
+    params = build_submit_body(url)["request"]
+
+    # 先真实跑一次，拿到基准结果并落归档
+    miss_transport = _StubTransport()
+    miss_client = _client_with_cache(tmp_path, miss_transport, TranscriptCache(tmp_path / "cache"))
+    await miss_client.request("POST", SUBMIT, json_body={"file_url": url})
+    baseline = await miss_client.request("POST", QUERY, json_body={})
+    assert baseline.succeeded, baseline.error
+
+    # 再跑一次：应命中归档，零出网
+    hit_transport = _StubTransport()
+    hit_client = _client_with_cache(tmp_path, hit_transport, TranscriptCache(tmp_path / "cache"))
+    first = await hit_client.request("POST", SUBMIT, json_body={"file_url": url})
+    assert first.replayed is True, "命中时提交节点应标记为复用"
+    second = await hit_client.request("POST", QUERY, json_body={})
+
+    assert second.succeeded, second.error
+    assert second.replayed is True, "命中时查询节点应标记为复用"
+    assert hit_transport.requests == [], (
+        f"命中归档必须零出网，实际发出 {hit_transport.requests}"
+    )
+    assert json.loads(second.response_text)["auc_result"] == json.loads(
+        baseline.response_text
+    )["auc_result"], "复用路径的 auc_result 必须与真实路径逐字节一致"
+
+
+async def test_transcript_cache_is_keyed_on_recognition_params(tmp_path):
+    """改识别参数即未命中——避免拿旧参数的转写冒充新配置的结果。"""
+    url = "https://x/params.mp3"
+    cache = TranscriptCache(tmp_path / "cache")
+    transport = _StubTransport()
+    client = _client_with_cache(tmp_path, transport, cache)
+
+    await client.request("POST", SUBMIT, json_body={"file_url": url})
+    await client.request("POST", QUERY, json_body={})
+
+    changed = dict(build_submit_body(url)["request"])
+    changed["model_version"] = "500"
+    assert cache.load(url, changed) is None, "参数变更后必须未命中"
+
+
+async def test_silent_audio_is_archived_and_reused(tmp_path):
+    """静音音频也进归档，复用时仍产出可解析的空数组。
+
+    「静音是业务结论不是失败」这条判定在复用路径上必须保持不变，否则一条静音录音重跑
+    时会从「无有效内容」变成运行失败。
+    """
+    url = "https://x/silent.mp3"
+    params = build_submit_body(url)["request"]
+    cache = TranscriptCache(tmp_path / "cache")
+
+    silent_first = _RecordingSilentTransport()
+    client = _client_with_cache(tmp_path, silent_first, cache)
+    await client.request("POST", SUBMIT, json_body={"file_url": url})
+    first = await client.request("POST", QUERY, json_body={})
+    assert first.succeeded, first.error
+    assert len(silent_first.requests) == 2
+
+    entry = cache.load(url, params)
+    assert entry is not None and entry.silent is True, "静音条目应以 silent 标记归档"
+
+    silent_again = _RecordingSilentTransport()
+    reused = _client_with_cache(tmp_path, silent_again, TranscriptCache(tmp_path / "cache"))
+    await reused.request("POST", SUBMIT, json_body={"file_url": url})
+    second = await reused.request("POST", QUERY, json_body={})
+
+    assert second.succeeded, second.error
+    assert second.replayed is True
+    assert silent_again.requests == [], "静音复用同样不得出网"
+    assert json.loads(json.loads(second.response_text)["auc_result"]) == [], (
+        "静音复用仍应给出空数组"
+    )
+
+
+async def test_absent_transcript_cache_leaves_behaviour_unchanged(tmp_path):
+    """不传 ``transcript_cache`` 时行为与加入缓存之前一致：出网、且不标复用。
+
+    生产 worker / API 与既有测试都不构造缓存，这条钉住它们不受影响。
+    """
+    transport = _StubTransport()
+    client = _client(tmp_path, transport)  # 既有助手：不传缓存
+
+    await client.request("POST", SUBMIT, json_body={"file_url": "https://x/a.wav"})
+    attempt = await client.request("POST", QUERY, json_body={})
+
+    assert attempt.succeeded, attempt.error
+    assert attempt.replayed is False
+    assert len(transport.requests) == 2, "无缓存时应真实出网"

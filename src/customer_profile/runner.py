@@ -338,6 +338,7 @@ async def build_service(
     enable_store: bool = True,
     strict_replay: bool | None = None,
     max_active_nodes: int = MAX_ACTIVE_NODES_DEFAULT,
+    transcript_cache: Any = None,
 ) -> Service:
     """装配执行服务。
 
@@ -381,6 +382,7 @@ async def build_service(
         transport=transport,
         replay=replay,
         request_limiter=request_limiter,
+        transcript_cache=transcript_cache,
     )
 
     store: Store | None = None

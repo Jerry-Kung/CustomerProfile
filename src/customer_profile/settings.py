@@ -60,6 +60,24 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.5
     """全项目统一，不可按节点覆盖（规划 §6.4.4）。"""
 
+    llm_enable_thinking: bool | None = None
+    """是否启用模型的思维链（``LLM_ENABLE_THINKING``）。
+
+    ``None``（未设置）时**不发这个键**，沿用服务端默认值；
+    只有显式设为 ``true`` / ``false`` 时才把它写进请求体。
+    这是有意的：原规划 §6.4.4 要求“不设其他参数”，且不同服务
+    商对这个开关的默认取值不同，发送一个我们猜测的
+    值会把服务端的默认覆盖掉。见差异 W51。
+    """
+
+    llm_max_tokens: int | None = None
+    """单次响应的输出上限（``LLM_MAX_TOKENS``）。``None`` 时不发这个键，沿用服务端默认。
+
+    存在的理由是**实测出来的截断**：关闭思维链后，服务端在未指定上限时把输出卡在
+    8192 token，长 JSON 会被拦腰截断，而 ``detect_output_anomaly`` 不检查 ``finish_reason``，
+    截断因此能静默通过并在下游解析时炸掉。见差异 W51。
+    """
+
     # ------------------------------------------------------------ 外部服务
     auc_base_url: str = "https://openspeech.bytedance.com/api/v3/auc/bigmodel"
     """AUC 语音识别服务的基地址。
@@ -194,6 +212,8 @@ class Settings(BaseSettings):
         "sqlite_busy_timeout_ms",
         "llm_rpm_burst",
         "llm_tpm_burst",
+        "llm_enable_thinking",
+        "llm_max_tokens",
         mode="before",
     )
     @classmethod

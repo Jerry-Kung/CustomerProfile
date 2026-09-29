@@ -156,17 +156,28 @@ class AucClient:
         replay: Any = None,
         request_limiter: Any = None,
         recorder: Any = None,
+        transcript_cache: Any = None,
     ) -> None:
         self._settings = settings
         self._transport = transport
         self._replay = replay
         self._limiter = request_limiter
         self._recorder = recorder
+        self._transcript_cache = transcript_cache
+        """转写归档（:mod:`~customer_profile.execution.transcript_cache`），可为 ``None``。
+
+        为 ``None`` 时行为与加入缓存之前**逐字节一致**：生产 worker / API 与既有测试都不
+        构造它，因此不受影响。基线脚本才注入一份。
+        """
         self._client: httpx.AsyncClient | None = None
         # 提交与查询是两个节点，task_id 必须跨节点传递。云服务不回传它（调用方生成），
         # 所以这里按「同一运行 + 同一提交节点」暂存，供查询节点取用。
         # 键里带 run_id 与 call_path，避免并发运行或迭代内的多次调用互相覆盖。
         self._pending: dict[str, str] = {}
+        # 同一次运行里提交节点看到的录音 URL 与识别参数，供查询节点在出网成功后回写归档。
+        # 查询节点的请求体里**没有** file_url（只有 task_id），因此必须在这里留下来。
+        # 命中缓存时第三项是取到的条目，查询节点据此直接合成结果、不出网。
+        self._requests: dict[str, tuple[str, dict[str, Any], Any]] = {}
 
     # ------------------------------------------------------------ 装配
 
@@ -287,8 +298,30 @@ class AucClient:
         if not file_url:
             raise AucCloudError("AUC 提交缺少 file_url")
 
+        file_url = str(file_url)
+        body = build_submit_body(file_url)
+        params = body["request"]
+        key = self._key(node_ref)
+
+        entry = (
+            self._transcript_cache.load(file_url, params)
+            if self._transcript_cache is not None
+            else None
+        )
+        self._requests[key] = (file_url, params, entry)
+        if entry is not None:
+            # 命中归档：提交与查询都不出网。仍合成内网契约，下游两个 code 节点看到的形状
+            # 与真实路径**完全一致**，因此节点定义与提示词都不需要知道这里有缓存。
+            task_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"auc-transcript:{key}"))
+            self._pending[key] = task_id
+            attempt.replayed = True
+            attempt.status_code = 200
+            attempt.response_text = json.dumps(
+                {"task_id": task_id, "x_tt_logid": ""}, ensure_ascii=False
+            )
+            return
+
         task_id = str(uuid.uuid4())
-        body = build_submit_body(str(file_url))
         response = await self._post(
             CLOUD_SUBMIT_PATH, body, self._headers(task_id, submit=True)
         )
@@ -312,7 +345,27 @@ class AucClient:
     async def _do_query(
         self, attempt: HttpAttempt, json_body: Any, node_ref: Any
     ) -> None:
-        task_id = self._pending.pop(self._key(node_ref), "")
+        key = self._key(node_ref)
+        task_id = self._pending.pop(key, "")
+        file_url, params, entry = self._requests.pop(key, ("", {}, None))
+
+        if entry is not None:
+            # 命中归档：直接合成查询契约，一次轮询都不发。
+            attempt.replayed = True
+            attempt.status_code = 200
+            attempt.response_headers = {}
+            if getattr(entry, "silent", False):
+                # 静音音频的归档里没有 utterances 体，与原判定一致地给出空数组。
+                auc_result = json.dumps([], ensure_ascii=False)
+            else:
+                auc_result = parse_auc_result(entry.raw_json)
+            attempt.response_text = json.dumps(
+                # poll_count 记 1：真实路径每次至少轮询一次，下游只把它当计数展示。
+                {"auc_result": auc_result, "poll_count": 1},
+                ensure_ascii=False,
+            )
+            return
+
         if not task_id:
             # 同一运行内提交后才会查询。取不到说明提交没成功，如实报错，
             # 不要把空 task_id 发出去换一个更难懂的 45000000。
@@ -332,6 +385,9 @@ class AucClient:
             if code == OK:
                 attempt.status_code = response.status_code
                 attempt.response_headers = _redact(dict(response.headers))
+                # 归档**响应体原文**而不是裁剪后的数组：复用路径因此与真实路径走同一个
+                # 解析函数（见 transcript_cache 模块说明）。
+                self._archive(file_url, params, response.text)
                 attempt.response_text = json.dumps(
                     {
                         "auc_result": parse_auc_result(response.text),
@@ -345,6 +401,7 @@ class AucClient:
                 # 静音音频是**正常业务结论**，不是故障：原 handler 也按成功返回。
                 attempt.status_code = response.status_code
                 attempt.response_headers = _redact(dict(response.headers))
+                self._archive(file_url, params, "", silent=True)
                 attempt.response_text = json.dumps(
                     {
                         "auc_result": json.dumps(
@@ -368,6 +425,25 @@ class AucClient:
                     f"间隔 {self._settings.auc_poll_interval_s}s）"
                 )
             await asyncio.sleep(self._settings.auc_poll_interval_s)
+
+    def _archive(
+        self,
+        file_url: str,
+        params: Mapping[str, Any],
+        raw_json: str,
+        *,
+        silent: bool = False,
+    ) -> None:
+        """把一次真实识别的结果写进归档。
+
+        失败**不抛**：缓存是省时间的加速器，它坏掉不该让一次已经成功的识别判定为失败。
+        ``TranscriptCache.store`` 自己把错误打到 stderr，这里不再处理。
+        """
+        if self._transcript_cache is None or not file_url:
+            return
+        self._transcript_cache.store(
+            self._transcript_cache.make_entry(file_url, params, raw_json, silent=silent)
+        )
 
     async def _post(
         self, path: str, body: Any, headers: Mapping[str, str]

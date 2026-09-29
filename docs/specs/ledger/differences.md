@@ -93,6 +93,32 @@
 | W42 | **`docs/architecture.md` 首次填充**（此前 0 字节）。D6 曾决定「待架构设计阶段编写」，本版即该阶段 | `docs/README.md` 为它定义了收录标准（系统边界、模块职责、分层、数据流、外部依赖、技术约束）；空文件会让人误以为「已写过」 | 已确认 |
 | W43 | **`docs/adr/` 与 `docs/runbooks/` 首次落地**（此前三目录全空） | 同上；ADR 收录不易从代码看出的决策（队列为何不用 Redis、配额为何显式分配），runbook 收录部署与故障定位 | 已确认 |
 
+## 1.7 2026-09-28 业务方 DSL 修订（台账基线已随之更新）
+
+> **本节与前面各节性质不同。** W1–W43 都是**迁移侧**的取舍；本节是**业务方**对 DSL 的修订，
+> 与迁移口径无关。三份文件（证据线索汇总、极光数据、新增手机号&企业信息分析）由业务方提供，
+> `dify_dsl_data/` 已用新版覆盖，**台账（`node_ledger.json` 等 5 份）与提示词评审副本（81 份）
+> 已按新版重新生成**，因此 `tests/test_ledger_crosscheck.py` 里不再需要为这几处登记结构差异。
+
+| 编号 | 差异 | 依据 | 状态 |
+|---|---|---|---|
+| W44 | **新增子流程「手机号&企业信息分析」（`phone_company_analysis`）**，8 节点 / 8 边：`start` → code 取 `raw_payload` → code 拆 `operator_location_json` / `affiliated_company_json` → 两个 llm（手机号特征 / 企业信息）→ 分组聚合器 → code 拆壳 → end 两个输出 | 业务方 2026-09-28 提供的修订版 DSL | 已确认。`src/customer_profile/workflows/phone_company_analysis.py` |
+| W45 | **「证据线索汇总」中手机号/企业分析的四节点整体迁入 W44 的新子流程**，主图改为一个 `tool` 调用点（`1789983285382`）。该图 **24 节点 / 39 边 → 21 节点 / 35 边** | 同上 | 已确认 |
+| W46 | **「客户数据聚合」模板新增字段 `第三方画像数据`，绑定极光数据（`1777287016409.result`）。** 此前极光结果**根本没有进聚合包**——这是一处功能性修复，不只是字段增补 | 同上 | 已确认 |
+| W47 | **极光数据子流程的 `data_source` 默认值由 `jiguang` 改为 `DatametInterestPoints`**，上游证据汇总图同时改为显式传参同名值。旧值取不到该渠道数据 | 同上 | 已确认。`jiguang_data.DATA_SOURCE` |
+| W48 | **台账基线更新**：5 份台账文件与 `docs/specs/prompts/` 评审副本（81 份）均按新版 DSL 重新生成。计数 **19 / 293 / 324 → 20 / 298 / 328** | 同上 | 已确认。`tests/test_ledger_crosscheck.py::test_ledger_totals_unchanged` |
+
+| W49 | **修订「客户数据聚合」模板的 `关联企业信息` 绑定：`{{ phone_result }}` → `{{ company_result }}`。** 原文渲染 `phone_result`，而绑定表为它提供了 `company_result`（`1789983285382.company_analysis_result`）——**企业分析结果被丢弃、该字段实际装的是手机号归属地分析**。旧版 DSL 同样如此，非本轮引入 | **用户 2026-09-28 确认修订**（正文改动按 §6.5 须单独提出并获确认，本轮已取得） | 已确认。包内正文 `src/customer_profile/templates/evidence_subagent__1776069633580.txt`；**DSL 侧未同步改**，故登记为 `scripts/export_templates.py` 的 `TEMPLATE_OVERRIDES`（全项目唯一的模板正文有意差异） |
+| W50 | **修订「手机号&企业信息分析」中 `结果解析`（节点 `1774941932987`）的取值键。** DSL 原文按 `operator_location_json` / `affiliated_company_json` 取值，而 `RelatedEnterpriseInfo` 渠道的真实载荷**从不含这两个键**——全部留痕实测（5 个批次 / 8 份响应）出现 0 次，仓库内也没有任何节点产出它们。后果是 `operator_location` 与 `affiliated_company` **恒为 `{}`**，企业信息分析 LLM 只能回「输入数据为空」，**真实企业数据被静默丢弃**（13415100087 的 `business_info` 里有完整企业名称、法人、注册号，却全部被丢掉），而运行整体仍是 `succeeded`。现按真实载荷的**两种实测形态**取值：归属地取 `operator_location`；企业内容按 `company_main` / `company_detail` / `business_info` / `enterprise_base_info` / `shareholder_info` 逐块收集，**只收有实内容的块**；并保留对 DSL 原键名的兼容读取 | **用户 2026-09-28 确认**（code 正文改动按 §6.5 须单独提出并获确认） | 已确认。`src/customer_profile/workflows/phone_company_analysis.py`；**DSL 侧未同步改**，故登记为 `tests/test_code_verbatim.py` 的 `CODE_BODY_DEVIATIONS`，回归用例见 `tests/test_phone_company_analysis.py` |
+| W51 | **新增两个可配置的模型参数：`LLM_ENABLE_THINKING` 与 `LLM_MAX_TOKENS`（`Settings` 的 `llm_enable_thinking` / `llm_max_tokens`）。** 缺省均为 `None`，即**不发该键**、沿用服务端默认——因此 §6.4.4「不设其他参数」的原文在缺省下仍然成立。当前 `.env` 显式设为 `false` / `128000`。**实测依据**：关闭思维链后，服务端在不指定上限时把输出**卡在 8192 token**（`completion_tokens=8192`、`finish_reason=length`），而该节点需要约 2.9 万 token 的 JSON 正文，会被拦腰截断；且 `detect_output_anomaly` **不检查 `finish_reason`**，截断会静默通过异常检测、在下游解析时炸掉。设 `max_tokens=128000` 后同一提示词 `finish_reason=stop`、114.7 s 出完整 JSON。上限取 128k 而非 64k：业务流中观察到过 80k 左右的输出；两款常用模型的上下文窗口均为 1M，128k 输出不超限 | **用户 2026-09-29 指示**（关思维链以压缩运行时间；上限值由用户指定） | 已确认。`src/customer_profile/settings.py`、`execution/llm.py`；**规划 §6.4.4 的参数表已同步修订**；回归用例见 `tests/test_llm_retry.py` |
+| W52 | **修订「客户标准信息数据聚合」（节点 `1778232215760`）辅助函数 `_parse_json` 的围栏识别条件。** DSL 原文只认「整段以 ``` 开头」的代码块包裹（`text.startswith("```")`），而模型常见输出形态是「一句说明 + 换行 + ```json 块」——这类输出既不进剥围栏分支，又无法被 `json.loads` 解析，整体落入 `except` 返回空 dict。后果是**解析失败与「确实无数据」在下游无法区分**：基线批次 `baseline-39-dsv41-noThink` 39 个号码中 2 个（`15012891982`、`18003012053`）因此丢失 `wechat_profile_info` 字段，而运行整体仍是 `succeeded`。现改为围栏不在开头时按**第一个**围栏块提取；无成对围栏时返回 `None`、沿用原文，不猜 | **用户 2026-09-29 指示**（code 正文改动按 §6.5 须单独提出并获确认） | 已确认。`src/customer_profile/workflows/evidence_subagent.py`（新增 `_extract_fenced_block`）；**DSL 侧未同步改**，故登记为 `tests/test_code_verbatim.py` 的 `CODE_HELPER_DEVIATIONS`（全项目第一处**辅助函数**偏离；`CODE_BODY_DEVIATIONS` 只管 `main`，故新增该通道）；回归用例见 `tests/test_evidence_subagent_parse.py` |
+> **W49 的性质与其余各条都不同。** W44–W48 是「新版 DSL 就是这样，照做」；W49 是**我们主动
+> 改了正文**，与 DSL 不同。因此它必须落在 `TEMPLATE_OVERRIDES` 里——否则
+> `export_templates.py --check` 会红（该断言要求包内正文与 DSL 逐字符一致）。把偏离显式登记，
+> 口径与 `tests/test_ledger_crosscheck.py` 的 `DIFFERENCES` 一致：**偏离必须是有记录的决定**。
+> 日后若业务方在 Dify 侧也修了同一处，登记的原文片段会「找不到」而让导出脚本报错退出，
+> 提示复核——这正是想要的失效方式。
+
 ## 2. 未知运行语义（DSL 无法确认）
 
 ### 2.1 外部接口与协议
@@ -134,6 +160,10 @@
 ## 3. 双套计数
 
 ### 3.1 原 DSL 计数（实测，16 项断言全部命中）
+
+> **2026-09-28 说明**：本节是 **V0.1 当时**的 DSL 计数，作为历史记录保留。业务方随后修订了
+> 三份 DSL，当前台账为 **20 工作流 / 298 节点 / 328 边**（见 §1.7 W44–W49）。`extract_ledger.py`
+> 的 `ASSERTED` 已同步为新值——它是「doc 断言 vs DSL 实测」的比对基线，指向过期的数字会误报。
 
 | 项 | 数量 |
 |---|---|

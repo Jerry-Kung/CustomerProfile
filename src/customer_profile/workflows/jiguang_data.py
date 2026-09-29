@@ -36,6 +36,9 @@ ELSE_BRANCH = "false"
 SHARED_CODE_MODULE = "customer_profile.workflows.shared_code"
 SLUG = "jiguang_data"
 
+DATA_SOURCE = "DatametInterestPoints"
+"""本流程默认取的渠道名。新版 DSL 由 ``jiguang`` 改为该值——旧值取不到数据。"""
+
 
 def template_name(node_id: str) -> str:
     return f"{SLUG}__{node_id}"
@@ -136,5 +139,5 @@ def default_inputs(customer_data: str, phone_number: str = "") -> dict[str, Any]
     return {
         "phone_number": phone_number,
         "customer_data": customer_data,
-        "data_source": "jiguang",
+        "data_source": DATA_SOURCE,
     }

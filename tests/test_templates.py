@@ -24,7 +24,11 @@ PROMPTS_DIR = REPO_ROOT / "docs" / "specs" / "prompts"
 EXPORT_SCRIPT = REPO_ROOT / "scripts" / "export_templates.py"
 
 EXPECTED_TEMPLATES = 81
-"""DSL 里提示词/模板节点总数：46 个 template-transform + 35 个 llm。"""
+"""DSL 里提示词/模板节点总数：46 个 template-transform + 35 个 llm。
+
+2026-09-28 修订后仍为 81：新增子流程 ``手机号&企业信息分析`` 带进 2 个 llm 节点，
+证据线索汇总 移出 2 个 llm 节点，一增一减相抵（见 ledger/differences.md W44）。
+"""
 
 
 def _run_check() -> subprocess.CompletedProcess[str]:

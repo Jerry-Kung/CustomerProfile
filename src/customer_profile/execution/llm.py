@@ -264,12 +264,24 @@ class LlmClient:
         images: Sequence[str] | None = None,
         detail: str | None = None,
     ) -> dict[str, Any]:
-        """构造请求体。按 §6.4.4 只设模型与 temperature，不设其他参数。"""
-        return {
+        """构造请求体。除模型、 messages 与 temperature 外，
+
+        仅在 ``LLM_ENABLE_THINKING`` 被显式设置时额外带上 ``enable_thinking``。
+        未设置（``None``）时不发这个键，沿用服务端默认值——
+        ``LLM_MAX_TOKENS`` 同理。
+        不同服务商对该开关的默认取值不同，发一个我们猜测的值
+        会把服务端的默认覆盖掉。见差异 W51。
+        """
+        payload: dict[str, Any] = {
             "model": self._settings.llm_model,
             "messages": self.build_messages(prompt, system, images, detail),
             "temperature": self._settings.llm_temperature,
         }
+        if self._settings.llm_enable_thinking is not None:
+            payload["enable_thinking"] = self._settings.llm_enable_thinking
+        if self._settings.llm_max_tokens is not None:
+            payload["max_tokens"] = self._settings.llm_max_tokens
+        return payload
 
     # ------------------------------------------------------------ 调用
 

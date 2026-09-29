@@ -385,6 +385,33 @@
       "vision_enabled": false
     },
     {
+      "workflow_file": "（新）SubAgent - 手机号&企业信息分析.yml",
+      "node_id": "1789984359173",
+      "title": "手机号特征分析",
+      "node_type": "llm",
+      "chars": 422,
+      "lines": 19,
+      "sha256": "765d3300194d36a57a6958ffb4eab30a53fc3a41c3a44991d87e8be94e46f7e2",
+      "variables": [
+        "1773748103758.phone_number",
+        "1774941932987.operator_location"
+      ],
+      "vision_enabled": false
+    },
+    {
+      "workflow_file": "（新）SubAgent - 手机号&企业信息分析.yml",
+      "node_id": "1789984439065",
+      "title": "企业信息分析",
+      "node_type": "llm",
+      "chars": 290,
+      "lines": 13,
+      "sha256": "1785ef8e00598cea189ec5dd8d6958e27228e39808bde111142046a589cd396d",
+      "variables": [
+        "1774941932987.affiliated_company"
+      ],
+      "vision_enabled": false
+    },
+    {
       "workflow_file": "（新）SubAgent - 抖音个人页信息提取.yml",
       "node_id": "1775641360812",
       "title": "无数据，输出默认信息",
@@ -837,9 +864,9 @@
       "node_id": "1776069633580",
       "title": "客户数据聚合",
       "node_type": "template-transform",
-      "chars": 657,
-      "lines": 16,
-      "sha256": "d3c1054751301306f781961054b42db6dcfef8218dbf1f1668c643dddbeb4d4c",
+      "chars": 689,
+      "lines": 17,
+      "sha256": "9b422c9aacac92e77c514d420c88ef64899daf9c1deb5dd31d381e8b1fd7c237",
       "variables": [],
       "vision_enabled": false
     },
@@ -852,33 +879,6 @@
       "lines": 77,
       "sha256": "125440b3eeb5dd9504f8b197396f3b90d1dcb9ea72566a99df14ec08cb3639c1",
       "variables": [],
-      "vision_enabled": false
-    },
-    {
-      "workflow_file": "（新）SubAgent - 证据线索汇总（生产环境）.yml",
-      "node_id": "1789985109360",
-      "title": "手机号特征分析",
-      "node_type": "llm",
-      "chars": 422,
-      "lines": 19,
-      "sha256": "ac887ec26fb245202edd54099645408ac2995a91c5cf8769a99ddad1223344e4",
-      "variables": [
-        "1775638842380.phone_number",
-        "1789985056439.operator_location"
-      ],
-      "vision_enabled": false
-    },
-    {
-      "workflow_file": "（新）SubAgent - 证据线索汇总（生产环境）.yml",
-      "node_id": "1789985119700",
-      "title": "企业信息分析",
-      "node_type": "llm",
-      "chars": 290,
-      "lines": 13,
-      "sha256": "07ef8457d6bff94801d07ad8c112e78f227dd2913740780809a59c1452b08a7b",
-      "variables": [
-        "1789985056439.affiliated_company"
-      ],
       "vision_enabled": false
     },
     {

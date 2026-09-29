@@ -45,6 +45,7 @@ SLUGS: dict[str, str] = {
     "（新）SubAgent - 画像内容生成&回写（生产环境）（新）": "customer_profile_production",
     "（新）SubAgent - 聊天记录数据信息": "chat_history_data",
     "（新）SubAgent - 证据线索汇总（生产环境）": "evidence_subagent",
+    "（新）SubAgent - 手机号&企业信息分析": "phone_company_analysis",
     "（新）SubAgent - 试驾录音信息提取": "test_drive_audio",
     "（新）客户初始画像（生产环境）": "customer_profile_entry",
 }
@@ -57,6 +58,47 @@ def slug_for(display_name: str) -> str:
         raise SystemExit(
             f"显示名 {display_name!r} 未在 SLUGS 中登记；新增工作流时请一并补上"
         ) from exc
+
+
+# ====================================================================
+# 与 DSL 的有意差异（需业务方确认的正文修订）
+#
+# 包内正文默认与 DSL **逐字符一致**。个别正文经业务方确认后需要修订，这类偏离必须
+# 在此显式登记——未登记的差异一律不放行。口径同 tests/test_ledger_crosscheck.py 的
+# DIFFERENCES：偏离必须是有记录的决定，不允许悄悄漂移。
+# ====================================================================
+
+TEMPLATE_OVERRIDES: dict[str, dict[str, str]] = {
+    "evidence_subagent__1776069633580.txt": {
+        # 原文把「关联企业信息」渲染成 phone_result，与绑定表提供的
+        # company_result 不符，导致企业分析结果被丢弃（旧版 DSL 同样如此）。
+        # 用户 2026-09-28 确认修订。
+        '  "关联企业信息": "{{ phone_result }}",':
+        '  "关联企业信息": "{{ company_result }}",',
+    },
+}
+"""``{模板文件名: {DSL 原文片段: 修订后片段}}``。键为 ``slug__node_id.txt``。"""
+
+TEMPLATE_OVERRIDE_REASONS: dict[str, str] = {
+    "evidence_subagent__1776069633580.txt":
+        "关联企业信息误用 phone_result，企业分析结果被丢弃；用户 2026-09-28 确认改为 company_result",
+}
+
+
+def apply_overrides(name: str, text: str) -> str:
+    """把已登记的正文修订应用到 DSL 原文上。
+
+    登记的片段在原文中找不到时**报错退出**，而不是静默放过：DSL 日后若再变，
+    这段修订是否仍然必要需要人工复核。
+    """
+    for old, new in TEMPLATE_OVERRIDES.get(name, {}).items():
+        if old not in text:
+            raise SystemExit(
+                f"模板 {name} 登记的修订片段未在 DSL 原文中找到：{old!r}。"
+                "DSL 可能已变，需复核该修订是否仍然必要"
+            )
+        text = text.replace(old, new)
+    return text
 
 
 def load_workflows() -> list[tuple[str, dict]]:
@@ -116,6 +158,7 @@ def main() -> int:
         texts = template_texts(graph)
         for node_id, text in texts:
             name = f"{slug}__{node_id}.txt"
+            text = apply_overrides(name, text)
             expected[name] = text
             manifest.append(
                 {
@@ -152,7 +195,11 @@ def main() -> int:
             print(f"资源目录中有 {len(extra)} 个 DSL 里不存在的文件：{extra[:5]}")
         if missing or differing or extra:
             return 1
-        print("比对通过：包内资源与 DSL 正文逐字符一致")
+        if TEMPLATE_OVERRIDES:
+            for name, edits in sorted(TEMPLATE_OVERRIDES.items()):
+                print(f"已登记的有意差异 {name}：{len(edits)} 处")
+                print(f"  理由：{TEMPLATE_OVERRIDE_REASONS.get(name, '')}")
+        print("比对通过：包内资源与（已登记修订后的）DSL 正文逐字符一致")
         return 0
 
     TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)

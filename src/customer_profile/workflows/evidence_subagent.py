@@ -1,6 +1,7 @@
 """``（新）SubAgent - 证据线索汇总（生产环境）`` 的 Python 定义。
 
-DSL 基线：24 节点 / 39 边，是全项目**扇出最宽**的图：一次取数之后 14 路并行取证。
+DSL 基线：**21 节点 / 35 边**（2026-09-28 修订；修订前为 24 / 39），是全项目
+**扇出最宽**的图：一次取数之后 14 路并行取证。
 
     start(phone_number)
       └─ http 获取全量用户数据（GET /api/v1/remote/data/history/{phone}）
@@ -9,11 +10,17 @@ DSL 基线：24 节点 / 39 边，是全项目**扇出最宽**的图：一次取
            ├─ tool 小红书个人页    ├─ tool 抖音个人页       ├─ tool 人工确认信息
            ├─ tool 极光数据        ├─ tool 猛士IT系统       ├─ tool 聊天记录
            ├─ tool 用户人工Feedback
-           └─ code 代码执行 2 → code 代码执行 3 → llm 手机号特征分析 ┐
-                                                                  ├→ template 客户数据聚合
-                                              llm 企业信息分析 ────┘
-      code 客户标准信息数据聚合（微信搜索 + 猛士IT）
-           └─ template 证据线索整理Prompt → llm 证据线索整理 → end(result, original_data)
+           └─ tool 手机号&企业信息分析 ──────────────────────────┐
+      code 客户标准信息数据聚合（微信搜索 + 猛士IT）               ├→ template 客户数据聚合
+           └─ template 证据线索整理Prompt → llm 证据线索整理      │   → llm 证据线索整理
+                → end(result, original_data)                     ┘
+
+**2026-09-28 修订（业务方，非迁移取舍）**：原「取关联企业 → 拆运营商/企业 → 两个 LLM」
+四个节点（``1789984908249`` / ``1789985056439`` / ``1789985109360`` / ``1789985119700``）
+整体迁入独立子流程 ``phone_company_analysis``，主图改用一个 ``tool`` 调用点
+（``1789983285382``）承接，并把它的两个输出重新绑进聚合模板的
+``phone_result`` / ``company_result``。同时聚合模板新增 ``第三方画像数据`` 字段，
+指向极光数据的 ``result``——该字段此前**根本没有进聚合包**。
 
 三处口径：
 
@@ -56,11 +63,8 @@ CHAT_HISTORY = "1778809368635"
 FEEDBACK = "1779089586906"
 EVIDENCE_LLM = "1777366363196"
 
-# —— 手机号 / 企业信息的解析与推断
-RELATED_CODE = "1789984908249"
-SPLIT_CODE = "1789985056439"
-PHONE_LLM = "1789985109360"
-COMPANY_LLM = "1789985119700"
+# —— 手机号 / 企业信息分析（新版 DSL 起为独立子流程，见 phone_company_analysis）
+PHONE_COMPANY = "1789983285382"
 
 # —— 聚合与整理
 DATA_AGGREGATE = "1776069633580"
@@ -128,10 +132,33 @@ def _tool(
 import json
 
 
+def _extract_fenced_block(text):
+    """取正文里**第一个**围栏块的内容；没有成对围栏时返回 ``None``。
+
+    与 ``llm.strip_code_fence`` 的分工：那个只处理「整段就是围栏」的形态，
+    这里处理「说明文字在前、围栏在后」。见差异 W52。
+    """
+    start = text.find("```")
+    if start < 0:
+        return None
+    rest = text[start + 3:]
+    head = rest.lstrip()
+    if head[:4].lower() == "json":
+        rest = head[4:]
+    end = rest.find("```")
+    if end < 0:
+        return None
+    return rest[:end].strip()
+
+
 def _parse_json(value):
     """
     兼容 Dify 上游传入 String / Object 两种情况。
     解析失败、空字符串、None、非 JSON 对象时，统一返回空 dict。
+
+    有意差异 W52：围栏出现在正文中段时也提取。原逻辑只认「整段以围栏开头」，
+    而模型常见的输出形态是「一句说明 + 换行 + ```json 块」，这类输出会整体落入
+    ``except`` 被当成空 dict——与「该客户确实没有这项数据」在下游无法区分。
     """
     if value is None:
         return {}
@@ -150,6 +177,11 @@ def _parse_json(value):
             text = text.strip("`").strip()
             if text.lower().startswith("json"):
                 text = text[4:].strip()
+        elif "```" in text:
+            # 围栏不在开头（正文前带说明文字）时按第一个围栏块提取，见 W52
+            block = _extract_fenced_block(text)
+            if block is not None:
+                text = block
 
         try:
             data = json.loads(text)
@@ -215,41 +247,6 @@ def aggregate_customer_standard_info(
     # 4. 输出为 String 类型 JSON
     return {
         "merged_json_string": json.dumps(base_data, ensure_ascii=False)
-    }
-
-
-# ---- DSL 节点 1789985056439 的正文（逐字符，仅函数名不同）
-import json
-
-def split_operator_and_company(body) -> dict:
-    # 兼容 HTTP 节点 body 可能是字符串，也可能已经是对象
-    if isinstance(body, str):
-        body = body.strip()
-
-        # 关键修改：空字符串直接按空 JSON 对象处理，避免 json.loads("") 报错
-        if body == "":
-            data = {}
-        else:
-            data = json.loads(body)
-
-    elif isinstance(body, dict):
-        data = body
-
-    elif body is None:
-        data = {}
-
-    else:
-        raise ValueError(f"Unsupported body type: {type(body)}")
-
-    return {
-        "operator_location": json.dumps(
-            data.get("operator_location_json", {}),
-            ensure_ascii=False
-        ),
-        "affiliated_company": json.dumps(
-            data.get("affiliated_company_json", {}),
-            ensure_ascii=False
-        )
     }
 
 
@@ -325,7 +322,7 @@ WORKFLOW = WorkflowDef(
             },
             original_node_id=LOCKED_NOTES,
         ),
-        _tool(JIGUANG, "（新）SubAgent - 极光数据（生产环境）", "jiguang_data", "jiguang"),
+        _tool(JIGUANG, "（新）SubAgent - 极光数据（生产环境）", "jiguang_data", "DatametInterestPoints"),
         _tool(
             MENGSHI_IT,
             "（新）SubAgent - 猛士IT系统数据信息",
@@ -345,51 +342,15 @@ WORKFLOW = WorkflowDef(
             "user_feedback_data",
             "UserFeedbackInformation",
         ),
-        # ---------------------------------------------------------- 手机号 / 企业信息
-        make_node(
-            RELATED_CODE,
-            "代码执行 2",
-            "code",
-            after=(HISTORY_HTTP,),
-            inputs={"records": (HISTORY_HTTP, "body")},
-            outputs=("result",),
-            function=f"{SHARED_CODE_MODULE}:extract_related_enterprise",
-            original_node_id=RELATED_CODE,
-        ),
-        make_node(
-            SPLIT_CODE,
-            "代码执行 3",
-            "code",
-            after=(RELATED_CODE,),
-            inputs={"body": (RELATED_CODE, "result")},
-            outputs=("affiliated_company", "operator_location"),
-            function=f"customer_profile.workflows.{SLUG}:split_operator_and_company",
-            original_node_id=SPLIT_CODE,
-        ),
-        make_node(
-            PHONE_LLM,
-            "手机号特征分析",
-            "llm",
-            after=(SPLIT_CODE,),
-            inputs={
-                "phone_number": (START, "phone_number"),
-                "operator_location": (SPLIT_CODE, "operator_location"),
-            },
-            outputs=("text",),
-            template=template_name(PHONE_LLM),
-            system_text=SYSTEM_TEXT,
-            original_node_id=PHONE_LLM,
-        ),
-        make_node(
-            COMPANY_LLM,
-            "企业信息分析",
-            "llm",
-            after=(SPLIT_CODE,),
-            inputs={"affiliated_company": (SPLIT_CODE, "affiliated_company")},
-            outputs=("text",),
-            template=template_name(COMPANY_LLM),
-            system_text=SYSTEM_TEXT,
-            original_node_id=COMPANY_LLM,
+        # ------------------------------------------------- 手机号 / 企业信息分析
+        # 新版 DSL 起，这四个节点（取关联企业、拆运营商/企业、两个 LLM）整体迁进
+        # 独立子流程 phone_company_analysis，主图只留这一个调用点。
+        _tool(
+            PHONE_COMPANY,
+            "（新）SubAgent - 手机号&企业信息分析",
+            "phone_company_analysis",
+            "RelatedEnterpriseInfo",
+            outputs=("phonenumber_analysis_result", "company_analysis_result"),
         ),
         # ---------------------------------------------------------- 聚合与整理
         make_node(
@@ -399,7 +360,7 @@ WORKFLOW = WorkflowDef(
             after=(
                 MOMENTS, WECHAT_SEARCH, WECHAT_HOME, TEST_DRIVE, OUTBOUND_CALL, ALIPAY,
                 XIAOHONGSHU, DOUYIN, LOCKED_NOTES, JIGUANG, MENGSHI_IT, CHAT_HISTORY,
-                FEEDBACK, PHONE_LLM, COMPANY_LLM,
+                FEEDBACK, PHONE_COMPANY,
             ),
             inputs={
                 "moments_result": (MOMENTS, "result"),
@@ -410,8 +371,9 @@ WORKFLOW = WorkflowDef(
                 "alipay_homepage_result": (ALIPAY, "result"),
                 "xiaohongshu_homepage_result": (XIAOHONGSHU, "result"),
                 "douyin_homepage_result": (DOUYIN, "result"),
-                "phone_result": (PHONE_LLM, "text"),
-                "company_result": (COMPANY_LLM, "text"),
+                "phone_result": (PHONE_COMPANY, "phonenumber_analysis_result"),
+                "company_result": (PHONE_COMPANY, "company_analysis_result"),
+                "ali_data": (JIGUANG, "result"),
                 "locked_notes_result": (LOCKED_NOTES, "result"),
                 "it_system_result": (MENGSHI_IT, "IT_customer_info"),
                 "chat_history_result": (CHAT_HISTORY, "result"),
@@ -493,5 +455,4 @@ def default_inputs(phone_number: str) -> dict[str, Any]:
 
 CODE_SPECS: dict[str, dict] = {
     '1778232215760': {'main': 'aggregate_customer_standard_info', 'renames': {}},
-    '1789985056439': {'main': 'split_operator_and_company', 'renames': {}},
 }

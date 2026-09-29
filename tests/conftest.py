@@ -47,6 +47,10 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
         "replay_strict": True,
         "interrupt_on_start": False,
         "max_concurrent_requests": 4,
+        # 显式钉定为 None：测试不得从开发者的 .env 取值，
+        # 否则本地配置会悄悄改变请求体形状并让用例忽红忽绿。
+        "llm_enable_thinking": None,
+        "llm_max_tokens": None,
     }
     defaults.update(overrides)
     return Settings(**defaults)

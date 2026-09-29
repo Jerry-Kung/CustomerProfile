@@ -91,7 +91,7 @@ def test_fanout_puts_receivers_in_one_layer():
 def test_cycle_does_not_hang_or_raise():
     """带环的图必须能出坐标，且不死循环。
 
-    注意这**不是**在声明支持环：实测 20 个真实定义全部无环（见下面的环普查）。
+    注意这**不是**在声明支持环：实测 21 个真实定义全部无环（见下面的环普查）。
     本用例只钉住「不会崩、不会挂」这条下限，不声明环上的层号有意义。
     """
     preds = {"a": (), "b": ("a",), "c": ("b",), "a": ("c",)}
@@ -128,7 +128,7 @@ def test_chain_layers_are_exactly_consecutive():
 
 
 def test_no_real_workflow_is_cyclic():
-    """环普查：20 个已迁移定义必须全部无环。
+    """环普查：21 个已迁移定义必须全部无环。
 
     这条断言存在的意义不是「确保无环」，而是**在环被引入时立刻失败**。布局按 DAG
     设计（见 ``layout._layers`` 的说明），若某天工作流定义引入环，层号会失真，

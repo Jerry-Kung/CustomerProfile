@@ -193,7 +193,7 @@ def test_dsl_secret_is_not_in_definition():
 
 
 # ====================================================================
-# V0.3：全量比对（19 个工作流 / 49 个 code 节点）
+# V0.3：全量比对（20 个工作流 / 50 个 code 节点）
 #
 # 上面两个工作流是 V0.2 手写的逐节点断言，保留作为「写法样板」；下面这组是通用比对，
 # 从定义里读 ``config['function']`` 自动定位迁移后的函数，因此新增工作流时无需再改测试。
@@ -254,18 +254,18 @@ def _cases():
 CASES = _cases()
 
 
-MIGRATED_CODE_NODES = 47
+MIGRATED_CODE_NODES = 48
 """迁移后的全部 ``code`` 节点数。
 
-台账统计的 49 个包含 ``Gemini（异常输出重试版）`` 子流程里的 2 个
+台账统计的 50 个包含 ``Gemini（异常输出重试版）`` 子流程里的 2 个
 （``1777365069262`` / ``17773660491670``）。该子流程按有意差异 W2 整体归一为
 ``llm_call()`` 的重试逻辑，不再作为独立工作流存在，因此它的 code 节点也不进入
-本比对——**这是有意的，不是漏迁**。47 + 2 = 49 与台账对得上。
+本比对——**这是有意的，不是漏迁**。48 + 2 = 50 与台账对得上。
 """
 
 
 def test_every_code_node_is_covered():
-    """19 个工作流里 DSL 有的 code 节点，定义里都要有，且都登记了 function。"""
+    """20 个工作流里 DSL 有的 code 节点，定义里都要有，且都登记了 function。"""
     assert len(CASES) == MIGRATED_CODE_NODES, (
         f"预期 {MIGRATED_CODE_NODES} 个 code 节点，实际 {len(CASES)}"
     )
@@ -273,7 +273,7 @@ def test_every_code_node_is_covered():
 
 
 def test_migrated_plus_normalised_equals_ledger_total():
-    """47（迁移）+ 2（Gemini 重试子流程，按 W2 归一）= 台账的 49。"""
+    """48（迁移）+ 2（Gemini 重试子流程，按 W2 归一）= 台账的 50。"""
     from customer_profile.workflows import load_all
 
     normalised_away = {"Gemini（异常输出重试版）"}
@@ -281,7 +281,33 @@ def test_migrated_plus_normalised_equals_ledger_total():
     assert not (migrated_names & normalised_away), (
         "Gemini 重试子流程不应作为独立工作流出现（W2）"
     )
-    assert len(CASES) + 2 == 49
+    assert len(CASES) + 2 == 50
+
+
+# ====================================================================
+# 有意差异：code 正文偏离 DSL
+#
+# 与 ``TEMPLATE_OVERRIDES``（提示词正文）、``DIFFERENCES``（结构）同一个口径：
+# **偏离必须是有记录的决定**。默认要求逐字符一致；确实需要改正文时在这里登记理由，
+# 测试会反向校验「登记的那处确实不一致」——DSL 日后修好了，这条会红，提示登记已过期。
+# ====================================================================
+
+CODE_BODY_DEVIATIONS: dict[tuple[str, str], str] = {
+    ("phone_company_analysis", "1774941932987"):
+        "有意差异 W50：DSL 原文按 operator_location_json / affiliated_company_json 取值，"
+        "而 RelatedEnterpriseInfo 渠道的真实载荷从不含这两个键（全部留痕实测出现 0 次），"
+        "导致两个字段恒为 {}、真实企业数据被静默丢弃。改为按真实载荷的两种形态取值，"
+        "并保留对原键名的兼容读取。见 ledger/differences.md W50",
+}
+
+
+CODE_HELPER_DEVIATIONS: dict[tuple[str, str, str], str] = {
+    ("evidence_subagent", "1778232215760", "_parse_json"):
+        "有意差异 W52：DSL 原文只认「整段以 ``` 开头」的代码块包裹，正文中段才出现围栏时"
+        "（模型常见形态：「一句说明 + 换行 + ```json 块」）会整体落入 except 被当成空 dict。"
+        "基线批次实测 39 个号码中 2 个因此丢失 wechat_profile_info，且与「确实无数据」"
+        "在下游无法区分。改为围栏不在开头时按第一个围栏块提取。见 ledger/differences.md W52",
+}
 
 
 def _release(module) -> dict[str, dict]:
@@ -322,7 +348,11 @@ def _renamed_body(dsl_code: str, renames: dict[str, str]) -> str:
     ids=[f"{w}:{n}" for w, n, _, _ in CASES],
 )
 def test_code_node_body_is_verbatim(workflow_id, node_id, dsl_code, function_path):
-    """``main`` 的函数体必须与 DSL 逐字符一致（除函数名与 docstring）。"""
+    """``main`` 的函数体必须与 DSL 逐字符一致（除函数名与 docstring）。
+
+    已登记 W50 之类有意差异的节点走 :func:`test_registered_body_deviations_are_real`，
+    本测试放行并断言「确实不一致」——登记过期（DSL 改好了）时那条会红。
+    """
     _, _, function_name = function_path.partition(":")
     module = _module_of(function_path)
     spec = _release(module).get(node_id) or {}
@@ -333,8 +363,53 @@ def test_code_node_body_is_verbatim(workflow_id, node_id, dsl_code, function_pat
         )
     dsl_code = _renamed_body(dsl_code, spec.get("renames") or {})
     migrated = _import_function(module, function_name)
+    if (workflow_id, node_id) in CODE_BODY_DEVIATIONS:
+        pytest.skip("已登记有意差异，见 test_registered_body_deviations_are_real")
     assert _function_body(migrated, function_name) == _function_body(dsl_code, "main"), (
         f"{workflow_id} 节点 {node_id} 的 {function_name} 函数体与 DSL 不一致"
+    )
+
+
+@pytest.mark.parametrize(
+    "workflow_id,node_id",
+    sorted(CODE_BODY_DEVIATIONS),
+    ids=[f"{w}:{n}" for w, n in sorted(CODE_BODY_DEVIATIONS)],
+)
+def test_registered_body_deviations_are_real(workflow_id, node_id):
+    """登记表里的每一处**确实**与 DSL 不同，防止 DSL 修好后登记表过期仍被放行。"""
+    case = next((c for c in CASES if c[0] == workflow_id and c[1] == node_id), None)
+    assert case is not None, f"登记表里的 {workflow_id}:{node_id} 不在 CASES 中"
+    _, _, dsl_code, function_path = case
+    _, _, function_name = function_path.partition(":")
+    module = _module_of(function_path)
+    spec = _release(module).get(node_id) or {}
+    dsl_code = _renamed_body(dsl_code, spec.get("renames") or {})
+    migrated = _import_function(module, function_name)
+    assert _function_body(migrated, function_name) != _function_body(dsl_code, "main"), (
+        f"{workflow_id} 节点 {node_id} 登记为有意差异，但正文与 DSL 已经一致——"
+        "该登记已过期，请从 CODE_BODY_DEVIATIONS 删除并更新 differences.md"
+    )
+
+
+@pytest.mark.parametrize(
+    "workflow_id,node_id,helper_name",
+    sorted(CODE_HELPER_DEVIATIONS),
+    ids=[f"{w}:{n}:{h}" for w, n, h in sorted(CODE_HELPER_DEVIATIONS)],
+)
+def test_registered_helper_deviations_are_real(workflow_id, node_id, helper_name):
+    """登记表里的辅助函数**确实**与 DSL 不同，防止 DSL 修好后登记表过期仍被放行。"""
+    case = next((c for c in CASES if c[0] == workflow_id and c[1] == node_id), None)
+    assert case is not None, f"登记表里的 {workflow_id}:{node_id} 不在 CASES 中"
+    _, _, dsl_code, function_path = case
+    module = _module_of(function_path)
+    spec = _release(module).get(node_id) or {}
+    renames = spec.get("renames") or {}
+    target = renames.get(helper_name, helper_name)
+    renamed_code = _renamed_body(dsl_code, renames)
+    migrated = _import_function(module, target)
+    assert _function_body(migrated, target) != _function_body(renamed_code, target), (
+        f"{workflow_id} 节点 {node_id} 的辅助函数 {helper_name} 登记为有意差异，"
+        "但正文与 DSL 已经一致——该登记已过期，请从 CODE_HELPER_DEVIATIONS 删除并更新 differences.md"
     )
 
 
@@ -364,6 +439,9 @@ def test_code_node_helpers_are_verbatim(workflow_id, node_id, dsl_code, function
         if name == "main":
             continue
         target = renames.get(name, name)
+        if (workflow_id, node_id, name) in CODE_HELPER_DEVIATIONS:
+            # 已登记有意差异，由 test_registered_helper_deviations_are_real 反向校验
+            continue
         assert hasattr(module, target), (
             f"{workflow_id} 节点 {node_id} 的辅助函数 {name}（迁移后叫 {target}）在模块里找不到"
         )

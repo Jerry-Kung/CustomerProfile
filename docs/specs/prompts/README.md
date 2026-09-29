@@ -6,7 +6,9 @@
 - 本目录与之**逐字节一致**，由 `tests/test_templates.py::test_review_copies_match_package_templates` 断言。
 - 命名与包内资源相同：`<workflow_slug>__<node_id>.txt`；slug 见 `scripts/export_templates.py` 的 `SLUGS`。
 - 正文的原始出处是 `dify_dsl_data/` 的 DSL；`python scripts/export_templates.py --check` 断言包内资源与 DSL 逐字符一致。
-- **正文不可改**（W11）。任何提示词文本改动属业务优化，须单独提出并获得确认。
+- **正文默认不可改**（W11）。任何提示词文本改动属业务优化，须单独提出并获得确认。
+- 已确认的修订登记于 `scripts/export_templates.py` 的 `TEMPLATE_OVERRIDES`（当前一处，W49）。
+  **同步副本时须走 `export_templates.py`**，它会把登记过的修订一并应用；照搬 DSL 正文会丢掉修订。
 
 ## 重新生成的正确顺序
 
