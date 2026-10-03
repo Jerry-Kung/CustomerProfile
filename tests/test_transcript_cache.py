@@ -17,6 +17,8 @@ import json
 import sys
 from pathlib import Path
 
+from loguru import logger
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from customer_profile.execution.transcript_cache import (  # noqa: E402
@@ -277,9 +279,15 @@ def test_store_failure_is_reported_not_raised(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         "customer_profile.execution.transcript_cache._atomic_write_json", boom
     )
-    assert cache.store(entry) is None
-    assert cache.stats.write_errors == 1
-    assert "写入失败" in capsys.readouterr().err
+    sink_id = logger.add(lambda message: sys.stderr.write(str(message)), diagnose=False)
+    try:
+        assert cache.store(entry) is None
+        assert cache.stats.write_errors == 1
+        captured = capsys.readouterr()
+    finally:
+        logger.remove(sink_id)
+    assert "写入失败" in captured.err
+    assert "disk full" in captured.err
 
 
 # ---------------------------------------------------------------- 统计

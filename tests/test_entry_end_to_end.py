@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import json
 
+import httpx
 import pytest
 
+from customer_profile.api import create_app
 from customer_profile.definitions import NodeStatus, WorkflowDef, make_node
 from customer_profile.execution.executors import NodeRuntime, build_default_registry
 from customer_profile.execution.http import HttpClient
@@ -24,8 +26,10 @@ from customer_profile.execution.llm import LlmClient
 from customer_profile.execution.scheduler import RunRequest, Scheduler
 from customer_profile.execution.subworkflow import register_tool_executor
 from customer_profile.replay import ReplaySource
+from customer_profile.runner import build_service
 from customer_profile.settings import Settings
 from customer_profile.workflows import customer_profile_entry as entry
+from customer_profile.worker import Worker
 
 from .conftest import FIXTURE_DIR, make_settings
 
@@ -131,6 +135,46 @@ async def test_entry_result1_comes_from_the_production_subworkflow(tmp_path):
     assert outcome.succeeded, outcome.error
     assert isinstance(outcome.outputs["result1"], str)
     assert outcome.outputs["result1"] == "13800000000"
+
+
+@pytest.mark.parametrize("batch_id", [None, "batch-api"])
+async def test_api_entry_optional_batch_survives_queue_and_worker(tmp_path, batch_id):
+    """手机号提交经过持久化队列后可执行，且显式批次不会被默认值覆盖。"""
+    settings = make_settings(tmp_path, _env_file=None, inline_worker=False)
+    service = await build_service(settings, replay=ReplaySource(strict=True))
+    register_tool_executor(
+        service.registry, service.runtime, {**service.definitions, **_children()}
+    )
+
+    async def factory():
+        return service
+
+    app = create_app(service_factory=factory)
+    inputs = {"phone_number": "13800000000"}
+    if batch_id is not None:
+        inputs["batch_id"] = batch_id
+    try:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.post(
+                    "/runs", json={"workflow_id": entry.WORKFLOW_ID, "inputs": inputs}
+                )
+                assert response.status_code == 200, response.text
+                run_id = response.json()["run_id"]
+                queued = (await client.get(f"/runs/{run_id}")).json()
+                assert queued["status"] == "queued"
+                assert queued["inputs"]["batch_id"] == (batch_id or "")
+
+                assert await Worker(service, settings).run_once()
+                detail = (await client.get(f"/runs/{run_id}")).json()
+                assert detail["status"] == "succeeded", detail["error"]
+                assert detail["outputs"]["result1"] == "13800000000"
+    finally:
+        await service.aclose()
+        if service.store is not None:
+            service.store.close()
 
 
 async def test_each_tool_node_opens_a_nested_run(tmp_path):

@@ -1,0 +1,20 @@
+# Allow only runtime code, dependencies, and the committed UI bundle into builds.
+# In particular, .env, Git history, customer data, and local replay recordings
+# never enter the build context.
+**
+!Dockerfile
+!requirements.txt
+!src/
+!src/**
+!frontend/
+!frontend/dist/
+!frontend/dist/**
+
+**/__pycache__/
+**/*.py[cod]
+**/.env
+**/.env.*
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.log

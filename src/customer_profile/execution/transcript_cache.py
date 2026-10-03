@@ -26,12 +26,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sys
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+
+from loguru import logger
 
 CACHE_FORMAT = 1
 """归档格式版本。日后条目结构若变，据此判别旧条目，而不是靠猜。"""
@@ -192,7 +193,7 @@ class TranscriptCache:
         )
 
     def store(self, entry: TranscriptEntry) -> Path | None:
-        """落盘一条转写。失败打 stderr 并返回 ``None``，不让整批号码因此失败。"""
+        """落盘一条转写。失败记错误日志并返回 ``None``，不让整批号码因此失败。"""
         if not self.write_enabled:
             return None
         if not entry.key:
@@ -204,10 +205,11 @@ class TranscriptCache:
             _atomic_write_json(path, entry.asdict())
         except OSError as exc:
             self.stats.write_errors += 1
-            print(
-                f"[transcript-cache] 写入失败（{path}）：{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-                flush=True,
+            logger.bind(cache_key=entry.key).error(
+                "录音转写缓存写入失败，路径={}，错误={}: {}",
+                path,
+                type(exc).__name__,
+                exc,
             )
             return None
         self.stats.writes += 1

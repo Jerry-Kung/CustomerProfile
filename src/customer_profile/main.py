@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 from .api import create_app
-from .settings import get_settings
 
 app = create_app()
 
@@ -18,12 +17,11 @@ app = create_app()
 def main() -> None:
     import uvicorn
 
-    settings = get_settings()
     uvicorn.run(
         "customer_profile.main:app",
         host="0.0.0.0",
         port=8000,
-        log_level=settings.log_level.lower(),
+        log_config=None,  # create_app 已统一配置 Loguru，避免 Uvicorn 覆盖或重复输出。
     )
 
 

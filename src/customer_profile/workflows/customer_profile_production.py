@@ -11,7 +11,7 @@ DSL 基线：41 节点 / 55 边，是全项目最大的工作流。它把三段�
 3. **合并层**：7 个 ``code`` 节点逐级合并（录音证据 → 原始信息 → 人设卡 → 销售线索 →
    画像卡 → Notes → 最终数据）；
 4. **回写层**：``GET /config/note-attributes`` 取 Notes 模板，``POST /callback/update-profile``
-   写回最终 JSON。
+   向 M2M 服务直接写回含 ``phone`` / ``batch_id`` / ``analysis_result`` 的最终 JSON 对象。
 
 两处口径：
 
@@ -1184,17 +1184,15 @@ WORKFLOW = WorkflowDef(
             "HTTP 请求 2",
             "http-request",
             after=(FINAL_MERGE_CODE,),
+            inputs={"profile_payload": (FINAL_MERGE_CODE, "merged_json")},
             outputs=("body", "status"),
             **{
                 "@service": "profile",
                 "@method": "post",
                 "@path": f"{PROFILE_API_PREFIX}callback/update-profile",
                 "@auth": True,
-                # 请求体逐字符取自 DSL；引用位于 JSON 字符串**内部**，因此只转义、不补引号
-                "@body_template": (
-                    '{"data": [{"id": "key-value-149", "key": "", "type": "text", '
-                    '"value": "{{#1776911599997.merged_json#}}"}], "type": "json"}'
-                ),
+                # M2M 回写要求顶层 phone / batch_id / analysis_result，直接发送合并对象。
+                "@body_json_field": "profile_payload",
                 # 生产回写：WRITEBACK_ENABLED=false 时不发送（§9.3）
                 "@writeback": True,
                 "@outputs": {"body": "$text", "status": "$status"},

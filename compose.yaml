@@ -1,0 +1,56 @@
+name: customer-profile
+
+x-service: &service
+  build:
+    context: .
+  image: customer-profile:local
+  init: true
+  restart: unless-stopped
+  env_file:
+    - ${CP_ENV_FILE:-.env}
+  volumes:
+    - profile-data:/app/data
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+x-environment: &environment
+  DATABASE_URL: sqlite:////app/data/customer_profile.db
+  DATA_DIR: /app/data
+  INLINE_WORKER: "false"
+  WORKER_REPLICAS: "1"
+
+services:
+  api:
+    <<: *service
+    command: ["python", "-m", "customer_profile.main"]
+    environment:
+      <<: *environment
+      # Only worker startup recovers abandoned runs; API restarts must not
+      # interrupt runs that the separate worker is still executing.
+      INTERRUPT_ON_START: "false"
+    ports:
+      - "${CP_API_PORT:-8000}:8000"
+    stop_grace_period: 70s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json, urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5); assert json.load(response)['status'] == 'ok'"
+      interval: 15s
+      timeout: 6s
+      start_period: 30s
+      retries: 3
+
+  worker:
+    <<: *service
+    command: ["python", "-m", "customer_profile.worker"]
+    environment:
+      <<: *environment
+      INTERRUPT_ON_START: "true"
+    # Workflows can take more than 30 minutes. SIGTERM stops new claims and
+    # lets the current workflow finish before Docker may force termination.
+    stop_grace_period: 60m
+
+volumes:
+  profile-data:

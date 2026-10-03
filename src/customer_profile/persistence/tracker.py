@@ -2,21 +2,48 @@
 
 实现 :class:`~customer_profile.execution.scheduler.RunRecorder` 接口。所有写库操作
 失败都不向上抛——留痕是观测手段，不应因为它自身的问题让业务运行失败；但会记录到
-标准错误，避免「静默丢痕迹」被误当成「完整留痕成功」
+错误日志，避免「静默丢痕迹」被误当成「完整留痕成功」
 （`Dify迁移任务说明.md` §6 的最后一句）。
 """
 
 from __future__ import annotations
 
 import json
-import sys
+import re
 from typing import Any, Mapping
 
-from ..definitions import RunStatus
+from loguru import logger
+
+from ..definitions import NodeStatus, RunStatus
 from ..execution.context import NodeResult
 from ..execution.scheduler import NodeExecution, RunOutcome
 from .schema import RunRecordRow
 from .store import Store
+
+
+_STATUS_LABELS = {
+    RunStatus.SUCCEEDED: "成功",
+    RunStatus.FAILED: "失败",
+    RunStatus.CANCELLED: "已取消",
+    RunStatus.INTERRUPTED: "已中断",
+    RunStatus.SKIPPED: "已跳过",
+    NodeStatus.BLOCKED: "前置阻塞",
+}
+
+
+def _status_label(status: str) -> str:
+    label = _STATUS_LABELS.get(status)
+    return f"{label}（{status}）" if label else status
+
+
+def _error_summary(error: str | None) -> str:
+    """保留技术错误，避免将 LLM HTTP 错误中附带的响应正文输出到日志。"""
+    if not error:
+        return "无"
+    match = re.search(r"\bHTTP \d{3}:", error)
+    if match:
+        return f"{error[:match.end() - 1]}（响应详情见留痕）"
+    return error
 
 
 class RunTracker:
@@ -53,6 +80,9 @@ class RunTracker:
     # ------------------------------------------------------------ 运行层
 
     async def run_started(self, run: Any) -> None:
+        logger.bind(run_id=run.run_id, workflow_id=run.workflow_id).info(
+            "工作流开始，名称={}", run.workflow_display_name
+        )
         try:
             version_id = await self.register_definition(run.workflow)
             row = RunRecordRow(
@@ -71,9 +101,21 @@ class RunTracker:
             )
             await self.store.insert_run(row)
         except Exception as exc:
-            self._report("run_started", run.run_id, exc)
+            self._report("run_started", run.run_id, exc, run_id=run.run_id)
 
     async def run_finished(self, run: Any, outcome: RunOutcome) -> None:
+        level = "INFO"
+        if outcome.status == RunStatus.FAILED:
+            level = "ERROR"
+        elif outcome.status in {RunStatus.INTERRUPTED, RunStatus.CANCELLED}:
+            level = "WARNING"
+        logger.bind(run_id=run.run_id, workflow_id=outcome.workflow_id).log(
+            level,
+            "工作流结束，状态={}，耗时={} ms，错误={}",
+            _status_label(outcome.status),
+            outcome.duration_ms,
+            _error_summary(outcome.error),
+        )
         try:
             await self.store.update_run_finished(
                 run.run_id,
@@ -83,11 +125,14 @@ class RunTracker:
                 duration_ms=outcome.duration_ms,
             )
         except Exception as exc:
-            self._report("run_finished", run.run_id, exc)
+            self._report("run_finished", run.run_id, exc, run_id=run.run_id)
 
     # ------------------------------------------------------------ 节点层
 
     async def node_started(self, run: Any, node: Any) -> None:
+        logger.bind(
+            run_id=run.run_id, node_id=node.node_id, call_path=run.call_path
+        ).debug("节点开始，名称={}，类型={}", node.title, node.node_type)
         try:
             await self.store.upsert_node_execution(
                 run_id=run.run_id,
@@ -100,7 +145,10 @@ class RunTracker:
                 queued_at_ms=run.node_started_at.get(node.node_id),
             )
         except Exception as exc:
-            self._report("node_started", node.node_id, exc)
+            self._report(
+                "node_started", node.node_id, exc,
+                run_id=run.run_id, node_id=node.node_id,
+            )
 
     async def node_finished(self, run: Any, execution: NodeExecution) -> None:
         """收尾一条节点记录，并把 ``attempt_count`` **派生**出来落库。
@@ -112,6 +160,17 @@ class RunTracker:
         ``call_path`` 去数来源表，键必然对得上。
         """
         call_path = getattr(execution, "call_path", None) or run.call_path
+        level = "ERROR" if execution.status == NodeStatus.FAILED else "DEBUG"
+        logger.bind(
+            run_id=run.run_id, node_id=execution.node_id, call_path=call_path
+        ).log(
+            level,
+            "节点结束，名称={}，状态={}，耗时={} ms，错误={}",
+            execution.title,
+            _status_label(execution.status),
+            execution.duration_ms,
+            _error_summary(execution.error),
+        )
         try:
             attempt_count = await self.store.count_attempts(
                 run.run_id,
@@ -120,7 +179,10 @@ class RunTracker:
             )
         except Exception as exc:
             # 数不出来不该让节点记录写不进去；保持原值（插入时为 0）。
-            self._report("count_attempts", execution.node_id, exc)
+            self._report(
+                "count_attempts", execution.node_id, exc,
+                run_id=run.run_id, node_id=execution.node_id,
+            )
             attempt_count = None
         try:
             await self.store.upsert_node_execution(
@@ -140,7 +202,10 @@ class RunTracker:
                 attempt_count=attempt_count,
             )
         except Exception as exc:
-            self._report("node_finished", execution.node_id, exc)
+            self._report(
+                "node_finished", execution.node_id, exc,
+                run_id=run.run_id, node_id=execution.node_id,
+            )
 
     def _collect_inputs(self, run: Any, node: Any) -> dict[str, Any]:
         """把节点的实际入参快照下来：来源节点与字段名，以及已解析出的值。
@@ -217,14 +282,46 @@ class RunTracker:
                 provider_request_id=getattr(attempt, "provider_request_id", None),
                 replayed=attempt.replayed,
             )
+            # 先保存原始尝试，再记录摘要；兼容没有 succeeded 属性的录制/测试对象。
+            status_code = getattr(attempt, "status_code", None)
+            succeeded = getattr(attempt, "succeeded", None)
+            if succeeded is None:
+                succeeded = not (attempt.error or getattr(attempt, "anomaly", None))
+                if kind == "http":
+                    succeeded = succeeded and isinstance(status_code, int) and status_code < 400
+            logger.bind(
+                run_id=run_id, node_id=node_id, call_path=call_path
+            ).log(
+                "DEBUG" if succeeded else "WARNING",
+                "外部请求尝试结束，类型={}，次数={}，结果={}，状态码={}，耗时={} ms，错误码={}，错误={}",
+                kind,
+                attempt.attempt_no,
+                _status_label(RunStatus.SUCCEEDED if succeeded else RunStatus.FAILED),
+                status_code,
+                attempt.duration_ms,
+                attempt.error_code,
+                _error_summary(attempt.error or getattr(attempt, "anomaly", None)),
+            )
         except Exception as exc:
-            self._report("attempt_recorded", getattr(node_ref, "node_id", "?"), exc)
+            self._report(
+                "attempt_recorded", getattr(node_ref, "node_id", "?"), exc,
+                run_id=getattr(node_ref, "run_id", None),
+                node_id=getattr(node_ref, "node_id", None),
+            )
 
     # ------------------------------------------------------------ 内部
 
-    def _report(self, where: str, subject: str, exc: Exception) -> None:
+    def _report(
+        self,
+        where: str,
+        subject: str,
+        exc: Exception,
+        *,
+        run_id: str | None = None,
+        node_id: str | None = None,
+    ) -> None:
         message = f"[留痕] {where} 写入失败（{subject}）：{type(exc).__name__}: {exc}"
         if self.fail_soft:
-            print(message, file=sys.stderr, flush=True)
+            logger.bind(run_id=run_id, node_id=node_id).error(message)
             return
         raise RuntimeError(message) from exc

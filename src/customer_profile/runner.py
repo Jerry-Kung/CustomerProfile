@@ -7,13 +7,13 @@ API 层只调用这里，不自己拼装依赖。
 from __future__ import annotations
 
 import asyncio
-import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import httpx
+from loguru import logger
 
 from .definitions import RunStatus, WorkflowDef
 from .execution import code_registry
@@ -115,6 +115,7 @@ class Service:
         if limit is not None:
             depth = await self.store.queue_depth()
             if depth >= limit:
+                logger.warning("任务提交被拒绝：待跑队列已满，当前深度={}，上限={}", depth, limit)
                 raise QueueFull(limit, depth)
 
         rid = run_id or _new_run_id()
@@ -129,6 +130,7 @@ class Service:
                 is_replay=self.replay is not None,
             )
         )
+        logger.bind(run_id=rid).info("任务已入队，工作流={}", workflow_id)
         return rid
 
     async def submit_local(
@@ -211,11 +213,7 @@ class Service:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # 内联消费者不该因自身异常拖垮 API 进程
-                print(
-                    f"[内联 worker] 退出：{type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                logger.exception("内联执行进程异常退出：{}: {}", type(exc).__name__, exc)
 
         self.inline_worker_task = asyncio.create_task(_serve(), name="inline-worker")
 
@@ -388,10 +386,14 @@ async def build_service(
     store: Store | None = None
     tracker: RunTracker | None = None
     if enable_store:
-        store = Store(_database_path(settings))
+        store = Store(
+            _database_path(settings), busy_timeout_ms=settings.sqlite_busy_timeout_ms
+        )
         store.connect()
         if settings.interrupt_on_start:
-            await store.mark_running_as_interrupted()
+            marked = await store.mark_running_as_interrupted()
+            if marked:
+                logger.warning("启动恢复：{} 个残留任务已标为中断（interrupted），待人工处理", marked)
         tracker = RunTracker(store, is_replay=replay is not None, code_commit=_code_commit())
 
     runtime = NodeRuntime(
@@ -507,12 +509,11 @@ def _per_process_quota_settings(settings: Settings) -> Any:
     replicas = max(1, settings.worker_replicas)
     if replicas == 1:
         return settings
-    from dataclasses import replace
-
-    return replace(
-        settings,
-        llm_rpm_limit=settings.per_process_rpm_limit,
-        llm_tpm_limit=settings.per_process_tpm_limit,
+    return settings.model_copy(
+        update={
+            "llm_rpm_limit": settings.per_process_rpm_limit,
+            "llm_tpm_limit": settings.per_process_tpm_limit,
+        }
     )
 
 

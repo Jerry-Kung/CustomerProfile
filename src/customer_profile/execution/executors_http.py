@@ -47,6 +47,8 @@ async def execute_http_request(
     - ``@service``：``auc`` / ``profile`` / ``mhero``，决定 base_url 与凭据；
     - ``@headers``：非敏感 header 字面量；
     - ``@body``：请求体字面量（写请求用）；
+    - ``@body_json_field``：请求体整体取自指定入参；JSON 字符串解析为对象后直接发送，
+      对象原样使用，不再包装或把嵌套 JSON 转成字符串；
     - ``@body_template``：请求体是**含引用的 JSON 文本**（DSL 里 AUC 的两个节点就是这种
       写法，如 ``'{ "file_url": {{#node.file_url#}} }'``）。与 ``@body`` 的区别在于它由
       引用拼成，且引用的值恒为字符串、需要加引号；渲染结果按 JSON 解析后作为请求体；
@@ -101,11 +103,37 @@ def _resolve_body(
 ) -> Any:
     """还原请求体。
 
-    DSL 的 http 节点把请求体写成「含 ``{{#node.field#}}`` 引用的 JSON 文本」，例如
+    ``@body_json_field`` 直接使用上游的完整 JSON 对象。其余 DSL 的 http 节点把请求体
+    写成「含 ``{{#node.field#}}`` 引用的 JSON 文本」，例如
     ``{ "file_url": {{#1773112560827.file_url#}} }``。它的含义是：把引用替换成**带引号的
     字符串值**，整体作为 JSON 发送。因此这里按引用逐段替换并对值做 JSON 转义，再解析成
     对象；解析失败说明模板本身不合法，直接报错而不是把坏载荷发出去。
     """
+    json_field = config.get("@body_json_field")
+    if json_field is not None:
+        binding = next(
+            (b for b in node.bindings if b.target == json_field and not b.is_config),
+            None,
+        )
+        if binding is None:
+            raise NodeExecutionError(
+                f"http-request 节点 {node.node_id} 未绑定 JSON 请求体入参 {json_field!r}"
+            )
+        body = resolve_binding_value(ctx, binding)
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise NodeExecutionError(
+                    f"http-request 节点 {node.node_id} 的 {json_field!r} 不是合法 JSON："
+                    f"{exc.msg}（第 {exc.lineno} 行，第 {exc.colno} 列）"
+                ) from exc
+        if not isinstance(body, dict):
+            raise NodeExecutionError(
+                f"http-request 节点 {node.node_id} 的 {json_field!r} 须为 JSON 对象"
+            )
+        return body
+
     template = config.get("@body_template")
     if template is None:
         json_template = config.get("@body_json_template")

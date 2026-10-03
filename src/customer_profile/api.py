@@ -10,17 +10,18 @@ from __future__ import annotations
 
 import asyncio
 import re
-import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Mapping
 
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from .definitions import NodeDef, RunStatus, WorkflowDef
 from .layout import layout
+from .logging_config import configure_logging
 from .runner import QueueFull, RunSlotUnavailable, Service, build_service
 from .settings import get_settings
 
@@ -120,12 +121,21 @@ def create_app(service_factory: Any = None) -> FastAPI:
     lifespan 里用环境配置装配真实的那个。
     """
 
+    if service_factory is None:
+        configure_logging(get_settings().log_level, component="api")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if service_factory is not None:
             app.state.service = await service_factory()
         else:
             app.state.service = await build_service(get_settings())
+        service = app.state.service
+        logger.info(
+            "API 服务已就绪，工作流数量={}，内联执行={}，回写启用={}",
+            len(service.definitions), service.settings.inline_worker,
+            service.settings.writeback_enabled,
+        )
         try:
             yield
         finally:
@@ -138,6 +148,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
                 await service.aclose()
                 if service.store is not None:
                     service.store.close()
+                logger.info("API 服务已关闭")
 
     description = "潜在目标客户人设画像分析工作流 —— 最小执行器与留痕 API"
 
@@ -164,10 +175,9 @@ def create_app(service_factory: Any = None) -> FastAPI:
         for task in pending:
             task.cancel()
         if pending:
-            print(
-                f"[关停] {len(pending)} 个后台运行在 {timeout}s 内未结束，已请求取消",
-                file=sys.stderr,
-                flush=True,
+            logger.warning(
+                "API 关停等待超时，{} 个后台运行在 {} 秒内未结束，已请求取消",
+                len(pending), timeout,
             )
         for task in done:
             # 取出异常，避免 asyncio 打出「Task exception was never retrieved」
@@ -296,10 +306,14 @@ def create_app(service_factory: Any = None) -> FastAPI:
         """
         service = get_service()
         _validate_entry_inputs(payload.workflow_id, payload.inputs)
+        inputs = dict(payload.inputs)
+        if payload.workflow_id == ENTRY_WORKFLOW_ID:
+            # 下游引用 start.batch_id；可选字段也须有输出，才能只传手机号触发。
+            inputs.setdefault("batch_id", "")
         try:
             run_id = await service.submit(
                 payload.workflow_id,
-                payload.inputs,
+                inputs,
                 business_ref=payload.business_ref,
             )
         except KeyError as exc:
@@ -537,11 +551,9 @@ def _mount_ui(app: FastAPI, settings: Any) -> None:
         return
     dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     if not (dist / "index.html").is_file():
-        print(
-            f"[前端] SERVE_UI=true 但未找到构建产物：{dist}；"
-            f"请先执行 cd frontend && npm run build",
-            file=sys.stderr,
-            flush=True,
+        logger.warning(
+            "前端构建产物缺失：{}（SERVE_UI=true）；请先执行 cd frontend && npm run build",
+            dist,
         )
         return
     app.mount("/", StaticFiles(directory=str(dist), html=True), name="ui")

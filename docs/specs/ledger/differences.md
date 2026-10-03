@@ -119,6 +119,12 @@
 > 日后若业务方在 Dify 侧也修了同一处，登记的原文片段会「找不到」而让导出脚本报错退出，
 > 提示复核——这正是想要的失效方式。
 
+## 1.8 2026-10-03 M2M 回写协议适配
+
+| 编号 | 差异 | 依据 | 状态 |
+|---|---|---|---|
+| W53 | **主入口回写改用 M2M 原生 JSON 请求体**：从 DSL 的 Dify `data/type` 包装改为顶层 `phone`、`batch_id`、`analysis_result`，将最终画像 JSON 字符串整体解析为请求对象，保留其中的 `analysis_result` 对象。对外查询结果 `outputs.result1` 继续为 JSON 字符串；默认 `WRITEBACK_ENABLED=false` 保持不变 | **用户 2026-10-03 授权适配**；`customer-profile-api` 的 M2M 回写接口要求顶层字段，原包装直接调用会返回 422 | 已确认。部署配置与启用方法见 `docs/runbooks/部署.md` |
+
 ## 2. 未知运行语义（DSL 无法确认）
 
 ### 2.1 外部接口与协议

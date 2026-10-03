@@ -9,8 +9,10 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import sys
 
 import pytest
+from loguru import logger
 
 from customer_profile.definitions import RunStatus
 from customer_profile.persistence import RunTracker, Store
@@ -344,8 +346,12 @@ async def test_tracker_fails_soft_by_default(store, capsys):
         executions: list = []
         node_started_at: dict = {}
 
-    await tracker.run_started(DummyRun())  # 不应抛异常
-    captured = capsys.readouterr()
+    sink_id = logger.add(lambda message: sys.stderr.write(str(message)), diagnose=False)
+    try:
+        await tracker.run_started(DummyRun())  # 不应抛异常
+        captured = capsys.readouterr()
+    finally:
+        logger.remove(sink_id)
     assert "留痕" in captured.err
 
 

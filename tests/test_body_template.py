@@ -5,8 +5,9 @@
 方法（``get`` 属于 ``NodeResult``）。只有真实调用走到这一刻才会抛
 ``AttributeError: 'RunContext' object has no attribute 'get'``。
 
-三个节点用它：``录音文件内容抽取`` 的 ``/submit_analyze`` 与 ``/query_analyze``，
-以及 ``画像内容生成&回写`` 的回写体。因此这里按**引用位置**分别钉住两种 Dify 语义。
+录音文件内容抽取的 ``/submit_analyze`` 与 ``/query_analyze`` 使用这条路径；
+画像回写直接绑定 JSON 对象，由 ``test_m2m_writeback.py`` 验证。
+这里按**引用位置**分别钉住两种 Dify 语义。
 """
 
 from __future__ import annotations
@@ -170,8 +171,8 @@ async def test_reference_inside_string_is_escaped_not_double_quoted(tmp_path):
     )
 
 
-async def test_all_three_body_template_nodes_use_resolvable_references():
-    """真实定义的三个节点：模板里的每个引用都必须能在自己的图里解析。"""
+async def test_audio_body_template_nodes_use_resolvable_references():
+    """真实录音定义的两个模板：每个引用都必须能在自己的图里解析。"""
     from customer_profile.workflows import audio_content_extract, customer_profile_production
 
     candidates = []
@@ -181,8 +182,8 @@ async def test_all_three_body_template_nodes_use_resolvable_references():
             if template:
                 candidates.append((workflow, node, template))
 
-    assert len(candidates) == 3, (
-        f"应有 3 个 @body_template 节点，实际 {len(candidates)}："
+    assert len(candidates) == 2, (
+        f"应有 2 个 @body_template 节点，实际 {len(candidates)}："
         f"{[n.node_id for _, n, _ in candidates]}"
     )
 
