@@ -1,9 +1,9 @@
 """工作流定义层：节点、边、输入绑定的显式声明。
 
 这是运行时的唯一事实来源。前端与执行器从同一份定义取拓扑，不维护第二张图
-（见 `Dify迁移任务说明.md` §5.1）。
+。
 
-Dify 特有的两套变量机制在这里被区分开：
+本层区分两套变量机制：
 
 - ``{{#node_id.field#}}`` 引用 → :class:`Binding`，由调度层按依赖解析；
 - 模板内部的 ``{{ variable }}`` 渲染 → 模板渲染函数的职责，不在此层。
@@ -48,7 +48,7 @@ class NodeStatus:
 # ---------------------------------------------------------------- 绑定
 
 Selector = tuple[str, str]
-"""变量选择器：``(node_id, field)``，对应 Dify 的 ``value_selector``。"""
+"""变量选择器：``(node_id, field)``，对应原始定义的 ``value_selector``。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +66,7 @@ class Binding:
     """上游 ``(node_id, field)``。"""
 
     value_type: str = "string"
-    """Dify 声明的类型，用于还原 JSON 字符串与对象的区别（不得任意互换）。"""
+    """原始定义声明的类型，用于还原 JSON 字符串与对象的区别（不得任意互换）。"""
 
     is_config: bool = False
     """是否配置项（``@`` 前缀）。"""
@@ -85,10 +85,10 @@ class NodeDef:
     """一个节点的最小声明：稳定 ID、类型、前置、输入绑定、执行配置、坐标。"""
 
     node_id: str
-    """原 Dify 节点 ID，迁移后仍是稳定标识。"""
+    """原始定义中的节点 ID，运行期作为稳定标识。"""
 
     title: str
-    """显示名，保留原中文标题以便与 Dify 对照。"""
+    """显示名，取自原工作流的中文标题。"""
 
     node_type: str
     """节点类型：``start`` / ``end`` / ``code`` / ``template-transform`` /
@@ -102,7 +102,7 @@ class NodeDef:
 
     形如 ``(if_else_node_id, "true")`` 或 ``(..., "false")``。``None`` 表示无条件执行。
 
-    DSL 的边用 ``sourceHandle`` 区分分支（实测 55 条分支边），而迁移后的
+    原始定义的边用 ``sourceHandle`` 区分分支（实测 55 条分支边），而现在的
     ``after=`` 只记了「有这条边」、丢了「走哪一支」。不还原这一位，两条分支会**同时执行**：
     截图类流程里表现为「文件不存在」与「文件存在」两条路一起跑，后者对着空串解析 JSON
     直接抛 :class:`JSONDecodeError`（V0.3 真实冒烟时实测到）。
@@ -125,7 +125,7 @@ class NodeDef:
     """节点专属配置（HTTP 方法/路径、模板文件名、模型参数等）。"""
 
     coords: tuple[float, float] | None = None
-    """原 DSL 的 position，作为第一版布局直接复用。"""
+    """原始定义的 position，作为第一版布局直接复用。"""
 
     def __post_init__(self) -> None:
         if not self.node_id:
@@ -160,7 +160,7 @@ class WorkflowDef:
     """稳定标识，例如 ``mengshi_it_system_data``。"""
 
     display_name: str
-    """中文显示名，与 DSL 文件名对应。"""
+    """中文显示名，与 定义文件名对应。"""
 
     nodes: tuple[NodeDef, ...]
     """全部节点，顺序不限。"""
@@ -172,7 +172,7 @@ class WorkflowDef:
     """出口节点 ID（``end`` 类型）。"""
 
     source_dsl: str | None = None
-    """来源 DSL 文件名，用于追溯。``None`` 表示人工构造的验证用图。"""
+    """来源 定义文件名，用于追溯。``None`` 表示人工构造的验证用图。"""
 
     outputs: Mapping[str, str] = field(default_factory=dict)
     """对外输出字段 → 产出它的节点 ID。约定最终契约是 ``result1`` 字符串。"""
@@ -219,7 +219,7 @@ class WorkflowDef:
         )
 
     def edge_list(self) -> list[dict[str, str]]:
-        """扁平边表，语义与 DSL 的 ``graph.edges`` 一致。
+        """扁平边表，语义与原始定义的 ``graph.edges`` 一致。
 
         ``source_handle`` 保留分支名（``true`` / ``false`` / ``fail-branch``），
         与台账 ``node_ledger.json`` 的字段同名同义；普通边为 ``"source"``。
@@ -318,7 +318,7 @@ def make_node(
     """构造节点的简写。``inputs`` 的值可以是 ``(node_id, field)`` 或 ``'node_id.field'``。
 
     ``on_branch`` 声明「只在某个 ``if-else`` 的某一支上执行」，形如
-    ``on_branch=("1775703027681", "true")``（DSL 的 ``sourceHandle``）。
+    ``on_branch=("1775703027681", "true")``（原始定义的 ``sourceHandle``）。
     """
     bindings: list[Binding] = []
     for target, selector in (inputs or {}).items():

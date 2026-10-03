@@ -3,7 +3,7 @@
 实现 :class:`~customer_profile.execution.scheduler.RunRecorder` 接口。所有写库操作
 失败都不向上抛——留痕是观测手段，不应因为它自身的问题让业务运行失败；但会记录到
 标准错误，避免「静默丢痕迹」被误当成「完整留痕成功」
-（`Dify迁移任务说明.md` §6 的最后一句）。
+（既定约束 的最后一句）。
 """
 
 from __future__ import annotations

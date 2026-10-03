@@ -1,6 +1,6 @@
 """最小 HTTP API。
 
-范围刻意收窄到 V0.2 需要的五个端点（规划 §3 V0.2 交付物 5）：提交任务返回 run_id、
+范围刻意收窄到 V0.2 需要的五个端点：提交任务返回 run_id、
 查询运行状态与节点明细。**没有**前端、没有编辑、没有流式推送——那些属 V0.4/V0.5。
 
 调用方协议仍是 Q7 的缺省处理：只提供异步提交 + 查询 run_id。
@@ -291,7 +291,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
     async def submit_run(payload: SubmitRequest = Body(...)) -> SubmitResponse:
         """提交任务，立即返回 ``run_id``。
 
-        任务先落库再返回（`Dify迁移任务说明.md` §4），因此不会出现「拿到 run_id 但
+        任务先落库再返回，因此不会出现「拿到 run_id 但
         数据库里查不到」的情况。
         """
         service = get_service()
@@ -500,7 +500,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
 
         为什么需要这个出口：worker 崩溃或停机时，正在跑的运行会被标成 ``interrupted``，
         并**保留已完成结果、不做自动续跑**——这是对的（进程中断不能证明外部副作用未
-        发生，见 `Dify迁移任务说明.md` §7.3）。但「交人工处理」若没有任何出口，这些
+        发生，见 既定约束）。但「交人工处理」若没有任何出口，这些
         运行会永远留在列表里，看不出是「待处理」还是「已处理」。本端点给出那个出口。
 
         **只接受 ``interrupted``**：其它状态一律 409。特别是不能拿它去停一条正在跑的

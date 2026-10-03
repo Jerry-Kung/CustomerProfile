@@ -1,7 +1,7 @@
 """``（新）SubAgent - 极光数据（生产环境）`` 的 Python 定义。
 
-DSL 基线：7 节点 / 7 边，是结构最简单的一类子流程——「取一段数据，取到就原样输出，
-取不到给一句固定说明」。它也把迁移里的一条口径摆得最清楚：**空串是合法产出**。
+原始定义基线：7 节点 / 7 边，是结构最简单的一类子流程——「取一段数据，取到就原样输出，
+取不到给一句固定说明」。它也把改造里的一条口径摆得最清楚：**空串是合法产出**。
 分支判据是 ``result not empty``，而 falsy 的兜底分支同样会走到聚合器，因此聚合器必须
 按「谁真正执行过」取值，不能按「值非空」取值（P4）。
 
@@ -37,7 +37,7 @@ SHARED_CODE_MODULE = "customer_profile.workflows.shared_code"
 SLUG = "jiguang_data"
 
 DATA_SOURCE = "DatametInterestPoints"
-"""本流程默认取的渠道名。新版 DSL 由 ``jiguang`` 改为该值——旧值取不到数据。"""
+"""本流程默认取的渠道名。新版定义 由 ``jiguang`` 改为该值——旧值取不到数据。"""
 
 
 def template_name(node_id: str) -> str:

@@ -3,7 +3,7 @@
 试驾录音与外呼录音的图结构**逐节点相同**，只有渠道名（``data_source``）与提示词正文
 不同，因此与截图类同样处理：一个构造器 + 两份参数。
 
-图结构（节点 ID 沿用 DSL 原值，两个文件里是同一套）：
+图结构（节点 ID 沿用原始定义的取值，两个文件里是同一套）：
 
     start(customer_data, data_source)
       ├─ code 检查录音文件 → if-else 文件是否存在
@@ -15,8 +15,8 @@
       │     └─ false 分支 → template-transform 无数据，输出默认信息
       └─ variable-aggregator → end
 
-``llm_model`` 相关的两个 ``if-else``（DSL 的 ``条件分支 3``）按 §6.4.5 已废弃：
-迁移后删除该分支，任选一支为默认路径——原值恒为 ``gemini``，两支差异仅是模型选择，
+``llm_model`` 相关的两个 ``if-else``（原始定义的 ``条件分支 3``）已废弃：
+现在删除该分支，任选一支为默认路径——原值恒为 ``gemini``，两支差异仅是模型选择，
 而模型在全项目已统一。
 """
 
@@ -49,7 +49,7 @@ AUDIO_EXTRACT_IN_ITERATION = "1776152239207"
 # 条件分支 3（废弃的 llm_model 分支）：两个录音工作流各一个，节点 ID 不同
 DEPRECATED_BRANCH_TEST_DRIVE = "1776763992027"
 DEPRECATED_BRANCH_OUTBOUND = "1776764239626"
-# 分支两侧的 llm 节点：迁移后只保留一支，另一支不再出现在定义中
+# 分支两侧的 llm 节点：现在只保留一支，另一支不再出现在定义中
 LLM_AFTER_DEPRECATED_BRANCH_TEST_DRIVE = "17767640208110"
 LLM_AFTER_DEPRECATED_BRANCH_OUTBOUND = "17767643097270"
 # 结果聚合节点的两个不同 ID

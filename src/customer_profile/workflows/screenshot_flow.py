@@ -1,11 +1,11 @@
 """截图类工作流（7 个）的共同结构与定义构造器。
 
 七个截图流程——朋友圈、微信主页、微信手机号搜索、抖音、小红书、支付宝——的**图结构
-逐节点相同**，只有各自的渠道名（``data_source``）、提示词正文与显示名不同。DSL 里它们
-是七份各自独立的导出文件，迁移后应当是**一个构造器 + 七份参数**，而不是七份复制粘贴的
+逐节点相同**，只有各自的渠道名（``data_source``）、提示词正文与显示名不同。原始定义里它们
+是七份各自独立的导出文件，现在应当是**一个构造器 + 七份参数**，而不是七份复制粘贴的
 定义：那样任何一处修正都得改七遍。
 
-图结构（节点 ID 沿用 DSL 原值，七个文件里也是同一套 ID）：
+图结构（节点 ID 沿用原始定义的取值，七个文件里也是同一套 ID）：
 
     start(customer_data, data_source)
       ├─ code 检查文件 → if-else 文件是否存在
@@ -47,7 +47,7 @@ AGGREGATE_2 = "1775811233890"
 JOIN_TEMPLATE = "1775811655657"
 SUMMARY_LLM = "17760451317570"
 
-# 分支 ID：DSL 的 if-else 只有 true 一支，其余走 else
+# 分支 ID：原始定义的 if-else 只有 true 一支，其余走 else
 TRUE_BRANCH = "true"
 ELSE_BRANCH = "false"
 
@@ -60,10 +60,10 @@ class ScreenshotFlow:
     """一个截图流程的可变部分。"""
 
     slug: str
-    """模块与模板资源用的稳定标识，对应 ``scripts/export_templates.py`` 的 SLUGS。"""
+    """模块与模板资源用的稳定标识，与模板资源的 slug 一致。"""
 
     display_name: str
-    """中文显示名，与 DSL 文件名一致。"""
+    """中文显示名，与 定义文件名一致。"""
 
     data_source: str
     """渠道名。传给「检查文件」节点，决定从 history 响应里取哪一条记录。"""
@@ -73,7 +73,7 @@ class ScreenshotFlow:
 
 
 def template_name(slug: str, node_id: str) -> str:
-    """模板资源文件名（不含扩展名）。与 ``scripts/export_templates.py`` 的命名一致。"""
+    """模板资源文件名（不含扩展名）。与模板资源文件命名一致。"""
     return f"{slug}__{node_id}"
 
 

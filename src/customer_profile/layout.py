@@ -1,8 +1,8 @@
 """拓扑布局：把工作流定义排成可供前端绘制的坐标。
 
-**为什么需要这一层**：`NodeDef.coords` 字段为复用 Dify 的 ``position`` 预留，但迁移时
-285 个节点只填了 22 个。用户 2026-09-23 决定放弃回填 DSL 坐标，改用自动布局——回填会产生
-一份与 DSL 强相关的派生物，与「纯代码构建、与 Dify 解关联」的初衷相悖。
+**为什么需要这一层**：`NodeDef.coords` 字段为复用原始定义的 ``position`` 预留，但改造时
+285 个节点只填了 22 个。用户 2026-09-23 决定放弃回填原始定义坐标，改用自动布局——回填会产生
+一份与定义强相关的派生物，与「纯代码构建、与原节点图解关联」的初衷相悖。
 
 **为什么不用拓扑排序分层**：``WorkflowDef.structural_order()`` 基于
 :class:`graphlib.TopologicalSorter`，遇环抛 :class:`CycleError`，而截图类工作流（7 个）
@@ -30,7 +30,7 @@ ROW_HEIGHT = 140.0
 
 ORIGIN_X = 80.0
 ORIGIN_Y = 282.0
-"""第一层第一个节点的起始位置。沿用入口图 DSL 的排版起点，与历史截图观感一致。"""
+"""第一层第一个节点的起始位置。沿用入口图原始定义的排版起点，与历史截图观感一致。"""
 
 LAYOUT_MARGIN = 40.0
 """层内首尾留白。"""
@@ -131,7 +131,7 @@ def _fanout(definition: WorkflowDef) -> dict[str, int]:
 def attach_layout(definition_dict: Mapping[str, object], definition: WorkflowDef) -> dict:
     """给 ``WorkflowDef.asdict()`` 的结果附加 ``layout`` 字段，供前端直接使用。
 
-    ``asdict()`` 里的 ``coords`` 保持原样（原 DSL 坐标或 ``None``），布局结果放在独立的
+    ``asdict()`` 里的 ``coords`` 保持原样（原始定义坐标或 ``None``），布局结果放在独立的
     ``layout`` 字段：一个是**声明**，一个是**算出来的展示坐标**，混在一起会让
     「这个位置是人定的还是算出来的」无从分辨。
     """

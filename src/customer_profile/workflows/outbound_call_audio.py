@@ -1,6 +1,6 @@
 """``（新）SubAgent - 外呼录音信息提取`` 的 Python 定义。
 
-DSL 基线：20 节点 / 21 边，与「外呼录音信息提取」**图结构逐节点相同**，只有渠道名
+原始定义基线：20 节点 / 21 边，与「外呼录音信息提取」**图结构逐节点相同**，只有渠道名
 （``AIOutboundCallRecordingFile``）与提示词正文不同。结构复用
 :mod:`customer_profile.workflows.audio_flow`。
 

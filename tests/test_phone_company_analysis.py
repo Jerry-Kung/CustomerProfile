@@ -1,6 +1,6 @@
 """``手机号&企业信息分析`` 的结果解析：按真实载荷形态取值。
 
-这个模块的存在理由是**一次真实的静默数据丢失**：``结果解析`` 节点（DSL 节点
+这个模块的存在理由是**一次真实的静默数据丢失**：``结果解析`` 节点（原始定义节点
 ``1774941932987``）原文按 ``operator_location_json`` / ``affiliated_company_json``
 两个键取值，而 ``RelatedEnterpriseInfo`` 渠道的真实载荷从来不含它们——全部留痕实测
 （5 个批次、8 份响应）里出现次数为 0。后果是两个字段恒为 ``{}``，企业信息分析 LLM
@@ -80,7 +80,7 @@ def test_no_company_payload_yields_empty_company_block():
 
 
 def test_dsl_original_keys_still_work():
-    """兼容读取：若上游日后真的传来 DSL 原来的键名，仍须能取到。"""
+    """兼容读取：若上游日后真的传来原始定义原来的键名，仍须能取到。"""
     payload = {
         "operator_location_json": {"operator": "中国移动"},
         "affiliated_company_json": {"company_name": "某某公司"},

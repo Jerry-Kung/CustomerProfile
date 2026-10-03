@@ -101,7 +101,7 @@ class Service:
         与 :meth:`submit_local` 的区别是这一条不含执行：写入一行 ``status='queued'``
         即返回，由 worker（独立进程，或本进程内联的那个）领取后执行。
 
-        这正是「任务先持久化入队再返回 run_id」（`Dify迁移任务说明.md` §4）的落地——
+        这正是「任务先持久化入队再返回 run_id」的落地——
         进程此刻退出，任务仍在库里，不会被丢掉。
 
         队列已满时抛 :class:`QueueFull`（API 翻成 429）。**先判深度再写库**，因此被拒
@@ -187,7 +187,7 @@ class Service:
     def start_inline_worker(self) -> None:
         """在本进程内启动一个队列消费者（``INLINE_WORKER=true``）。
 
-        为什么保留内联执行：API 与 worker 分离是生产形态（`Dify迁移任务说明.md` §4），
+        为什么保留内联执行：API 与 worker 分离是生产形态，
         但测试与单机部署若也必须另起一个进程才能把任务跑完，代价过大——而且
         「POST /runs 之后立刻能查到并看到它跑完」是既有契约（``test_api.py`` 等五个
         测试文件依赖它）。内联 worker 让这条契约在队列模型下依然成立。

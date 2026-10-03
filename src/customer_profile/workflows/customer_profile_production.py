@@ -1,6 +1,6 @@
 """``（新）SubAgent - 画像内容生成&回写（生产环境）（新）`` 的 Python 定义。
 
-DSL 基线：41 节点 / 55 边，是全项目最大的工作流。它把三段输入（证据线索、人设画像、
+原始定义基线：41 节点 / 55 边，是全项目最大的工作流。它把三段输入（证据线索、人设画像、
 原始客户数据）经 11 路 LLM 生成与 7 段 code 合并，拼成一份最终画像 JSON，再回写生产。
 
 结构上分四层：
@@ -19,7 +19,7 @@ DSL 基线：41 节点 / 55 边，是全项目最大的工作流。它把三段�
   输出字段仍叫 ``result``；重试下沉到 ``llm_call()`` 内部。
 - **回写默认关闭**：``POST /callback/update-profile`` 标记 ``@writeback``。缺省
   （``WRITEBACK_ENABLED=false``）时该节点**不发送请求**，只产出「已跳过」的可解释结果。
-  测试与影子模式禁止生产回写（`Dify迁移任务说明.md` §9.3）。
+  测试与影子模式禁止生产回写。
 """
 
 from __future__ import annotations
@@ -103,7 +103,7 @@ def _llm(
     """构造一个由 ``gemini_retry`` 工具节点归一而来的 ``llm`` 节点。
 
     统一三件事：提示词来自上游模板节点的 ``output``、输出字段叫 ``result``
-    （与 DSL 的 ``tool_parameters`` 消费方一致）、系统消息固定。收在一处，
+    （与原始定义的 ``tool_parameters`` 消费方一致）、系统消息固定。收在一处，
     免得 11 份声明各写各的、日后改一处漏十处。
     """
     return make_node(
@@ -121,12 +121,12 @@ def _llm(
 
 
 # ====================================================================
-# code 节点正文（逐字符取自 DSL，只把 def main 换成业务名；
+# code 节点正文（逐字符取自原始定义，只把 def main 换成业务名；
 # 跨节点重名的辅助函数加 __<节点后四位> 后缀，函数体一字未改）
 # ====================================================================
 
 
-# ---- DSL 节点 1776826087777 的正文（逐字符，仅函数名不同）
+# ---- 原始定义节点 1776826087777 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -150,7 +150,7 @@ def _clean_json_string(value: str) -> str:
 
 def _parse_json(value):
     """
-    兼容 Dify 上游传入 String / Object 两种情况。
+    兼容上游传入 String / Object 两种情况。
     """
     if value is None:
         return {}
@@ -244,7 +244,7 @@ def extract_audio_evidence(json_str) -> dict:
     }
 
 
-# ---- DSL 节点 1776906696734 的正文（逐字符，仅函数名不同）
+# ---- 原始定义节点 1776906696734 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -337,7 +337,7 @@ def build_profile_card_json(phone, batch_id, profile_summary, inferred_tags, usa
     }
 
 
-# ---- DSL 节点 1776910309479 的正文（逐字符，仅函数名不同）
+# ---- 原始定义节点 1776910309479 的正文（逐字符，仅函数名不同）
 def merge_profile_card_data(json_text1: str, json_text2: str, json_text3: str) -> dict:
     import json
 
@@ -406,13 +406,13 @@ def merge_profile_card_data(json_text1: str, json_text2: str, json_text3: str) -
     }
 
 
-# ---- DSL 节点 1776911599997 的正文（逐字符，仅函数名不同）
+# ---- 原始定义节点 1776911599997 的正文（逐字符，仅函数名不同）
 import json
 
 
 def _parse_json__9997(value):
     """
-    兼容 Dify 上游传入 String / Object 两种情况
+    兼容上游传入 String / Object 两种情况
     """
     if value is None:
         return {}
@@ -450,7 +450,7 @@ def merge_final_data(json_str_1, json_str_2) -> dict:
     }
 
 
-# ---- DSL 节点 1777020043726 的正文（逐字符，仅函数名不同）
+# ---- 原始定义节点 1777020043726 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -471,7 +471,7 @@ def _clean_json_string__3726(value: str) -> str:
 
 def _parse_json__3726(value, field_name: str):
     """
-    兼容 Dify 上游传入 String / Object / None
+    兼容上游传入 String / Object / None
     """
     if value is None:
         return {}
@@ -590,13 +590,13 @@ def merge_sales_lead_data(phone, batch_id, business_level, customer_overview, cu
         }
     }
 
-    # 6. 以 String 类型输出，避免 Dify 下游把它识别为 Object
+    # 6. 以 String 类型输出，避免下游把它识别为 Object
     return {
         "result": json.dumps(merged_result, ensure_ascii=False)
     }
 
 
-# ---- DSL 节点 1777102704064 的正文（逐字符，仅函数名不同）
+# ---- 原始定义节点 1777102704064 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -616,7 +616,7 @@ def _clean_json_string__4064(value: str) -> str:
 
 def _parse_json__4064(value, field_name: str = "json_str"):
     """
-    兼容 Dify 上游传入 String / Object / None
+    兼容上游传入 String / Object / None
     """
     if value is None:
         return {}
@@ -678,7 +678,7 @@ def organize_original_customer_info(json_str) -> dict:
     }
 
 
-# ---- DSL 节点 1777260507680 的正文（逐字符，仅函数名不同）
+# ---- 原始定义节点 1777260507680 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -698,7 +698,7 @@ def _clean_json_string__7680(value: str) -> str:
 
 def _parse_json__7680(value, field_name: str = "json_str"):
     """
-    兼容 Dify 上游传入 String / Object / None
+    兼容上游传入 String / Object / None
     """
     if value is None:
         return {}
@@ -1190,7 +1190,7 @@ WORKFLOW = WorkflowDef(
                 "@method": "post",
                 "@path": f"{PROFILE_API_PREFIX}callback/update-profile",
                 "@auth": True,
-                # 请求体逐字符取自 DSL；引用位于 JSON 字符串**内部**，因此只转义、不补引号
+                # 请求体逐字符取自原始定义；引用位于 JSON 字符串**内部**，因此只转义、不补引号
                 "@body_template": (
                     '{"data": [{"id": "key-value-149", "key": "", "type": "text", '
                     '"value": "{{#1776911599997.merged_json#}}"}], "type": "json"}'
@@ -1239,10 +1239,10 @@ def default_inputs(
 # ====================================================================
 # code 节点 -> 函数名映射
 #
-# 迁移只允许改函数名，不许改函数体。跨节点重名的辅助函数（同一份 DSL 里不同
+# 改造只允许改函数名，不许改函数体。跨节点重名的辅助函数（同一份定义 里不同
 # 节点各写了一份 ``_parse_json`` 之类）必须改名，否则后一份会覆盖前一份。
-# 这里如实记录每个节点用了什么名字，``tests/test_code_verbatim.py`` 按它把
-# DSL 原文里的旧名换成新名后再逐字符比对——差异因此只剩下「名字」。
+# 这里如实记录每个节点用了什么名字，逐字符比对按它把
+# 原始定义文本里的旧名换成新名后再逐字符比对——差异因此只剩下「名字」。
 # ====================================================================
 
 CODE_SPECS: dict[str, dict] = {

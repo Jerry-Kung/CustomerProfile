@@ -1,6 +1,6 @@
 """``（新）SubAgent - 用户人工Feedback数据提取`` 的 Python 定义。
 
-DSL 基线：11 节点 / 12 边。链路是「取反馈原文 + 拉历史画像 → 拆点赞/点踩 → 判断有无反馈
+原始定义基线：11 节点 / 12 边。链路是「取反馈原文 + 拉历史画像 → 拆点赞/点踩 → 判断有无反馈
 → 有则生成总结报告，无则给一句固定说明」：
 
     start(phone_number, customer_data, data_source)
@@ -14,9 +14,9 @@ DSL 基线：11 节点 / 12 边。链路是「取反馈原文 + 拉历史画像 
 
 两处口径：
 
-- ``code`` 节点的两个解析辅助函数在本模块内同名（``_strip_code_fence`` 在两段 DSL
+- ``code`` 节点的两个解析辅助函数在本模块内同名（``_strip_code_fence`` 在两段原始定义
   正文里都有但实现不同），因此第二个被重命名为 ``_strip_code_fence__6946``；改名只动
-  函数名，正文一字未改（见 ``tests/test_code_verbatim.py``）。
+  函数名，正文一字未改。
 - 回写类接口不在此工作流内；这里只有一次 GET 读请求（mhero），按幂等重试。
 """
 
@@ -27,7 +27,7 @@ from typing import Any
 from ..definitions import WorkflowDef, make_node
 
 
-# ---- DSL 节点 1779414084761 的正文（逐字符，仅函数名不同）
+# ---- 原始定义节点 1779414084761 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -47,7 +47,7 @@ def _strip_code_fence(text: str) -> str:
 
 def _parse_json_string(value):
     """
-    兼容 Dify 上游传入 String / Object / None 三种情况。
+    兼容上游传入 String / Object / None 三种情况。
     解析失败时返回空 dict，避免代码节点中断。
     """
     if value is None:
@@ -165,7 +165,7 @@ def split_feedback_notes(input_json) -> dict:
     }
 
 
-# ---- DSL 节点 1779414516946 的正文（逐字符，仅函数名不同）
+# ---- 原始定义节点 1779414516946 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -247,7 +247,7 @@ def detect_feedback_presence(feedback_content, approved_feedback_json, rejected_
     ])
 
     return {
-        # Dify Code 节点不支持 boolean 类型，所以用 number 输出
+        # ``code`` 节点不支持 boolean 类型，所以用 number 输出
         # 1 = True，有反馈
         # 0 = False，无反馈
         "has_feedback": 1 if has_feedback else 0
@@ -368,8 +368,8 @@ WORKFLOW = WorkflowDef(
             branches=(
                 {
                     "id": TRUE_BRANCH,
-                    # DSL: has_feedback = 1（number）。code 节点用 number 表达布尔
-                    # （Dify 不支持 boolean 输出），因此按文本比较即可。
+                    # 原始定义: has_feedback = 1（number）。code 节点用 number 表达布尔
+                    # （不支持 boolean 输出），因此按文本比较即可。
                     "condition": {"field": "has_feedback", "operator": "eq", "value": "1"},
                 },
             ),
@@ -406,7 +406,7 @@ WORKFLOW = WorkflowDef(
             REPORT_LLM,
             "Gemini（异常输出重试版）",
             "llm",
-            # 有意差异 W2/W3：DSL 的 gemini_retry_2_times 工具节点归一为一次 llm_call
+            # 有意差异 W2/W3：原始定义的 gemini_retry_2_times 工具节点归一为一次 llm_call
             after=(REPORT_TEMPLATE,),
             inputs={"input_prompt": (REPORT_TEMPLATE, "output")},
             outputs=("result",),
@@ -453,10 +453,10 @@ def default_inputs(customer_data: str, phone_number: str = "") -> dict[str, Any]
 # ====================================================================
 # code 节点 -> 函数名映射
 #
-# 迁移只允许改函数名，不许改函数体。跨节点重名的辅助函数（同一份 DSL 里不同
+# 改造只允许改函数名，不许改函数体。跨节点重名的辅助函数（同一份定义 里不同
 # 节点各写了一份 ``_parse_json`` 之类）必须改名，否则后一份会覆盖前一份。
-# 这里如实记录每个节点用了什么名字，``tests/test_code_verbatim.py`` 按它把
-# DSL 原文里的旧名换成新名后再逐字符比对——差异因此只剩下「名字」。
+# 这里如实记录每个节点用了什么名字，逐字符比对按它把
+# 原始定义文本里的旧名换成新名后再逐字符比对——差异因此只剩下「名字」。
 # ====================================================================
 
 CODE_SPECS: dict[str, dict] = {

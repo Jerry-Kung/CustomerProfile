@@ -1,10 +1,10 @@
 """``微信手机号搜索截图信息提取`` 的 Python 定义。
 
-DSL 基线：18 节点 / 18 边，与其余 6 个截图流程**图结构逐节点相同**，只有渠道名
+原始定义基线：18 节点 / 18 边，与其余 6 个截图流程**图结构逐节点相同**，只有渠道名
 （``WeChatPhoneSearchScreenshot``）与提示词正文不同。因此这里只给出参数，结构复用
 :mod:`customer_profile.workflows.screenshot_flow`。
 
-渠道名来自 DSL ``start`` 节点由父图传入的 ``data_source`` 字面量；图片直链来自
+渠道名来自原始定义 ``start`` 节点由父图传入的 ``data_source`` 字面量；图片直链来自
 ``GET /api/v1/remote/data/history/{phone}`` 响应里 ``channel == WeChatPhoneSearchScreenshot``
 那条记录的 ``media_urls``。
 """

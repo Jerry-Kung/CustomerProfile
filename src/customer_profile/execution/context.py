@@ -1,6 +1,6 @@
 """执行期上下文：一次运行的可变状态与变量解析。
 
-每个 run 有独立上下文，禁止跨客户共享可变中间结果（`Dify迁移任务说明.md` §5.2）。
+每个 run 有独立上下文，禁止跨客户共享可变中间结果。
 节点结果按类型保存——JSON 字符串与 JSON 对象不互换（§5.1）。
 """
 
@@ -100,9 +100,9 @@ class RunContext:
         if not node_id or not field_name:
             raise MissingValue(f"变量引用格式非法：{selector!r}")
 
-        # 迭代循环体正是通过 ``{{#<迭代节点>.item#}}`` 取当前项的（DSL 里如此，
+        # 迭代循环体正是通过 ``{{#<迭代节点>.item#}}`` 取当前项的（原始定义里如此，
         # 9 个含迭代的工作流都这么写）。但循环体执行期间迭代节点**尚未产出结果**，
-        # 按节点输出查必然失败。这里先把当前项就地解析出来，与 Dify 的语义一致；
+        # 按节点输出查必然失败。这里先把当前项就地解析出来，与原始定义语义一致；
         # 迭代结束后迭代节点会记下真正的结果，下游拿到的仍是正常输出。
         current_iteration = self.iteration_locals.get("iteration_id")
         if current_iteration and node_id == current_iteration:
@@ -208,7 +208,7 @@ class MissingVariable(MissingValue):
 def coerce_to_text(value: Any) -> str:
     """把值转成文本，用于模板渲染。
 
-    ``None`` 归一为空串：Dify 模板对缺失变量渲染为空。``dict`` / ``list``
+    ``None`` 归一为空串：模板对缺失变量渲染为空。``dict`` / ``list``
     转 JSON 文本而非 Python ``repr``，避免下游拿到单引号的非 JSON。
     """
     if value is None:
@@ -225,7 +225,7 @@ def coerce_to_text(value: Any) -> str:
 
 
 def is_empty(value: Any) -> bool:
-    """Dify 口径的空值判定：``None``、空串、纯空白为空；``0`` 与 ``False`` 不为空。"""
+    """空值判定：``None``、空串、纯空白为空；``0`` 与 ``False`` 不为空。"""
     if value is None:
         return True
     if isinstance(value, str) and value.strip() == "":

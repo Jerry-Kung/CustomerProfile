@@ -1,17 +1,17 @@
 """``（新）SubAgent - 人工确认信息提取（生产环境）`` 的 Python 定义。
 
-DSL 基线：4 节点 / 3 边，``start → http-request(GET) → code → end``。
+原始定义基线：4 节点 / 3 边，``start → http-request(GET) → code → end``。
 它是 V0.2 用来验证「HTTP 读取与留痕」的载体。
 
-迁移口径：
+改造口径：
 
-- HTTP 节点保留方法与路径，**凭据从环境变量注入**（``MHERO`` 服务）。DSL 里那是明文
-  ``X-API-Key``（`secrets_report.md` 记为 5 节点 / 2 密钥值之一），迁移后不再出现在
+- HTTP 节点保留方法与路径，**凭据从环境变量注入**（``MHERO`` 服务）。原始定义里那是明文
+  ``X-API-Key``，现在不再出现在
   任何定义文件中。
-- ``timeout`` / ``retry_interval`` 不照搬 DSL 原值（``timeout: 0``、``retry_interval: 100``），
-  改走 ``Settings`` 的显式配置（规划 Q5 缺省处理）。
-- ``code`` 节点逻辑与 DSL 逐字符一致。
-- GET 幂等，按配置重试；这是读接口，不涉及回写副作用（Q2）。
+- ``timeout`` / ``retry_interval`` 不照搬原始定义的取值（``timeout: 0``、``retry_interval: 100``），
+  改走 ``Settings`` 的显式配置。
+- ``code`` 节点逻辑与原始定义逐字符一致。
+- GET 幂等，按配置重试；这是读接口，不涉及回写副作用。
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def _strip_code_fence(text: str) -> str:
 
 def _parse_json_string(value):
     """
-    兼容 Dify 上游传入 String / Object 两种情况。
+    兼容上游传入 String / Object 两种情况。
     但本节点最终输出仍然会强制转成 String。
     """
     if value is None:
@@ -82,7 +82,7 @@ def _is_locked(value) -> bool:
 def extract_locked_notes(input_json) -> dict:
     """挑出被锁定的人工确认 Notes，输出 JSON 字符串。
 
-    与 DSL 节点 ``1776650937435`` 的 ``main`` 函数体逐字符一致。
+    与原始定义节点 ``1776650937435`` 的 ``main`` 函数体逐字符一致。
     ``locked_notes_json`` 必须是字符串而非对象——下游按字符串消费。
     """
     data = _parse_json_string(input_json)

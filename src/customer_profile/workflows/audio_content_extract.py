@@ -1,14 +1,14 @@
 """``录音文件内容抽取（纯识别，无加工）`` 的 Python 定义。
 
-DSL 基线：12 节点 / 11 边。被两个录音工作流各引用两次（单文件路径与迭代路径各一），
-是子工作流复用最典型的例子（见规划 §1.2）。
+原始定义基线：12 节点 / 11 边。被两个录音工作流各引用两次（单文件路径与迭代路径各一），
+是子工作流复用最典型的例子。
 
 链路：``start(file_url)`` → AUC 提交 → 取任务参数 → 轮询查询 → 识别结果提取 →
 LLM 校对 → LLM 有效性判断 → 判断结果提取 →（有效 / 无效两支）→ end。
 
 两条实现口径：
 
-- **Q6 的轮询问题**已在 DSL 里澄清：``/query_analyze`` 的 ``max_retries: 5`` 是**单次
+- **Q6 的轮询问题**已在原始定义里澄清：``/query_analyze`` 的 ``max_retries: 5`` 是**单次
   请求内的重试**（既有 HTTP 客户端的重试语义），不是自建轮询循环。因此这里只按重试
   还原，不额外造轮询。
 - AUC 服务无鉴权、``ssl_verify=false``（内网地址），由 ``@service`` 与
@@ -76,7 +76,7 @@ WORKFLOW = WorkflowDef(
                 "@method": "post",
                 "@path": "/submit_analyze",
                 "@headers": {"Content-Type": "application/json"},
-                # 请求体逐字符取自 DSL：引用会被替换成带引号的字符串
+                # 请求体逐字符取自原始定义：引用会被替换成带引号的字符串
                 "@body_template": '{ "file_url": {{#1773112560827.file_url#}} }',
                 "@ssl_verify": False,
                 "@outputs": {"body": "$text", "status": "$status"},
@@ -108,7 +108,7 @@ WORKFLOW = WorkflowDef(
                     '{"task_id": {{#17731967052740.task_id#}},'
                     ' "x_tt_logid": {{#17731967052740.x_tt_logid#}}}'
                 ),
-                # DSL 原值 max_retries: 5 —— 单次请求内的重试，非轮询循环（Q6）
+                # 原始定义的取值 max_retries: 5 —— 单次请求内的重试，非轮询循环
                 "@retry_max": 5,
                 "@ssl_verify": False,
                 "@outputs": {"body": "$text", "status": "$status"},

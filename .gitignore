@@ -11,7 +11,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
-# 例外：运行台的前端构建产物刻意入库（docs/specs/V0.4只读运行台.md §4），
+# 例外：运行台的前端构建产物刻意入库（docs/history/V0.4只读运行台.md §4），
 # 使未安装 node 的机器也能直接起服务。
 !frontend/dist/
 downloads/
@@ -225,7 +225,6 @@ __marimo__/
 phone_numbers.txt
 data/
 
-dify_dsl_data/
 # ---------------------------------------------------------------------------
 # Customer Profile 运行期数据
 # ---------------------------------------------------------------------------
@@ -243,7 +242,7 @@ data/
 tests/fixtures/replay/*.json
 !tests/fixtures/replay/human_corrected_info.json
 
-# 迁移期间的临时脚本与中间产物
+# 临时脚本与中间产物
 .tmp_*
 
 # ---------------------------------------------------------------------------

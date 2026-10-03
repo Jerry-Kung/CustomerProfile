@@ -1,6 +1,6 @@
 """``（新）SubAgent - 手机号&企业信息分析`` 的 Python 定义。
 
-DSL 基线：8 节点 / 8 边。本流程承接自 ``证据线索汇总``——原先那四个节点（取关联企业、
+原始定义基线：8 节点 / 8 边。本流程承接自 ``证据线索汇总``——原先那四个节点（取关联企业、
 拆运营商/企业、两个 LLM）迁到这里独立成一个子流程，主图只留一个 ``tool`` 调用点。
 
     start(phone_number, customer_data, data_source=RelatedEnterpriseInfo)
@@ -17,12 +17,12 @@ DSL 基线：8 节点 / 8 边。本流程承接自 ``证据线索汇总``——�
 - **两个 LLM 的输出字段是 ``text`` 而不是 ``result``**：聚合器按 ``.text`` 取值，
   与 ``证据线索整理`` 那类 ``result`` 形态的 llm 节点不同，照抄会静默取空。
 - **分组聚合器沿用 P3 实测口径**：每组包成 ``{"output": 值}``，因此下游必须有一个
-  拆壳节点（``聚合结果拆壳``）取 ``["output"]``——这正是 DSL 里的做法。
+  拆壳节点（``聚合结果拆壳``）取 ``["output"]``——这正是原始定义里的做法。
 - **有意差异 W4**：``start`` 的 ``llm_model`` 入参按 §6.4.5 删除。
-- **有意差异 W50**：``结果解析`` 的取值键按真实载荷改写。DSL 原文取
+- **有意差异 W50**：``结果解析`` 的取值键按真实载荷改写。原始定义文本取
   ``operator_location_json`` / ``affiliated_company_json``，而该渠道的真实载荷从不含这两个
   键（全部留痕实测出现 0 次），产出的两个字段恒为 ``{}``、企业数据被静默丢弃。现按真实
-  载荷的两种形态取值并保留对原键名的兼容读取，理由见 ``ledger/differences.md`` W50。
+  载荷的两种形态取值并保留对原键名的兼容读取，理由见 ``docs/history/ledger/differences.md`` W50。
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ SLUG = "phone_company_analysis"
 SYSTEM_TEXT = "You are a helpful AI assistant."
 
 DATA_SOURCE = "RelatedEnterpriseInfo"
-"""本流程默认取的渠道名，与 DSL ``start`` 的 ``data_source`` 默认值一致。"""
+"""本流程默认取的渠道名，与原始定义 ``start`` 的 ``data_source`` 默认值一致。"""
 
 
 def template_name(node_id: str) -> str:
@@ -64,7 +64,7 @@ def template_name(node_id: str) -> str:
 
 
 # ====================================================================
-# code 节点正文（逐字符取自 DSL，只把 def main 换成业务名；函数体一字未改）
+# code 节点正文（逐字符取自原始定义，只把 def main 换成业务名；函数体一字未改）
 # ====================================================================
 
 
@@ -99,15 +99,15 @@ def has_content(value) -> bool:
     return True
 
 
-# ---- DSL 节点 1774941932987 的正文（**有意差异 W50**，理由见下）
+# ---- 原始定义节点 1774941932987 的正文（**有意差异 W50**，理由见下）
 def split_operator_and_company(body) -> dict:
     """把 ``RelatedEnterpriseInfo`` 的 ``raw_payload`` 拆成归属地与企业两块。
 
-    **有意差异 W50**：DSL 原文按 ``operator_location_json`` / ``affiliated_company_json``
+    **有意差异 W50**：原始定义文本按 ``operator_location_json`` / ``affiliated_company_json``
     两个键取值，而该渠道的真实载荷从来不含这两个键——全部留痕实测（5 个批次、8 份
     响应）里它们出现次数为 0。后果是产出的两个字段恒为 ``{}``，企业信息分析 LLM 只能
     回「输入数据为空」，真实的企业数据被静默丢弃。本函数改为按真实载荷的两种形态取值，
-    并保留对 DSL 原键名的兼容读取。
+    并保留对原键名的兼容读取。
     """
     # 兼容 HTTP 节点 body 可能是字符串，也可能已经是对象
     if isinstance(body, str):
@@ -155,7 +155,7 @@ def split_operator_and_company(body) -> dict:
     }
 
 
-# ---- DSL 节点 1774946602973 的正文（逐字符，仅函数名不同）
+# ---- 原始定义节点 1774946602973 的正文（逐字符，仅函数名不同）
 def unwrap_grouped_analysis(company_result_object, phonenumber_result_object) -> dict:
     return {
         "company_result": company_result_object["output"],
@@ -290,7 +290,7 @@ def default_inputs(customer_data: str, phone_number: str = "") -> dict[str, Any]
 
 
 # ====================================================================
-# code 节点 -> 函数名映射（供 tests/test_code_verbatim.py 定位比对）
+# code 节点 -> 函数名映射（供逐字符比对定位）
 # ====================================================================
 
 CODE_SPECS: dict[str, dict] = {

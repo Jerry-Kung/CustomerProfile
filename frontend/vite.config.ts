@@ -18,7 +18,7 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    // 产物入库（docs/specs/V0.4只读运行台.md §4），因此关掉 sourcemap 缩小体积。
+    // 产物入库（docs/history/V0.4只读运行台.md §4），因此关掉 sourcemap 缩小体积。
     sourcemap: false,
   },
 })

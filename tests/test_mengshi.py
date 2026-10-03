@@ -1,9 +1,9 @@
 """猛士IT系统数据工作流的确定性逻辑测试。
 
-固定输入下的确定性输出是**可以严格比较**的部分（`Dify迁移任务说明.md` §3.2），
+固定输入下的确定性输出是**可以严格比较**的部分，
 因此这里用人工推算的期望值逐字断言，包括两处兜底文案。
 
-期望值不是「跑一遍记下来」的——都是从 DSL 代码读出来的规则手算的。跑完再记录会
+期望值不是「跑一遍记下来」的——都是从原始定义代码读出来的规则手算的。跑完再记录会
 把错误固化成基线。
 """
 
@@ -121,7 +121,7 @@ def test_integrate_renames_fields_with_itsystem_prefix():
 
 
 def test_integrate_keeps_null_but_fills_missing_with_empty_string():
-    """原字段存在且为 null 时保留 None；字段缺失才补空串。这是 DSL 注释明说的区别。"""
+    """原字段存在且为 null 时保留 None；字段缺失才补空串。这是原始定义注释明说的区别。"""
     data = {"customer_name": None, "customer_nick": "小张"}
     result = mengshi.integrate_customer_data(json.dumps(data, ensure_ascii=False))
     structured = json.loads(result["system_customer_json_data"])
@@ -142,7 +142,7 @@ def test_integrate_marks_unknown_enum_value():
 
 
 def test_integrate_zero_and_false_are_not_empty():
-    """数字 0 与 False 不算空——DSL 里显式写了这条。"""
+    """数字 0 与 False 不算空——原始定义里显式写了这条。"""
     data = {"customer_lead_rating": 0}
     result = mengshi.integrate_customer_data(json.dumps(data))
     # INFO_FIELD_LABELS 里该字段的标签是长句，按完整标签断言

@@ -1,6 +1,6 @@
 """``（新）SubAgent - 人设特征判断`` 的 Python 定义。
 
-DSL 基线：16 节点 / 19 边。链路是「以证据线索推断人设特征」，三路并行产出后合并：
+原始定义基线：16 节点 / 19 边。链路是「以证据线索推断人设特征」，三路并行产出后合并：
 
     start(phone_number, evidence_items)
       ├─ template 人设特征推断 Prompt → llm 人设特征推断 结果聚合 → end(profile_result)
@@ -10,7 +10,7 @@ DSL 基线：16 节点 / 19 边。链路是「以证据线索推断人设特征�
 
 **本轮的关键判断：两套并行分支里，保留 ``tool`` 那一支，删除纯 ``llm`` 那一支。**
 
-DSL 用两个 ``if-else``（``1776760124715`` / ``17767603231790``）按 ``llm_model == "gemini"``
+原始定义用两个 ``if-else``（``1776760124715`` / ``17767603231790``）按 ``llm_model == "gemini"``
 在「纯 llm 节点」与「``gemini_retry_2_times`` 工具节点」之间二选一。两条实现口径叠加：
 
 - 有意差异 W4：``llm_model`` 入参按 §6.4.5 删除，两个 ``if-else`` 因此必须归一；
@@ -25,7 +25,7 @@ DSL 用两个 ``if-else``（``1776760124715`` / ``17767603231790``）按 ``llm_m
    ``You are a helpful AI assistant.``，属较早的版本。
 
 因此保留工具支（转换为 ``llm`` 节点，输出字段仍叫 ``result``），删除两个 ``if-else``
-与三个纯 ``llm`` 节点。被删节点与边记入 ``tests/test_ledger_crosscheck.py`` 的差异表。
+与三个纯 ``llm`` 节点。被删节点与边记入 台账差异表。
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ SHARED_CODE_MODULE = "customer_profile.workflows.shared_code"
 SLUG = "profile_features_analysis"
 SYSTEM_TEXT = "You are a helpful AI assistant."
 
-# 有意差异 W4 + W2/W3 删除的节点（DSL 有、迁移后没有）
+# 有意差异 W4 + W2/W3 删除的节点（原始定义有、现在没有）
 REMOVED_NODES = (
     "1776760124715",  # 条件分支（llm_model 判定）
     "17767603231790",  # 条件分支 (1)（llm_model 判定）
@@ -82,7 +82,7 @@ REMOVED_EDGES = (
     ("17767603231790", "1777427950125"),
     ("17767603231790", "1777427955726"),
 )
-"""因 ``if-else`` 归一而消失的边（DSL 的 sourceHandle 是 ``true``/``false``，
+"""因 ``if-else`` 归一而消失的边（原始定义的 sourceHandle 是 ``true``/``false``，
 台账里按 ``source → target`` 记录）。"""
 
 ADDED_EDGES = (
@@ -240,7 +240,7 @@ WORKFLOW = WorkflowDef(
             END,
             "输出",
             "end",
-            # DSL 里 END 的直接前置只有「代码执行」；profile_result 由 END 的
+            # 原始定义里 END 的直接前置只有「代码执行」；profile_result 由 END 的
             # value_selector 跨节点引用获取，不构成边。
             after=(SPLIT_CODE,),
             inputs={

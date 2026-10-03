@@ -2,10 +2,10 @@
 
 **为什么需要这一层，而不是把云调用直接写进工作流定义。**
 
-DSL 的「录音文件内容抽取」把 AUC 调用拆成两个 http 节点（``/submit_analyze`` 提交、
+原始定义的「录音文件内容抽取」把 AUC 调用拆成两个 http 节点（``/submit_analyze`` 提交、
 ``/query_analyze`` 轮询），下游用两个 code 节点从**响应体**里取 ``task_id`` /
-``x_tt_logid`` 与 ``auc_result`` / ``poll_count``。那两个 code 节点是**逐字符取自 DSL** 的，
-由 ``tests/test_code_verbatim.py`` 用 AST 比对钉住，不能改。
+``x_tt_logid`` 与 ``auc_result`` / ``poll_count``。那两个 code 节点是**逐字符取自原始定义** 的，
+由 逐字符比对 用 AST 比对钉住，不能改。
 
 而火山引擎的云服务是另一套形状：
 
@@ -15,9 +15,9 @@ DSL 的「录音文件内容抽取」把 AUC 调用拆成两个 http 节点（``
 - 终态响应体是完整的 utterances JSON，而不是内网服务那种「文本化的数组」。
 
 因此这一层的职责是：把云服务的形状**翻译回**那两个 code 节点期待的形状。工作流的图、
-两个 HTTP 节点、两个 code 节点都不改——迁移基线因此保持不动（见 ``differences.md`` W12）。
+两个 HTTP 节点、两个 code 节点都不改——改造前的基线因此保持不动。
 
-**为什么要保持契约而不是改 code 节点。** 改 code 节点要同时改 DSL 基线、逐字符测试、
+**为什么要保持契约而不是改 code 节点。** 改 code 节点要同时改原始定义基线、逐字符测试、
 以及下游提示词（``auc_result`` 被直接插进校对提示词）。保契约只动传输层一个文件。
 
 **性能上的实质收益。** 内网服务要求调用方自己轮询；这里把轮询收进一次调用内完成，
@@ -40,7 +40,7 @@ SUBMIT_PATH = "/submit_analyze"
 QUERY_PATH = "/query_analyze"
 """对内的两个路径常量。
 
-定义里写的仍是这两个路径（DSL 原值），由这里翻译成云服务的 ``/submit`` 与 ``/query``。
+定义里写的仍是这两个路径（原始定义的取值），由这里翻译成云服务的 ``/submit`` 与 ``/query``。
 留痕里记的也是这两个值，因此历史运行的 request_attempts 口径不变。
 """
 

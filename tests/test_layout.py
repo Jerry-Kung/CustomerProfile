@@ -128,7 +128,7 @@ def test_chain_layers_are_exactly_consecutive():
 
 
 def test_no_real_workflow_is_cyclic():
-    """环普查：21 个已迁移定义必须全部无环。
+    """环普查：21 个工作流定义必须全部无环。
 
     这条断言存在的意义不是「确保无环」，而是**在环被引入时立刻失败**。布局按 DAG
     设计（见 ``layout._layers`` 的说明），若某天工作流定义引入环，层号会失真，

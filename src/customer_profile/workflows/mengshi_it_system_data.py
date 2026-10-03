@@ -1,11 +1,11 @@
 """``（新）SubAgent - 猛士IT系统数据信息`` 的 Python 定义。
 
-DSL 基线（`dify_dsl_data/（新）SubAgent - 猛士IT系统数据信息.yml`）：4 节点 / 3 边，
+原始定义基线：4 节点 / 3 边，
 两个 ``code`` 节点一条直线，无外部依赖。它是 V0.2 用来验证「确定性逻辑等价」的载体。
 
-迁移口径（规划 §6.2）：``code`` 节点的逻辑**直接提取**，只剥离 Dify 的入参加载与
-返回值包装，不在迁移中顺手重构。两个函数体与 DSL 的 ``main()`` 逐字符一致
-（见 ``tests/test_mengshi_it_system_data.py`` 的正文比对断言）。
+迁移口径：``code`` 节点的逻辑**直接提取**，只剥离平台的入参加载与
+返回值包装，不在改造中顺手重构。两个函数体与原始定义的 ``main()`` 逐字符一致
+（由逐字符比对断言）。
 
 有意差异（W4）：``start`` 的 ``llm_model`` 入参按 §6.4.5 删除，不再作为工作流入参。
 """
@@ -29,7 +29,7 @@ END_NODE = "1773748343861"
 
 # ====================================================================
 # 节点 1776328382353「数据提取」的正文
-# 与 DSL 逐字符一致；Dify 的 def main(...) 改名为业务化名字，签名与函数体不动。
+# 与原始定义逐字符一致；``def main(...)`` 改名为业务化名字，签名与函数体不动。
 # ====================================================================
 
 DATA_SOURCE_DEFAULT = "MengShiITSystemData"
@@ -38,7 +38,7 @@ DATA_SOURCE_DEFAULT = "MengShiITSystemData"
 def extract_channel_payload(records: str, data_source: str) -> dict:
     """从 ``customer_data`` 里取出 ``channel == data_source`` 那一项的载荷。
 
-    与 DSL 节点 ``1776328382353`` 的 ``main`` 函数体逐字符一致。
+    与原始定义节点 ``1776328382353`` 的 ``main`` 函数体逐字符一致。
     """
     import json
 
@@ -290,7 +290,7 @@ def _build_system_customer_json_data(data):
 def integrate_customer_data(json_string) -> dict:
     """把销售系统 JSON 整理成文本画像与结构化 JSON 两个输出。
 
-    与 DSL 节点 ``1778230548931`` 的 ``main`` 函数体逐字符一致。
+    与原始定义节点 ``1778230548931`` 的 ``main`` 函数体逐字符一致。
     """
     data = _parse_json(json_string)
 
