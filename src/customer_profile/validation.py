@@ -101,11 +101,11 @@ def _check_acyclic(workflow: WorkflowDef) -> list[ValidationIssue]:
 def _check_bindings(workflow: WorkflowDef) -> list[ValidationIssue]:
     """绑定的来源节点必须存在，且必须是该节点的祖先（不能向后引用）。
 
-    「顺序依赖但无数据消费」的边在原始定义中是合法且必须保留的，因此这里只校验
+    「顺序依赖但无数据消费」的边在迁移前的定义中是合法且必须保留的，因此这里只校验
     **已被绑定引用**的来源，不要求存在对应边——反向要求（有边必须有绑定）不成立。
 
     **迭代是例外**：``iteration`` 节点的 ``@output`` 指向循环体节点，而循环体在图上看
-    挂在迭代节点**内部**（``iteration_id`` 标记），不是它的图祖先。这是原始定义迭代的
+    挂在迭代节点**内部**（``iteration_id`` 标记），不是它的图祖先。这是迁移前的定义迭代的
     固有结构，不是错误，因此这里把循环体节点视为其宿主迭代节点的后代。
     """
     issues: list[ValidationIssue] = []
@@ -127,7 +127,7 @@ def _check_bindings(workflow: WorkflowDef) -> list[ValidationIssue]:
                 continue
             if _is_iteration_output_selector(node, binding, ancestors):
                 # 迭代节点的 ``@output`` 指向自己的循环体节点。这不是图上的向后引用，
-                # 而是**结构性声明**（谁在循环里、收集哪个字段），原始定义迭代本来就
+                # 而是**结构性声明**（谁在循环里、收集哪个字段），迁移前的定义迭代本来就
                 # 这么表达。循环体由图规则挂在迭代节点内部，不构成其祖先，因此这里
                 # 按结构放行；其余任何非祖先引用一律照旧报错。
                 pass
@@ -250,7 +250,7 @@ def _add_iteration_body_ancestors(
     """把循环体节点登记为其宿主迭代节点的后代。
 
     ``iteration`` 的 ``@output`` 引用循环体节点，而循环体不属于迭代节点的图祖先链。
-    这里按原始定义的实际结构补上这层关系，而不是放宽「来源必须是祖先」这条检查——
+    这里按迁移前的定义的实际结构补上这层关系，而不是放宽「来源必须是祖先」这条检查——
     放宽会让真正写错的引用也蒙混过关。
     """
     for node in workflow.nodes:

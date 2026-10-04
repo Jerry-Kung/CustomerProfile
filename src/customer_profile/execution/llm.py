@@ -1,7 +1,7 @@
 """统一 LLM 调用层。
 
 既定设计原则 的实施：**一个** ``llm_call()`` 承载全部 LLM 调用，
-替代原始定义里 17 处 ``Gemini（异常输出重试版）`` 子流程与全部直连 ``llm`` 节点。
+替代迁移前的定义里 17 处 带异常输出重试的 Gemini 子流程与全部直连 ``llm`` 节点。
 
 重试下沉到本层（§6.4.3）——只在一层实现，杜绝「SDK 重试 × HTTP 封装重试 × 节点重试 ×
 子流程重试」的乘法叠加。因重试不再由图结构自然分开，**每次尝试必须显式留痕**（§6.6）：
@@ -71,7 +71,7 @@ def detect_output_anomaly(
 ) -> str | None:
     """判定输出是否中途异常截断，返回原因码；正常则返回 ``None``。
 
-    规则沿用原始定义「Gemini（异常输出重试版） - 判断结果是否异常」节点代码（§6.4.2）：
+    规则沿用迁移前的定义「判断结果是否异常」节点的代码（§6.4.2）：
 
     - ``usage_zero``：``usage`` 三项 tokens 全为 0；
     - ``empty_text``：去掉首尾空白后 ``text`` 为空；
@@ -106,7 +106,7 @@ def detect_output_anomaly(
 def strip_code_fence(text: str) -> str:
     """去掉 LLM 常见输出的 ```json ... ``` 包裹。
 
-    逻辑取自原始定义中人工确认提取节点的 ``_strip_code_fence``，保持行为一致。
+    逻辑取自迁移前的定义中人工确认提取节点的 ``_strip_code_fence``，保持行为一致。
     """
     stripped = text.strip()
     stripped = re.sub(r"^```(?:json|JSON)?\s*", "", stripped)
@@ -125,7 +125,7 @@ def parse_json_output(text: str) -> Any:
 # ---------------------------------------------------------------- 调用
 
 MAX_ATTEMPTS = 3
-"""最多 3 次尝试（首次 + 2 次重试）。缺省口径见差异清单 M1，待业务确认。"""
+"""最多 3 次尝试（首次 + 2 次重试）。缺省口径见 ``docs/design/执行语义口径.md`` 的 M1，待业务确认。"""
 
 
 @dataclass(slots=True)
@@ -270,7 +270,7 @@ class LlmClient:
         未设置（``None``）时不发这个键，沿用服务端默认值——
         ``LLM_MAX_TOKENS`` 同理。
         不同服务商对该开关的默认取值不同，发一个我们猜测的值
-        会把服务端的默认覆盖掉。见差异 W51。
+        会把服务端的默认覆盖掉。
         """
         payload: dict[str, Any] = {
             "model": self._settings.llm_model,

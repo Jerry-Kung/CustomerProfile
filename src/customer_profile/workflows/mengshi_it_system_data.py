@@ -1,13 +1,13 @@
-"""``（新）SubAgent - 猛士IT系统数据信息`` 的 Python 定义。
+"""``猛士IT系统数据信息`` 的 Python 定义。
 
-原始定义基线：4 节点 / 3 边，
+迁移前的定义基线：4 节点 / 3 边，
 两个 ``code`` 节点一条直线，无外部依赖。它是 V0.2 用来验证「确定性逻辑等价」的载体。
 
 迁移口径：``code`` 节点的逻辑**直接提取**，只剥离平台的入参加载与
-返回值包装，不在改造中顺手重构。两个函数体与原始定义的 ``main()`` 逐字符一致
+返回值包装，不在改造中顺手重构。两个函数体与迁移前的定义的 ``main()`` 逐字符一致
 （由逐字符比对断言）。
 
-有意差异（W4）：``start`` 的 ``llm_model`` 入参按 §6.4.5 删除，不再作为工作流入参。
+``start`` 的 ``llm_model`` 入参按 §6.4.5 删除，不再作为工作流入参。
 """
 
 from __future__ import annotations
@@ -18,8 +18,9 @@ from typing import Any
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "mengshi_it_system_data"
-DISPLAY_NAME = "（新）SubAgent - 猛士IT系统数据信息"
-SOURCE_DSL = f"{DISPLAY_NAME}.yml"
+DISPLAY_NAME = "猛士IT系统数据信息"
+# 定义快照的 source_dsl 直接取这个显示名——原来那个指向 .yml 的追溯键已随
+# 定义文件一并废弃，字段保留只为不动快照形状。
 
 START_NODE = "1773748103758"
 EXTRACT_NODE = "1776328382353"
@@ -29,7 +30,7 @@ END_NODE = "1773748343861"
 
 # ====================================================================
 # 节点 1776328382353「数据提取」的正文
-# 与原始定义逐字符一致；``def main(...)`` 改名为业务化名字，签名与函数体不动。
+# 与迁移前的定义逐字符一致；``def main(...)`` 改名为业务化名字，签名与函数体不动。
 # ====================================================================
 
 DATA_SOURCE_DEFAULT = "MengShiITSystemData"
@@ -38,7 +39,7 @@ DATA_SOURCE_DEFAULT = "MengShiITSystemData"
 def extract_channel_payload(records: str, data_source: str) -> dict:
     """从 ``customer_data`` 里取出 ``channel == data_source`` 那一项的载荷。
 
-    与原始定义节点 ``1776328382353`` 的 ``main`` 函数体逐字符一致。
+    与迁移前的定义节点 ``1776328382353`` 的 ``main`` 函数体逐字符一致。
     """
     import json
 
@@ -290,7 +291,7 @@ def _build_system_customer_json_data(data):
 def integrate_customer_data(json_string) -> dict:
     """把销售系统 JSON 整理成文本画像与结构化 JSON 两个输出。
 
-    与原始定义节点 ``1778230548931`` 的 ``main`` 函数体逐字符一致。
+    与迁移前的定义节点 ``1778230548931`` 的 ``main`` 函数体逐字符一致。
     """
     data = _parse_json(json_string)
 
@@ -318,7 +319,7 @@ def integrate_customer_data(json_string) -> dict:
 WORKFLOW = WorkflowDef(
     workflow_id=WORKFLOW_ID,
     display_name=DISPLAY_NAME,
-    source_dsl=SOURCE_DSL,
+    source_dsl=DISPLAY_NAME,
     entries=(START_NODE,),
     exits=(END_NODE,),
     outputs={
@@ -330,12 +331,11 @@ WORKFLOW = WorkflowDef(
             START_NODE,
             "用户输入",
             "start",
-            # 有意差异 W4：llm_model 入参已按 §6.4.5 删除
+            # llm_model 入参已按 §6.4.5 删除
             variables=("phone_number", "customer_data", "data_source"),
             required_phone_number=True,
             required_customer_data=True,
             required_data_source=False,
-            coords=(80.0, 282.0),
         ),
         make_node(
             EXTRACT_NODE,
@@ -348,8 +348,6 @@ WORKFLOW = WorkflowDef(
             },
             outputs=("result",),
             function="customer_profile.workflows.mengshi_it_system_data:extract_channel_payload",
-            original_node_id=EXTRACT_NODE,
-            coords=(430.50293012833276, 303.0),
         ),
         make_node(
             INTEGRATE_NODE,
@@ -359,8 +357,6 @@ WORKFLOW = WorkflowDef(
             inputs={"json_string": (EXTRACT_NODE, "result")},
             outputs=("system_customer_info", "system_customer_json_data"),
             function="customer_profile.workflows.mengshi_it_system_data:integrate_customer_data",
-            original_node_id=INTEGRATE_NODE,
-            coords=(823.619487938305, 303.0),
         ),
         make_node(
             END_NODE,
@@ -372,8 +368,6 @@ WORKFLOW = WorkflowDef(
                 "IT_json_data": (INTEGRATE_NODE, "system_customer_json_data"),
             },
             outputs=("IT_customer_info", "IT_json_data"),
-            original_node_id=END_NODE,
-            coords=(1234.3781676281988, 303.0),
         ),
     ),
 )

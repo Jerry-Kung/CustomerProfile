@@ -100,9 +100,9 @@ class RunContext:
         if not node_id or not field_name:
             raise MissingValue(f"变量引用格式非法：{selector!r}")
 
-        # 迭代循环体正是通过 ``{{#<迭代节点>.item#}}`` 取当前项的（原始定义里如此，
+        # 迭代循环体正是通过 ``{{#<迭代节点>.item#}}`` 取当前项的（迁移前的定义里如此，
         # 9 个含迭代的工作流都这么写）。但循环体执行期间迭代节点**尚未产出结果**，
-        # 按节点输出查必然失败。这里先把当前项就地解析出来，与原始定义语义一致；
+        # 按节点输出查必然失败。这里先把当前项就地解析出来，与迁移前的定义语义一致；
         # 迭代结束后迭代节点会记下真正的结果，下游拿到的仍是正常输出。
         current_iteration = self.iteration_locals.get("iteration_id")
         if current_iteration and node_id == current_iteration:

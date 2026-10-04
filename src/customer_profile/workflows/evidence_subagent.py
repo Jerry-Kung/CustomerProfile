@@ -1,6 +1,6 @@
-"""``（新）SubAgent - 证据线索汇总（生产环境）`` 的 Python 定义。
+"""``证据线索汇总（生产环境）`` 的 Python 定义。
 
-原始定义基线：**21 节点 / 35 边**（2026-09-28 修订；修订前为 24 / 39），是全项目
+迁移前的定义基线：**21 节点 / 35 边**（2026-09-28 修订；修订前为 24 / 39），是全项目
 **扇出最宽**的图：一次取数之后 14 路并行取证。
 
     start(phone_number)
@@ -27,9 +27,9 @@
 - **图片与数据的来源**：``GET /api/v1/remote/data/history/{phone}`` 的响应体作为
   ``customer_data`` 下发给各截图类子流程；子流程自己按 ``channel`` 取 ``media_urls``
   再逐张下载。**不是** mhero —— mhero 只提供人工确认 Notes 与 Feedback。
-- **有意差异 W2/W3**：``gemini_retry_2_times`` 工具节点归一为一次 ``llm_call()``，
+- **工具节点归一**：工具节点归一为一次 ``llm_call()``，
   输出字段仍叫 ``result``。
-- **有意差异 W4**：传给子流程的 ``llm_model`` 参数（其中多处是字面量 ``"gemini"``）
+- **入参删除**：传给子流程的 ``llm_model`` 参数（其中多处是字面量 ``"gemini"``）
   一并删除（§6.4.5）。
 """
 
@@ -40,8 +40,9 @@ from typing import Any
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "evidence_subagent"
-DISPLAY_NAME = "（新）SubAgent - 证据线索汇总（生产环境）"
-SOURCE_DSL = f"{DISPLAY_NAME}.yml"
+DISPLAY_NAME = "证据线索汇总（生产环境）"
+# 定义快照的 source_dsl 直接取这个显示名——原来那个指向 .yml 的追溯键已随
+# 定义文件一并废弃，字段保留只为不动快照形状。
 
 START = "1775638842380"
 HISTORY_HTTP = "1775638961126"
@@ -118,17 +119,16 @@ def _tool(
         inputs=inputs,
         outputs=outputs,
         **{"@workflow": workflow, "@inputs": mapping},
-        original_node_id=node_id,
     )
 
 
 # ====================================================================
-# code 节点正文（逐字符取自原始定义，只把 def main 换成业务名；
+# code 节点正文（逐字符取自迁移前的定义，只把 def main 换成业务名；
 # 跨节点重名的辅助函数加 __<节点后四位> 后缀，函数体一字未改）
 # ====================================================================
 
 
-# ---- 原始定义节点 1778232215760 的正文（逐字符，仅函数名不同）
+# ---- 迁移前的定义节点 1778232215760 的正文（逐字符，仅函数名不同）
 import json
 
 
@@ -136,7 +136,7 @@ def _extract_fenced_block(text):
     """取正文里**第一个**围栏块的内容；没有成对围栏时返回 ``None``。
 
     与 ``llm.strip_code_fence`` 的分工：那个只处理「整段就是围栏」的形态，
-    这里处理「说明文字在前、围栏在后」。见差异 W52。
+    这里处理「说明文字在前、围栏在后」。
     """
     start = text.find("```")
     if start < 0:
@@ -156,7 +156,7 @@ def _parse_json(value):
     兼容上游传入 String / Object 两种情况。
     解析失败、空字符串、None、非 JSON 对象时，统一返回空 dict。
 
-    有意差异 W52：围栏出现在正文中段时也提取。原逻辑只认「整段以围栏开头」，
+    围栏出现在正文中段时也提取。原逻辑只认「整段以围栏开头」，
     而模型常见的输出形态是「一句说明 + 换行 + ```json 块」，这类输出会整体落入
     ``except`` 被当成空 dict——与「该客户确实没有这项数据」在下游无法区分。
     """
@@ -178,7 +178,8 @@ def _parse_json(value):
             if text.lower().startswith("json"):
                 text = text[4:].strip()
         elif "```" in text:
-            # 围栏不在开头（正文前带说明文字）时按第一个围栏块提取，见 W52
+            # 围栏不在开头（正文前带说明文字）时按第一个围栏块提取；
+            # 改动理由见 ``docs/adr/0004-照搬定义文本还是按实测修正.md`` 偏离二
             block = _extract_fenced_block(text)
             if block is not None:
                 text = block
@@ -253,7 +254,7 @@ def aggregate_customer_standard_info(
 WORKFLOW = WorkflowDef(
     workflow_id=WORKFLOW_ID,
     display_name=DISPLAY_NAME,
-    source_dsl=SOURCE_DSL,
+    source_dsl=DISPLAY_NAME,
     entries=(START,),
     exits=(END,),
     outputs={"result": "result", "original_data": "merged_json_string"},
@@ -262,10 +263,9 @@ WORKFLOW = WorkflowDef(
             START,
             "用户输入",
             "start",
-            # 有意差异 W4：llm_model 入参按 §6.4.5 删除
+            # llm_model 入参按 §6.4.5 删除
             variables=("phone_number",),
             required_phone_number=True,
-            coords=(80.0, 282.0),
         ),
         make_node(
             HISTORY_HTTP,
@@ -282,36 +282,35 @@ WORKFLOW = WorkflowDef(
                 "@auth": True,
                 "@outputs": {"body": "$text", "status": "$status"},
             },
-            original_node_id=HISTORY_HTTP,
         ),
         # ---------------------------------------------------------- 13 路子流程
-        _tool(MOMENTS, "（新）SubAgent - 朋友圈信息提取", "moments_info", "WeChatMomentsScreenshot"),
+        _tool(MOMENTS, "朋友圈信息提取", "moments_info", "WeChatMomentsScreenshot"),
         _tool(
             WECHAT_SEARCH,
-            "（新）SubAgent - 微信手机号搜索截图信息提取",
+            "微信手机号搜索截图信息提取",
             "wechat_search_homepage",
             "WeChatPhoneSearchScreenshot",
         ),
-        _tool(WECHAT_HOME, "（新）SubAgent - 微信主页信息提取", "wechat_homepage", "WeChatHomepageScreenshot"),
-        _tool(TEST_DRIVE, "（新）SubAgent - 试驾录音信息提取", "test_drive_audio", "TestDriveRecordingFile"),
+        _tool(WECHAT_HOME, "微信主页信息提取", "wechat_homepage", "WeChatHomepageScreenshot"),
+        _tool(TEST_DRIVE, "试驾录音信息提取", "test_drive_audio", "TestDriveRecordingFile"),
         _tool(
             OUTBOUND_CALL,
-            "（新）SubAgent - 外呼录音信息提取",
+            "外呼录音信息提取",
             "outbound_call_audio",
             "AIOutboundCallRecordingFile",
         ),
-        _tool(ALIPAY, "（新）SubAgent - 支付宝个人页信息提取", "alipay_homepage", "AlipayPersonalPageScreenshot"),
+        _tool(ALIPAY, "支付宝个人页信息提取", "alipay_homepage", "AlipayPersonalPageScreenshot"),
         _tool(
             XIAOHONGSHU,
-            "（新）SubAgent - 小红书个人页信息提取",
+            "小红书个人页信息提取",
             "xiaohongshu_homepage",
             "XiaohongshuPersonalPageScreenshot",
         ),
-        _tool(DOUYIN, "（新）SubAgent - 抖音个人页信息提取", "douyin_homepage", "DouyinPersonalPageScreenshot"),
+        _tool(DOUYIN, "抖音个人页信息提取", "douyin_homepage", "DouyinPersonalPageScreenshot"),
         # 人工确认信息只需要手机号（走 mhero，与 history 无关）
         make_node(
             LOCKED_NOTES,
-            "（新）SubAgent - 人工确认信息提取（生产环境）",
+            "人工确认信息提取（生产环境）",
             "tool",
             after=(HISTORY_HTTP,),
             inputs={"phone_number": (START, "phone_number")},
@@ -320,25 +319,24 @@ WORKFLOW = WorkflowDef(
                 "@workflow": "human_corrected_info",
                 "@inputs": {"phone_number": "phone_number"},
             },
-            original_node_id=LOCKED_NOTES,
         ),
-        _tool(JIGUANG, "（新）SubAgent - 极光数据（生产环境）", "jiguang_data", "DatametInterestPoints"),
+        _tool(JIGUANG, "极光数据（生产环境）", "jiguang_data", "DatametInterestPoints"),
         _tool(
             MENGSHI_IT,
-            "（新）SubAgent - 猛士IT系统数据信息",
+            "猛士IT系统数据信息",
             "mengshi_it_system_data",
             "MengShiITSystemData",
             outputs=("IT_customer_info", "IT_json_data"),
         ),
         _tool(
             CHAT_HISTORY,
-            "（新）SubAgent - 聊天记录数据信息",
+            "聊天记录数据信息",
             "chat_history_data",
             "MengShiCustomerChatInfo",
         ),
         _tool(
             FEEDBACK,
-            "（新）SubAgent - 用户人工Feedback数据提取",
+            "用户人工反馈数据提取",
             "user_feedback_data",
             "UserFeedbackInformation",
         ),
@@ -347,7 +345,7 @@ WORKFLOW = WorkflowDef(
         # 独立子流程 phone_company_analysis，主图只留这一个调用点。
         _tool(
             PHONE_COMPANY,
-            "（新）SubAgent - 手机号&企业信息分析",
+            "手机号&企业信息分析",
             "phone_company_analysis",
             "RelatedEnterpriseInfo",
             outputs=("phonenumber_analysis_result", "company_analysis_result"),
@@ -381,7 +379,6 @@ WORKFLOW = WorkflowDef(
             },
             outputs=("output",),
             template=template_name(DATA_AGGREGATE),
-            original_node_id=DATA_AGGREGATE,
         ),
         make_node(
             STANDARD_AGGREGATE,
@@ -394,7 +391,6 @@ WORKFLOW = WorkflowDef(
             },
             outputs=("merged_json_string",),
             function=f"customer_profile.workflows.{SLUG}:aggregate_customer_standard_info",
-            original_node_id=STANDARD_AGGREGATE,
         ),
         make_node(
             EVIDENCE_PROMPT,
@@ -404,20 +400,18 @@ WORKFLOW = WorkflowDef(
             inputs={"arg1": (DATA_AGGREGATE, "output")},
             outputs=("output",),
             template=template_name(EVIDENCE_PROMPT),
-            original_node_id=EVIDENCE_PROMPT,
         ),
         make_node(
             EVIDENCE_LLM,
-            "证据线索整理 - 工具",
+            "证据线索整理",
             "llm",
-            # 有意差异 W2/W3：原始定义的 gemini_retry_2_times 工具节点归一为一次 llm_call
+            # 迁移前的定义里的工具节点归一为一次 llm_call
             after=(EVIDENCE_PROMPT,),
             inputs={"input_prompt": (EVIDENCE_PROMPT, "output")},
             outputs=("result",),
             prompt_field="input_prompt",
             output="result",
             system_text=SYSTEM_TEXT,
-            original_node_id=EVIDENCE_LLM,
         ),
         make_node(
             END,
@@ -429,7 +423,6 @@ WORKFLOW = WorkflowDef(
                 "original_data": (STANDARD_AGGREGATE, "merged_json_string"),
             },
             outputs=("result", "original_data"),
-            original_node_id=END,
         ),
     ),
 )
@@ -450,7 +443,7 @@ def default_inputs(phone_number: str) -> dict[str, Any]:
 # 改造只允许改函数名，不许改函数体。跨节点重名的辅助函数（同一份定义 里不同
 # 节点各写了一份 ``_parse_json`` 之类）必须改名，否则后一份会覆盖前一份。
 # 这里如实记录每个节点用了什么名字，逐字符比对按它把
-# 原始定义文本里的旧名换成新名后再逐字符比对——差异因此只剩下「名字」。
+# 迁移前的定义文本里的旧名换成新名后再逐字符比对——差异因此只剩下「名字」。
 # ====================================================================
 
 CODE_SPECS: dict[str, dict] = {

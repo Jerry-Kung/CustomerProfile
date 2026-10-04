@@ -57,7 +57,7 @@ async def test_result1_output_is_a_string(service, replay):
 
 
 async def test_is_locked_accepts_int_string_and_bool(service, replay):
-    """原始定义的 ``_is_locked`` 兼容 ``1`` / ``'1'`` / ``True`` 三种写法。"""
+    """迁移前的定义的 ``_is_locked`` 兼容 ``1`` / ``'1'`` / ``True`` 三种写法。"""
     outcome = await _run(service, replay, "13800000003")
     payload = json.loads(outcome.outputs["result"])
     assert payload == {"locked_notes": [{"customer_phone_brand": {"value": "华为"}}]}

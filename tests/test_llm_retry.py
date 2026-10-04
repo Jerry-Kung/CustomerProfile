@@ -1,11 +1,11 @@
 """统一 LLM 调用层测试：尝试次数、异常判定、逐次留痕。
 
-异常判定的四条规则直接来自原始定义「Gemini（异常输出重试版） - 判断结果是否异常」
+异常判定的四条规则直接来自迁移前的定义「Gemini（异常输出重试版） - 判断结果是否异常」
 节点代码，是 §6.4.2 指定的唯一权威依据。
 
 刻意覆盖的两处「不能猜」：
 - ``usage`` 缺失时必须**不**触发 ``usage_zero``——把「未知」当成 0 是伪造；
-- ``expect_json`` 解析失败要重试，且判据来自调用点声明而非原始定义的 ``output_json``。
+- ``expect_json`` 解析失败要重试，且判据来自调用点声明而非迁移前的定义的 ``output_json``。
 """
 
 from __future__ import annotations
@@ -177,7 +177,7 @@ async def test_retries_on_anomalous_output_then_succeeds(tmp_path):
 
 
 async def test_gives_up_after_three_attempts(tmp_path):
-    """最多 3 次尝试（首次 + 2 次重试），第 4 次不再发起（差异清单 M1 缺省口径）。"""
+    """最多 3 次尝试（首次 + 2 次重试），第 4 次不再发起（M1 缺省口径，见 ``docs/design/执行语义口径.md``）。"""
     frames = _frames_for(make_settings(tmp_path), [{"text": ""}])
     client, _, recorded = _client(tmp_path, frames)
 

@@ -91,7 +91,7 @@ class TemplateRepository:
         self._cache.clear()
 
 
-DIFY_REF_PATTERN = re.compile(r"\{\{#([^#{}]+)#\}\}")
+NODE_REF_PATTERN = re.compile(r"\{\{#([^#{}]+)#\}\}")
 """节点引用：``{{#node_id.field#}}``。
 
 外置的正文里**原样保留**这种写法（正文不可改，见模块说明）。渲染时把它映射成本次
@@ -163,7 +163,7 @@ def render_text(
     def replace_bare(match: "re.Match[str]") -> str:
         return coerce_to_text(resolve(match.group(1)))
 
-    text = DIFY_REF_PATTERN.sub(replace_ref, text)
+    text = NODE_REF_PATTERN.sub(replace_ref, text)
     text = LITERAL_PATTERN.sub(replace_literal, text)
     text = JOIN_PATTERN.sub(replace_join, text)
     return BARE_NAME_PATTERN.sub(replace_bare, text)
@@ -176,7 +176,7 @@ def find_placeholders(text: str) -> list[str]:
     节点定义的绑定是否齐全。
     """
     seen: dict[str, None] = {}
-    for match in DIFY_REF_PATTERN.finditer(text):
+    for match in NODE_REF_PATTERN.finditer(text):
         seen.setdefault(match.group(1).strip(), None)
     for match in JOIN_PATTERN.finditer(text):
         seen.setdefault(match.group(1), None)

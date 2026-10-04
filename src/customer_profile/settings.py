@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     只有显式设为 ``true`` / ``false`` 时才把它写进请求体。
     这是有意的：既定要求“不设其他参数”，且不同服务
     商对这个开关的默认取值不同，发送一个我们猜测的
-    值会把服务端的默认覆盖掉。见差异 W51。
+    值会把服务端的默认覆盖掉。
     """
 
     llm_max_tokens: int | None = None
@@ -75,17 +75,17 @@ class Settings(BaseSettings):
 
     存在的理由是**实测出来的截断**：关闭思维链后，服务端在未指定上限时把输出卡在
     8192 token，长 JSON 会被拦腰截断，而 ``detect_output_anomaly`` 不检查 ``finish_reason``，
-    截断因此能静默通过并在下游解析时炸掉。见差异 W51。
+    截断因此能静默通过并在下游解析时炸掉。
     """
 
     # ------------------------------------------------------------ 外部服务
     auc_base_url: str = "https://openspeech.bytedance.com/api/v3/auc/bigmodel"
     """AUC 语音识别服务的基地址。
 
-    原始定义指向内网自建服务 ``http://192.168.0.5:5005``（无鉴权）。该服务长期不可达，
-    按用户 2026-09-23 决定改接火山引擎云服务。原始定义的 ``/submit_analyze`` 与
+    迁移前的定义指向内网自建服务 ``http://192.168.0.5:5005``（无鉴权）。该服务长期不可达，
+    按用户 2026-09-23 决定改接火山引擎云服务。迁移前的定义的 ``/submit_analyze`` 与
     ``/query_analyze`` 两个节点契约由 :mod:`customer_profile.execution.auc` 保持不变——
-    下游的两个 code 节点是逐字符取自原始定义的，不能改。
+    下游的两个 code 节点是逐字符取自迁移前的定义的，不能改。
     """
 
     auc_ssl_verify: bool = True
@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     max_queued_runs: int | None = 50
     """待跑队列的深度上限（V0.5.2）。置空表示不限。
 
-    语义变化（差异 W23）：v0.5.1 之前 ``POST /runs`` 的 429 来自「运行名额满」，
+    语义变化：v0.5.1 之前 ``POST /runs`` 的 429 来自「运行名额满」，
     进入队列模型后执行已不在 API 进程内，名额判断挪到 worker 侧；API 侧改为按
     **队列深度**拒绝。缺省 50 是保守值，不是压测结论。
     """
@@ -262,7 +262,7 @@ class Settings(BaseSettings):
         if value != 0.5:
             raise ValueError(
                 "temperature 全项目统一为 0.5；"
-                "如需变更请先修改配置并记入差异清单"
+                "如需变更请先修改配置并记入 ``docs/design/执行语义口径.md``"
             )
         return value
 

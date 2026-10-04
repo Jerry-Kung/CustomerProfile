@@ -3,7 +3,7 @@
 试驾录音与外呼录音的图结构**逐节点相同**，只有渠道名（``data_source``）与提示词正文
 不同，因此与截图类同样处理：一个构造器 + 两份参数。
 
-图结构（节点 ID 沿用原始定义的取值，两个文件里是同一套）：
+图结构（节点 ID 沿用迁移前的定义的取值，两个文件里是同一套）：
 
     start(customer_data, data_source)
       ├─ code 检查录音文件 → if-else 文件是否存在
@@ -15,7 +15,7 @@
       │     └─ false 分支 → template-transform 无数据，输出默认信息
       └─ variable-aggregator → end
 
-``llm_model`` 相关的两个 ``if-else``（原始定义的 ``条件分支 3``）已废弃：
+``llm_model`` 相关的两个 ``if-else``（迁移前的定义的 ``条件分支 3``）已废弃：
 现在删除该分支，任选一支为默认路径——原值恒为 ``gemini``，两支差异仅是模型选择，
 而模型在全项目已统一。
 """
@@ -68,7 +68,7 @@ AUDIO_EXTRACT_WORKFLOW_ID = "audio_content_extract"
 
 @dataclass(frozen=True, slots=True)
 class AudioFlow:
-    """一个录音流程的可变部分。"""
+    """一个录音流程的可变部分。字段值来自各录音工作流的定义模块。"""
 
     slug: str
     display_name: str
@@ -98,7 +98,7 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             START,
             "用户输入",
             "start",
-            # 有意差异 W4：llm_model 入参按 §6.4.5 删除
+            # llm_model 入参按 §6.4.5 删除
             variables=("phone_number", "customer_data", "data_source"),
             required_phone_number=True,
             required_customer_data=True,
@@ -112,7 +112,6 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             on_branch=(EXISTS_BRANCH, "false"),
             outputs=("output",),
             template=template(NO_DATA_TEMPLATE),
-            original_node_id=NO_DATA_TEMPLATE,
         ),
         make_node(
             CHECK_CODE,
@@ -125,7 +124,6 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             },
             outputs=("result",),
             function=f"{SHARED_CODE_MODULE}:extract_media_urls",
-            original_node_id=CHECK_CODE,
         ),
         make_node(
             EXISTS_BRANCH,
@@ -142,16 +140,14 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
                 },
             ),
             else_id=ELSE_BRANCH,
-            original_node_id=EXISTS_BRANCH,
         ),
         make_node(
             AGGREGATE,
-            "变量聚合器",
+            "最终结果汇总",
             "variable-aggregator",
             after=(NO_DATA_TEMPLATE, AGGREGATE_2),
             variables=((NO_DATA_TEMPLATE, "output"), (AGGREGATE_2, "output")),
             outputs=("output",),
-            original_node_id=AGGREGATE,
         ),
         make_node(
             END,
@@ -160,7 +156,6 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             after=(AGGREGATE,),
             inputs={"result": (AGGREGATE, "output")},
             outputs=("result",),
-            original_node_id=END,
         ),
         make_node(
             ARRAY_CODE,
@@ -171,7 +166,6 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             inputs={"files": (CHECK_CODE, "result")},
             outputs=("files", "count"),
             function=f"{SHARED_CODE_MODULE}:parse_file_array",
-            original_node_id=ARRAY_CODE,
         ),
         make_node(
             MULTI_BRANCH,
@@ -186,7 +180,6 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
                 },
             ),
             else_id=ELSE_BRANCH,
-            original_node_id=MULTI_BRANCH,
         ),
         make_node(
             PARSE_URL_CODE,
@@ -197,7 +190,6 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             inputs={"files": (ARRAY_CODE, "files")},
             outputs=("file_url",),
             function=f"{SHARED_CODE_MODULE}:first_file_url",
-            original_node_id=PARSE_URL_CODE,
         ),
         make_node(
             ITERATION,
@@ -212,7 +204,6 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             body=(ITERATION_START, AUDIO_EXTRACT_IN_ITERATION),
             flatten_output=True,
             error_handle_mode="terminated",
-            original_node_id=ITERATION,
         ),
         make_node(
             ITERATION_START,
@@ -220,7 +211,6 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             "iteration-start",
             outputs=("item", "index"),
             iteration_id=ITERATION,
-            original_node_id=ITERATION_START,
         ),
         make_node(
             AUDIO_EXTRACT_IN_ITERATION,
@@ -234,7 +224,6 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
                 "@inputs": {"file_url": "file_url"},
             },
             iteration_id=ITERATION,
-            original_node_id=AUDIO_EXTRACT_IN_ITERATION,
         ),
         make_node(
             JOIN_TEMPLATE,
@@ -244,7 +233,6 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             inputs={"arr": (ITERATION, "output")},
             outputs=("output",),
             template=template(JOIN_TEMPLATE),
-            original_node_id=JOIN_TEMPLATE,
         ),
         make_node(
             AUDIO_LLM,
@@ -257,7 +245,6 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             inputs={"arr": (JOIN_TEMPLATE, "output")},
             outputs=("text",),
             template=template(AUDIO_LLM),
-            original_node_id=AUDIO_LLM,
         ),
         make_node(
             AUDIO_EXTRACT_SINGLE,
@@ -270,9 +257,8 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
                 "@workflow": AUDIO_EXTRACT_WORKFLOW_ID,
                 "@inputs": {"file_url": "file_url"},
             },
-            original_node_id=AUDIO_EXTRACT_SINGLE,
         ),
-        # 有意差异 W4：条件分支 3（llm_model 分支）已废弃，删除该 if-else，
+        # 条件分支 3（llm_model 分支）已废弃，删除该 if-else，
         # 直接连到「非 gemini」那一支的 llm（两支差异仅模型选择）。
         make_node(
             flow.kept_llm_id,
@@ -285,7 +271,6 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             inputs={"content": (AUDIO_EXTRACT_SINGLE, "file_content")},
             outputs=("text",),
             template=template(flow.kept_llm_id),
-            original_node_id=flow.kept_llm_id,
         ),
         make_node(
             flow.aggregate_llm_id,
@@ -294,23 +279,21 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             after=(AUDIO_LLM, flow.kept_llm_id),
             variables=((AUDIO_LLM, "text"), (flow.kept_llm_id, "text")),
             outputs=("output",),
-            original_node_id=flow.aggregate_llm_id,
         ),
         make_node(
             AGGREGATE_2,
-            "变量聚合器 2",
+            "录音分析结果汇总",
             "variable-aggregator",
             after=(AUDIO_LLM, flow.aggregate_llm_id),
             variables=((AUDIO_LLM, "text"), (flow.aggregate_llm_id, "output")),
             outputs=("output",),
-            original_node_id=AGGREGATE_2,
         ),
     )
 
     return WorkflowDef(
         workflow_id=flow.workflow_id,
         display_name=flow.display_name,
-        source_dsl=f"{flow.display_name}.yml",
+        source_dsl=flow.display_name,
         entries=(START,),
         exits=(END,),
         outputs={"result": "output"},

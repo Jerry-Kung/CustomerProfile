@@ -152,7 +152,7 @@ def make_tool_executor(runner: SubWorkflowRunner) -> Any:
     - 父节点入参名（如 ``"phone_number"``）：从父节点绑定实参里取同名入参；
     - 字面量（如 ``"@literal:WeChatMomentsScreenshot"``）：直接作为常量传给子流程。
 
-    字面量形态是 V0.3 新增的：原始定义里子流程入参存在固定值，典型是截图类工作流传的
+    字面量形态是 V0.3 新增的：迁移前的定义里子流程入参存在固定值，典型是截图类工作流传的
     ``data_source``（每个子流程对应一种数据渠道）。这类参数在父图里没有对应入参，
     按名字映射会找不到而报错。
     """

@@ -105,36 +105,11 @@ body {
   position: relative;
 }
 
-.graph-canvas {
-  height: 100%;
-  width: 100%;
-}
 
 /* 图上的节点卡片 */
-.node-card {
-  text-align: left;
-}
 
-.node-title {
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.35;
-  /* 中文节点名很长（「（新）SubAgent - 朋友圈信息提取」），限行避免卡片被撑爆。 */
-  overflow-wrap: anywhere;
-}
 
-.node-type {
-  color: var(--muted);
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
-  margin-top: 2px;
-}
 
-.node-meta {
-  color: var(--muted);
-  font-size: 11px;
-  margin-top: 2px;
-}
 
 /* ---------------------------------------------------------------- 标签页 */
 
@@ -265,7 +240,7 @@ body {
   text-align: center;
 }
 
-/* 状态徽标。颜色与图上的节点着色同一套语义，便于两处对照。 */
+/* 状态徽标。节点状态与运行状态共用一套色，便于列表与详情对照。 */
 .status-pill {
   border-radius: 10px;
   color: #fff;
@@ -281,6 +256,8 @@ body {
 .status-cancelled { background: #6b7280; }
 .status-skipped { background: #a855f7; }
 .status-interrupted { background: #f97316; }
+.status-pending { background: #9ca3af; }
+.status-blocked { background: #f97316; }
 
 .tag-replay {
   border: 1px solid var(--border);
@@ -354,29 +331,9 @@ body {
   min-height: 0;
 }
 
-.detail-graph {
-  flex: 1;
-  min-width: 0;
-}
 
-.detail-panel {
-  background: var(--panel);
-  border-left: 1px solid var(--border);
-  overflow-y: auto;
-  padding: 12px 16px;
-  width: 460px;
-}
 
-.detail-panel h2 {
-  font-size: 14px;
-  margin: 0 0 8px;
-}
 
-.detail-panel h3 {
-  color: var(--muted);
-  font-size: 13px;
-  margin: 16px 0 6px;
-}
 
 .detail-meta {
   color: var(--muted);
@@ -507,92 +464,123 @@ body {
   font-size: 11px;
 }
 
-/* ---------------------------------------------------------------- 视图切换与时间线 */
+/* ---------------------------------------------------------------- 流程列表 */
 
-.view-switch {
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  gap: 4px;
-  padding: 6px 12px;
-}
+/*
+ * 一次运行的实际过程：按开始时间自上而下排列，每行一个节点执行。
+ * 点行展开明细（输入输出、请求尝试、子运行入口）。
+ * 并行关系不靠缩进或分组表达，靠行内的「前置 N 项」对照看出。
+ */
 
-.view-switch button {
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 13px;
-  padding: 3px 10px;
-}
-
-.view-switch button.active {
-  background: #eff6ff;
-  border-color: #bfdbfe;
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.timeline {
-  height: 100%;
+.flow-list {
+  flex: 1;
+  min-width: 0;
   overflow-y: auto;
-  padding: 12px 16px;
+  padding: 12px 20px 24px;
 }
 
-.timeline-head {
+.flow-head {
   color: var(--muted);
   font-size: 12px;
   margin-bottom: 10px;
 }
 
-.timeline-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+.flow-item {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  overflow: hidden;
+  background: var(--panel);
 }
 
-.timeline-row {
+.flow-item.open {
+  border-color: #bfdbfe;
+}
+
+.flow-row {
   align-items: center;
+  background: transparent;
+  border: none;
+  color: var(--text);
   cursor: pointer;
   display: flex;
-  gap: 8px;
+  gap: 10px;
+  padding: 8px 12px;
+  text-align: left;
+  width: 100%;
 }
 
-.timeline-row:hover .timeline-label {
-  color: var(--accent);
+.flow-row:hover {
+  background: #f8fafc;
 }
 
-.timeline-label {
-  color: var(--text);
+/* 序号：第几个执行。用等宽字体，便于竖排对齐扫读。 */
+.flow-no {
+  color: var(--muted);
+  font-family: ui-monospace, Consolas, monospace;
   font-size: 12px;
+}
+
+.flow-dot {
+  border-radius: 50%;
+  flex: none;
+  height: 8px;
+  width: 8px;
+}
+
+.flow-title {
+  flex: 1;
+  font-size: 14px;
+  min-width: 0;
   overflow: hidden;
-  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
-  width: 180px;
 }
 
-.timeline-track {
-  background: #f1f5f9;
-  border-radius: 2px;
-  flex: 1;
-  height: 14px;
-  position: relative;
+.flow-type {
+  color: var(--muted);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
 }
 
-.timeline-bar {
-  border-radius: 2px;
-  height: 100%;
-  position: absolute;
-  top: 0;
+.flow-branch {
+  background: #eff6ff;
+  border-radius: 3px;
+  color: var(--accent);
+  font-size: 11px;
+  padding: 0 5px;
 }
 
-.timeline-value {
+.flow-preds {
   color: var(--muted);
   font-size: 11px;
+}
+
+.flow-child {
+  border: 1px solid #bfdbfe;
+  border-radius: 3px;
+  color: var(--accent);
+  font-size: 11px;
+  padding: 0 5px;
+}
+
+.flow-duration {
+  color: var(--muted);
+  font-size: 12px;
   text-align: right;
-  width: 70px;
+  width: 72px;
+}
+
+.flow-detail {
+  background: #f8fafc;
+  border-top: 1px solid var(--border);
+  padding: 10px 12px;
+}
+
+.flow-detail h3 {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 16px 0 6px;
 }
 
 /* ---------------------------------------------------------------- 提交任务 */

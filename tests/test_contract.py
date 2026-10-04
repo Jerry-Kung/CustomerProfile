@@ -152,13 +152,13 @@ async def test_entry_tool_nodes_declare_subworkflows():
 
 
 def test_entry_graph_shape_is_five_nodes_four_edges():
-    """有意差异 W1：入口图是 5 节点 / 4 边（删去了冗余的第二个回写节点）。"""
+    """入口图是 5 节点 / 4 边：迁移时删去了冗余的第二个回写节点。"""
     assert len(entry.WORKFLOW.nodes) == 5
     assert len(entry.WORKFLOW.edge_list()) == 4
 
 
 def test_entry_removed_writeback_node_is_absent():
-    """W1 删除的节点确实不在图里，且它引用的边也没有残留。"""
+    """被删的那个回写节点确实不在图里，且它引用的边也没有残留。"""
     assert entry.REMOVED_NODES[0] not in entry.WORKFLOW.node_map
     for source, target in entry.REMOVED_EDGES:
         assert (source, target) not in {

@@ -73,7 +73,6 @@ export interface GraphNode {
   branch_gates: Record<string, string>
   outputs: string[]
   config: Record<string, unknown>
-  coords: [number, number] | null
 }
 
 export interface Definition {
@@ -85,8 +84,6 @@ export interface Definition {
   outputs: Record<string, string>
   nodes: GraphNode[]
   edges: GraphEdge[]
-  /** 节点 ID → `[x, y]`。后端按最长路径分层算出，见 layout.py。 */
-  layout: Record<string, [number, number]>
 }
 
 export interface RunGraph {
@@ -147,22 +144,13 @@ export interface RuntimeInfo {
   serve_ui: boolean
 }
 
-/** 一个工作流的元信息，用于结构页的下拉选择。 */
+/** 一个工作流的元信息，用于提交页与列表页的工作流选择。 */
 export interface WorkflowBrief {
   workflow_id: string
   display_name: string
   source_dsl: string | null
   node_count: number
   outputs: Record<string, string>
-}
-
-export interface DefinitionVersion {
-  version_id: number
-  workflow_id: string
-  definition_hash: string
-  code_commit: string | null
-  created_at_ms: number
-  definition: Definition
 }
 
 const BASE = ''
@@ -232,14 +220,6 @@ export const api = {
     inputs: Record<string, unknown>
     business_ref?: string
   }) => postJson<SubmitResult>('/runs', payload),
-
-  topology: (workflowId: string) =>
-    getJson<Definition>(
-      `/workflows/${encodeURIComponent(workflowId)}/topology`,
-    ),
-
-  definitionVersion: (versionId: number) =>
-    getJson<DefinitionVersion>(`/definition-versions/${versionId}`),
 
   runGraph: (runId: string) =>
     getJson<RunGraph>(`/runs/${encodeURIComponent(runId)}/graph`),

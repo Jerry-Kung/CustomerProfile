@@ -6,7 +6,7 @@
 
 1. http 的 ``files`` 是 **data URI 列表**，不是单个字符串；
 2. 组装出的请求体用多模态的 ``content`` 数组，图片走 ``image_url``；
-3. ``detail`` 原样透传（实测原始定义的 ``vision.configs.detail`` 为 ``high``）；
+3. ``detail`` 原样透传（实测迁移前的定义的 ``vision.configs.detail`` 为 ``high``）；
 4. 没有图片时不构造 ``content`` 数组——不给模型发空图片列表。
 """
 
@@ -271,7 +271,7 @@ async def test_vision_payload_carries_image_and_detail(tmp_path):
     assert len(image_parts) == 1, f"应带 1 张图片，实际 {len(image_parts)} 张"
     assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
     assert image_parts[0]["image_url"]["detail"] == "high", (
-        "detail 必须原样透传（原始定义实测为 high）"
+        "detail 必须原样透传（迁移前的定义实测为 high）"
     )
 
 

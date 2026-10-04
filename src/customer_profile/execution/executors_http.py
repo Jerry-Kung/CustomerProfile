@@ -1,9 +1,9 @@
 """``http-request`` 节点执行器。
 
 迁移原则：保留方法、路径、业务 body 与必要 headers，**鉴权从环境
-变量注入**；原始定义中的明文 ``X-API-Key`` 不再出现在定义里。
+变量注入**；迁移前的定义中的明文 ``X-API-Key`` 不再出现在定义里。
 
-``timeout`` 与 ``retry_interval`` 一律不照搬原始定义的取值，改用
+``timeout`` 与 ``retry_interval`` 一律不照搬迁移前的定义的取值，改用
 :class:`~customer_profile.settings.Settings` 里的显式配置。
 """
 
@@ -24,7 +24,7 @@ from .executors import (
 )
 from .http import HttpCallError
 
-DIFY_REF_IN_BODY = re.compile(r"\{\{#([^#{}]+)#\}\}")
+NODE_REF_IN_BODY = re.compile(r"\{\{#([^#{}]+)#\}\}")
 
 
 def register_all(registry: ExecutorRegistry) -> ExecutorRegistry:
@@ -42,12 +42,12 @@ async def execute_http_request(
     - ``@method``：HTTP 方法（``get`` / ``post`` …）；
     - ``@path`` 或 ``@url``：路径（相对 ``@service`` 的 base_url）。含 ``{{#...#}}``
       引用时须在绑定的 ``@path`` 里声明来源，由这里拼接；
-    - ``@url_field``：URL **整段来自绑定的值**（原始定义里图片直链就是这种写法：
+    - ``@url_field``：URL **整段来自绑定的值**（迁移前的定义里图片直链就是这种写法：
       ``url: '{{#node.image_url#}}'``，没有字面前缀）。指定它时忽略 ``@path``；
     - ``@service``：``auc`` / ``profile`` / ``mhero``，决定 base_url 与凭据；
     - ``@headers``：非敏感 header 字面量；
     - ``@body``：请求体字面量（写请求用）；
-    - ``@body_template``：请求体是**含引用的 JSON 文本**（原始定义里 AUC 的两个节点就是这种
+    - ``@body_template``：请求体是**含引用的 JSON 文本**（迁移前的定义里 AUC 的两个节点就是这种
       写法，如 ``'{ "file_url": {{#node.file_url#}} }'``）。与 ``@body`` 的区别在于它由
       引用拼成，且引用的值恒为字符串、需要加引号；渲染结果按 JSON 解析后作为请求体；
     - ``@outputs``：响应字段映射，如 ``{"body": "$text", "status": "$status"}``；
@@ -101,7 +101,7 @@ def _resolve_body(
 ) -> Any:
     """还原请求体。
 
-    原始定义的 http 节点把请求体写成「含 ``{{#node.field#}}`` 引用的 JSON 文本」，例如
+    迁移前的定义的 http 节点把请求体写成「含 ``{{#node.field#}}`` 引用的 JSON 文本」，例如
     ``{ "file_url": {{#1773112560827.file_url#}} }``。它的含义是：把引用替换成**带引号的
     字符串值**，整体作为 JSON 发送。因此这里按引用逐段替换并对值做 JSON 转义，再解析成
     对象；解析失败说明模板本身不合法，直接报错而不是把坏载荷发出去。
@@ -138,7 +138,7 @@ def _resolve_body(
                 return json.dumps(value, ensure_ascii=False)[1:-1]
             return _json_quote(value)
 
-        return DIFY_REF_IN_BODY.sub(_replace, source)
+        return NODE_REF_IN_BODY.sub(_replace, source)
 
     text = _substitute(text, text)
 
@@ -170,7 +170,7 @@ def _resolve_path(node: NodeDef, ctx: RunContext, config: Mapping[str, Any]) -> 
     路径里的 ``{{#node.field#}}`` 在定义里登记为 ``@path`` 绑定，因此这里直接把
     绑定值拼到字面路径上，不做通用字符串替换。
 
-    ``@url_field`` 声明「URL 整段来自绑定值」，此时不做拼接：原始定义里图片直链就是
+    ``@url_field`` 声明「URL 整段来自绑定值」，此时不做拼接：迁移前的定义里图片直链就是
     ``url: '{{#node.image_url#}}'``，本身没有字面前缀。
     """
     if config.get("@url_field"):
@@ -226,7 +226,7 @@ def _build_headers(
 def _map_outputs(node: NodeDef, config: Mapping[str, Any], attempt: Any) -> dict[str, Any]:
     """把响应映射成节点输出字段。
 
-    缺省同时给出 ``body``（文本）与 ``status``，因为原始定义下游对 GET 的消费方式就是
+    缺省同时给出 ``body``（文本）与 ``status``，因为迁移前的定义下游对 GET 的消费方式就是
     取响应体文本（如人工确认提取节点把 ``body`` 当 JSON 字符串喂给 code 节点）。
     """
     mapping = config.get("@outputs") or {"body": "$text", "status": "$status"}

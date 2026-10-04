@@ -23,7 +23,6 @@ from .execution.llm import LlmClient
 from .execution.quota import LlmQuota
 from .execution.scheduler import RunOutcome, RunRequest, Scheduler
 from .execution.subworkflow import register_tool_executor
-from .layout import attach_layout
 from .persistence import RunTracker
 from .persistence.schema import RunRecordRow
 from .persistence.store import Store
@@ -53,7 +52,7 @@ class Service:
     """同时运行的工作流数上限（``MAX_ACTIVE_RUNS``）。见 :class:`RunSlotGate`。
 
     **V0.5.2 起只作用于进程内执行路径**（``submit_local``）：队列模型下执行已不在
-    提交侧，名额判断挪到 worker 侧（差异 W23）。
+    提交侧，名额判断挪到 worker 侧。
     """
 
     quota: Any = None
@@ -250,19 +249,8 @@ class Service:
                 f"工作流 {workflow_id!r} 不可用；可用的：{sorted(self.definitions)}"
             ) from exc
 
-    def topology(self, workflow_id: str) -> dict[str, Any]:
-        """导出拓扑，供只读前端使用（V0.4 复用同一份定义，不维护第二张图）。
-
-        ``asdict()`` 的 ``coords`` 保持原样（声明），算出来的展示坐标放在独立的
-        ``layout`` 字段。两者分开：一个是人定的，一个是算的，混在一起就分不清了。
-        """
-        workflow = self.require_workflow(workflow_id)
-        return attach_layout(workflow.asdict(), workflow)
-
-
-
 class QueueFull(RuntimeError):
-    """待跑队列已达深度上限，本次提交被拒绝（V0.5.2，差异 W23）。"""
+    """待跑队列已达深度上限，本次提交被拒绝（V0.5.2）。"""
 
     def __init__(self, limit: int, queued: int) -> None:
         self.limit = limit

@@ -9,7 +9,7 @@
 一个可留痕的 Python 工作流执行器，外加一个只读的运行台前端。
 
 - **执行器**：按依赖就绪调度工作流定义，把运行、节点执行、每次外部请求尝试与定义快照四层全部落到 SQLite。
-- **运行台**：查看运行列表、拓扑图、节点状态、执行顺序时间线与每次尝试的请求/响应；V0.5.1 起可在页面上提交任务。
+- **运行台**：查看运行列表与某次运行的实际过程——按执行时间排列的节点清单，逐节点展开看运行时间、输入输出、每次尝试的请求/响应与子运行下钻；V0.5.1 起可在页面上提交任务。
 - **数据基线**：拿一批固定手机号跑真实工作流并归档全部中间结果，供日后判断「改了工作流之后输出质量有没有崩」。
 
 系统形态与关键约束见 `docs/architecture.md`；部署与运维见 `docs/runbooks/`。
@@ -38,7 +38,7 @@ curl -X POST localhost:8000/runs \
 | `src/customer_profile/` | 执行器、定义层、持久化、API 与 worker |
 | `src/customer_profile/workflows/` | 各工作流的 Python 定义 |
 | `src/customer_profile/templates/` | 提示词与模板正文（运行期唯一来源） |
-| `frontend/` | 运行台前端（Vite + React + React Flow） |
+| `frontend/` | 运行台前端（Vite + React） |
 | `scripts/` | 运维脚本：基线跑批、冒烟、回放录制、号码收集 |
 | `tests/` | 测试（不触达外网，全部走固定响应或确定性代码节点） |
 | `data/` | 运行期 SQLite 与产物（可重建，已 gitignore） |

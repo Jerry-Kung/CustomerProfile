@@ -61,7 +61,7 @@ def test_successors_are_inverted_predecessors():
 def test_edge_list_matches_declared_predecessors():
     workflow = _simple_workflow()
     # 按 (source, target) 排序后 'a' < 's'，因此 a→e 排在 s→a 之前
-    # ``source_handle`` 保留原始定义的分支名（普通边为 ``"source"``）：它是分支门槛
+    # ``source_handle`` 保留迁移前的定义的分支名（普通边为 ``"source"``）：它是分支门槛
     # 的原始依据，丢了会让 if-else 的两支同时执行。
     assert sorted(workflow.edge_list(), key=lambda e: (e["source"], e["target"])) == [
         {"source": "a", "target": "e", "source_handle": "source"},

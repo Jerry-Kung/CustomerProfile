@@ -1,22 +1,22 @@
-"""``（新）SubAgent - 聊天记录数据信息`` 的 Python 定义。
+"""``聊天记录数据信息`` 的 Python 定义。
 
-原始定义基线：9 节点 / 9 边。链路是「取聊天记录 → 清洗两遍 → 聚合」：
+迁移前的定义基线：9 节点 / 9 边。链路是「取聊天记录 → 清洗两遍 → 聚合」：
 
     start(phone_number, customer_data, data_source)
       └─ code 数据提取（按 channel 取 raw_payload）
            └─ if-else 条件分支
                 ├─ true  → code 数据初步清洗&格式转换
                 │            └─ template 数据深度清洗Prompt
-                │                 └─ llm 数据深度清洗（原 gemini_retry 工具节点）
+                │                 └─ llm 数据深度清洗（工具节点归一）
                 └─ else  → template 无数据，输出默认信息
                               └─ variable-aggregator → end
 
 两处口径：
 
-- ``llm`` 节点由原始定义的 ``tool: gemini_retry_2_times`` 归一而来（有意差异 W2/W3）。
+- ``llm`` 节点由迁移前的定义里的 ``tool`` 节点归一而来。
   它原本是一个**子流程**，内含 3 次 LLM 执行 + 2 次异常判断。现在重试下沉到
   ``llm_call()`` 内部，因此这里只是一个普通 ``llm`` 节点。输出字段仍叫 ``result``，
-  与原始定义聚合器里的 ``["1779672287769", "result"]`` 逐字对应。
+  与迁移前的定义聚合器里的 ``["1779672287769", "result"]`` 逐字对应。
 - 深度清洗的提示词正文很长（2700+ 字），外置为资源文件（§6.5）。
 """
 
@@ -27,7 +27,7 @@ from typing import Any
 from ..definitions import WorkflowDef, make_node
 
 
-# ---- 原始定义节点 1779671149560 的正文（逐字符，仅函数名不同）
+# ---- 迁移前的定义节点 1779671149560 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -441,8 +441,9 @@ def _clean_content(content):
 # ====================================================================
 
 WORKFLOW_ID = "chat_history_data"
-DISPLAY_NAME = "（新）SubAgent - 聊天记录数据信息"
-SOURCE_DSL = f"{DISPLAY_NAME}.yml"
+DISPLAY_NAME = "聊天记录数据信息"
+# 定义快照的 source_dsl 直接取这个显示名——原来那个指向 .yml 的追溯键已随
+# 定义文件一并废弃，字段保留只为不动快照形状。
 
 START = "1773748103758"
 END = "1773748343861"
@@ -474,7 +475,7 @@ def template_name(node_id: str) -> str:
 WORKFLOW = WorkflowDef(
     workflow_id=WORKFLOW_ID,
     display_name=DISPLAY_NAME,
-    source_dsl=SOURCE_DSL,
+    source_dsl=DISPLAY_NAME,
     entries=(START,),
     exits=(END,),
     outputs={"result": "output"},
@@ -483,7 +484,7 @@ WORKFLOW = WorkflowDef(
             START,
             "用户输入",
             "start",
-            # 有意差异 W4：llm_model 入参按 §6.4.5 删除
+            # llm_model 入参按 §6.4.5 删除
             variables=("phone_number", "customer_data", "data_source"),
             required_phone_number=True,
             required_customer_data=True,
@@ -500,7 +501,6 @@ WORKFLOW = WorkflowDef(
             },
             outputs=("result",),
             function=f"{SHARED_CODE_MODULE}:extract_raw_payload",
-            original_node_id=EXTRACT,
         ),
         make_node(
             BRANCH,
@@ -517,7 +517,6 @@ WORKFLOW = WorkflowDef(
                 },
             ),
             else_id=ELSE_BRANCH,
-            original_node_id=BRANCH,
         ),
         make_node(
             NO_DATA_TEMPLATE,
@@ -527,7 +526,6 @@ WORKFLOW = WorkflowDef(
             on_branch=(BRANCH, "false"),
             outputs=("output",),
             template=template_name(NO_DATA_TEMPLATE),
-            original_node_id=NO_DATA_TEMPLATE,
         ),
         make_node(
             CLEANSE,
@@ -538,7 +536,6 @@ WORKFLOW = WorkflowDef(
             inputs={"json_str": (EXTRACT, "result")},
             outputs=("result",),
             function=f"customer_profile.workflows.{SLUG}:clean_chat_history",
-            original_node_id=CLEANSE,
         ),
         make_node(
             DEEP_PROMPT,
@@ -548,28 +545,25 @@ WORKFLOW = WorkflowDef(
             inputs={"dialog_markdown": (CLEANSE, "result")},
             outputs=("output",),
             template=template_name(DEEP_PROMPT),
-            original_node_id=DEEP_PROMPT,
         ),
         make_node(
             DEEP_LLM,
-            "数据深度清洗 工具",
+            "数据深度清洗",
             "llm",
-            # 有意差异 W2/W3：原始定义的 gemini_retry_2_times 工具节点归一为一次 llm_call
+            # 迁移前的定义里的工具节点归一为一次 llm_call
             after=(DEEP_PROMPT,),
             inputs={"input_prompt": (DEEP_PROMPT, "output")},
             outputs=("result",),
             output="result",
             system_text="You are a helpful AI assistant.",
-            original_node_id=DEEP_LLM,
         ),
         make_node(
             AGGREGATE,
-            "变量聚合器",
+            "清洗结果汇总",
             "variable-aggregator",
             after=(DEEP_LLM, NO_DATA_TEMPLATE),
             variables=((DEEP_LLM, "result"), (NO_DATA_TEMPLATE, "output")),
             outputs=("output",),
-            original_node_id=AGGREGATE,
         ),
         make_node(
             END,
@@ -578,7 +572,6 @@ WORKFLOW = WorkflowDef(
             after=(AGGREGATE,),
             inputs={"result": (AGGREGATE, "output")},
             outputs=("result",),
-            original_node_id=END,
         ),
     ),
 )
@@ -598,7 +591,7 @@ def default_inputs(customer_data: str, phone_number: str = "") -> dict[str, Any]
 # 改造只允许改函数名，不许改函数体。跨节点重名的辅助函数（同一份定义 里不同
 # 节点各写了一份 ``_parse_json`` 之类）必须改名，否则后一份会覆盖前一份。
 # 这里如实记录每个节点用了什么名字，逐字符比对按它把
-# 原始定义文本里的旧名换成新名后再逐字符比对——差异因此只剩下「名字」。
+# 迁移前的定义文本里的旧名换成新名后再逐字符比对——差异因此只剩下「名字」。
 # ====================================================================
 
 CODE_SPECS: dict[str, dict] = {

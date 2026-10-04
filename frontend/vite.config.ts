@@ -12,7 +12,6 @@ export default defineConfig({
     proxy: {
       '/workflows': 'http://127.0.0.1:8000',
       '/runs': 'http://127.0.0.1:8000',
-      '/definition-versions': 'http://127.0.0.1:8000',
       '/health': 'http://127.0.0.1:8000',
     },
   },

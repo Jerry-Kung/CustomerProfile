@@ -189,6 +189,7 @@ SUBWORKFLOWS = (CHILD_WORKFLOW,)
 WORKFLOW = WorkflowDef(
     workflow_id=WORKFLOW_ID,
     display_name=DISPLAY_NAME,
+    is_synthetic=True,
     source_dsl=None,
     entries=(START,),
     exits=(END,),

@@ -1,6 +1,6 @@
 """``录音文件内容抽取（纯识别，无加工）`` 的 Python 定义。
 
-原始定义基线：12 节点 / 11 边。被两个录音工作流各引用两次（单文件路径与迭代路径各一），
+迁移前的定义基线：12 节点 / 11 边。被两个录音工作流各引用两次（单文件路径与迭代路径各一），
 是子工作流复用最典型的例子。
 
 链路：``start(file_url)`` → AUC 提交 → 取任务参数 → 轮询查询 → 识别结果提取 →
@@ -8,7 +8,7 @@ LLM 校对 → LLM 有效性判断 → 判断结果提取 →（有效 / 无效�
 
 两条实现口径：
 
-- **Q6 的轮询问题**已在原始定义里澄清：``/query_analyze`` 的 ``max_retries: 5`` 是**单次
+- **Q6 的轮询问题**已在迁移前的定义里澄清：``/query_analyze`` 的 ``max_retries: 5`` 是**单次
   请求内的重试**（既有 HTTP 客户端的重试语义），不是自建轮询循环。因此这里只按重试
   还原，不额外造轮询。
 - AUC 服务无鉴权、``ssl_verify=false``（内网地址），由 ``@service`` 与
@@ -23,7 +23,8 @@ from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "audio_content_extract"
 DISPLAY_NAME = "录音文件内容抽取（纯识别，无加工）"
-SOURCE_DSL = f"{DISPLAY_NAME}.yml"
+# 定义快照的 source_dsl 直接取这个显示名——原来那个指向 .yml 的追溯键已随
+# 定义文件一并废弃，字段保留只为不动快照形状。
 
 START = "1773112560827"
 SUBMIT = "1773112855659"
@@ -52,7 +53,7 @@ def template_name(node_id: str) -> str:
 WORKFLOW = WorkflowDef(
     workflow_id=WORKFLOW_ID,
     display_name=DISPLAY_NAME,
-    source_dsl=SOURCE_DSL,
+    source_dsl=DISPLAY_NAME,
     entries=(START,),
     exits=(END_VALID, END_INVALID),
     outputs={"is_valid": "is_valid", "file_content": "file_content"},
@@ -63,7 +64,6 @@ WORKFLOW = WorkflowDef(
             "start",
             variables=("file_url",),
             required_file_url=True,
-            coords=(80.0, 282.0),
         ),
         make_node(
             SUBMIT,
@@ -76,12 +76,11 @@ WORKFLOW = WorkflowDef(
                 "@method": "post",
                 "@path": "/submit_analyze",
                 "@headers": {"Content-Type": "application/json"},
-                # 请求体逐字符取自原始定义：引用会被替换成带引号的字符串
+                # 请求体逐字符取自迁移前的定义：引用会被替换成带引号的字符串
                 "@body_template": '{ "file_url": {{#1773112560827.file_url#}} }',
                 "@ssl_verify": False,
                 "@outputs": {"body": "$text", "status": "$status"},
             },
-            original_node_id=SUBMIT,
         ),
         make_node(
             PARSE_TASK,
@@ -91,7 +90,6 @@ WORKFLOW = WorkflowDef(
             inputs={"body": (SUBMIT, "body")},
             outputs=("task_id", "x_tt_logid"),
             function=f"{SHARED_CODE_MODULE}:parse_task_params",
-            original_node_id=PARSE_TASK,
         ),
         make_node(
             QUERY,
@@ -108,12 +106,11 @@ WORKFLOW = WorkflowDef(
                     '{"task_id": {{#17731967052740.task_id#}},'
                     ' "x_tt_logid": {{#17731967052740.x_tt_logid#}}}'
                 ),
-                # 原始定义的取值 max_retries: 5 —— 单次请求内的重试，非轮询循环
+                # 迁移前的定义的取值 max_retries: 5 —— 单次请求内的重试，非轮询循环
                 "@retry_max": 5,
                 "@ssl_verify": False,
                 "@outputs": {"body": "$text", "status": "$status"},
             },
-            original_node_id=QUERY,
         ),
         make_node(
             EXTRACT_RESULT,
@@ -123,7 +120,6 @@ WORKFLOW = WorkflowDef(
             inputs={"body": (QUERY, "body")},
             outputs=("auc_result", "poll_count"),
             function=f"{SHARED_CODE_MODULE}:extract_auc_result",
-            original_node_id=EXTRACT_RESULT,
         ),
         make_node(
             PROOFREAD_LLM,
@@ -134,7 +130,6 @@ WORKFLOW = WorkflowDef(
             outputs=("text",),
             template=template_name(PROOFREAD_LLM),
             system_text="你是一个有用的AI助手",
-            original_node_id=PROOFREAD_LLM,
         ),
         make_node(
             VALIDITY_LLM,
@@ -147,7 +142,6 @@ WORKFLOW = WorkflowDef(
             system_text="你是一个有用的AI助手",
             # 下游 code 节点对它做 JSON 解析 → 按消费方语义要求 JSON（§6.4.2 / M2）
             expect_json=True,
-            original_node_id=VALIDITY_LLM,
         ),
         make_node(
             VALIDITY_CODE,
@@ -157,7 +151,6 @@ WORKFLOW = WorkflowDef(
             inputs={"result": (VALIDITY_LLM, "text")},
             outputs=("is_valid",),
             function=f"{SHARED_CODE_MODULE}:extract_validity",
-            original_node_id=VALIDITY_CODE,
         ),
         make_node(
             VALIDITY_BRANCH,
@@ -172,17 +165,15 @@ WORKFLOW = WorkflowDef(
                 },
             ),
             else_id=ELSE_BRANCH,
-            original_node_id=VALIDITY_BRANCH,
         ),
         make_node(
             NO_CONTENT_TEMPLATE,
-            "模板转换",
+            "无有效内容提示",
             "template-transform",
             after=(VALIDITY_BRANCH,),
             on_branch=(VALIDITY_BRANCH, "false"),
             outputs=("output",),
             template=template_name(NO_CONTENT_TEMPLATE),
-            original_node_id=NO_CONTENT_TEMPLATE,
         ),
         make_node(
             END_VALID,
@@ -195,11 +186,10 @@ WORKFLOW = WorkflowDef(
                 "file_content": (PROOFREAD_LLM, "text"),
             },
             outputs=("is_valid", "file_content"),
-            original_node_id=END_VALID,
         ),
         make_node(
             END_INVALID,
-            "输出 2",
+            "输出（无有效内容）",
             "end",
             after=(NO_CONTENT_TEMPLATE,),
             inputs={
@@ -207,7 +197,6 @@ WORKFLOW = WorkflowDef(
                 "file_content": (NO_CONTENT_TEMPLATE, "output"),
             },
             outputs=("is_valid", "file_content"),
-            original_node_id=END_INVALID,
         ),
     ),
 )

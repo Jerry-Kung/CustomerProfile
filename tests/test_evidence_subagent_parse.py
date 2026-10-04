@@ -1,4 +1,4 @@
-"""``evidence_subagent._parse_json`` 的围栏容忍度（有意差异 W52）。
+"""``evidence_subagent._parse_json`` 的围栏容忍度（改动理由见 ``docs/adr/0004-照搬定义文本还是按实测修正.md`` 偏离二）。
 
 对应基线批次 `baseline-39-dsv41-noThink` 实测到的两例静默降级：
 `15012891982` / `18003012053` 的微信主页截图分析把 JSON 放在一句说明之后，
@@ -27,7 +27,7 @@ def _body(*, indent: int = 4) -> str:
         pytest.param(_body(), id="裸JSON"),
         pytest.param(f"```json\n{_body()}\n```", id="整段围栏"),
         pytest.param(f"```\n{_body()}\n```", id="整段围栏无语言标注"),
-        # W52 修复的正是这两类：说明文字在前
+        # 这两类正是修复的目标：说明文字在前
         pytest.param(f"根据提供的图片，提取信息如下：\n\n```json\n{_body()}\n```", id="说明在前-json"),
         pytest.param(f"图片无法读取，以下是字段占位：\n```\n{_body()}\n```", id="说明在前-无标注"),
     ],
