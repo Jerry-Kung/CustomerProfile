@@ -6,8 +6,8 @@
       └─ code 数据提取（按 channel 取 raw_payload）
            └─ if-else 条件分支
                 ├─ true  → code 数据初步清洗&格式转换
-                │            └─ template 数据深度清洗Prompt
-                │                 └─ llm 数据深度清洗（工具节点归一）
+                │            └─ template 数据深度清洗 提示词
+                │                 └─ llm 数据深度清洗
                 └─ else  → template 无数据，输出默认信息
                               └─ variable-aggregator → end
 
@@ -539,7 +539,7 @@ WORKFLOW = WorkflowDef(
         ),
         make_node(
             DEEP_PROMPT,
-            "数据深度清洗Prompt",
+            "数据深度清洗 提示词",
             "template-transform",
             after=(CLEANSE,),
             inputs={"dialog_markdown": (CLEANSE, "result")},

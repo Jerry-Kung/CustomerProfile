@@ -122,7 +122,7 @@ WORKFLOW = WorkflowDef(
         ),
         make_node(
             PROFILE_PROMPT,
-            "人设特征推断 Prompt",
+            "人设特征推断 提示词",
             "template-transform",
             after=(START,),
             on_branch=("1776760124715", "true"),
@@ -151,7 +151,7 @@ WORKFLOW = WorkflowDef(
         ),
         make_node(
             STYLE_PROMPT,
-            "消费者风格推断Prompt",
+            "消费者风格推断 提示词",
             "template-transform",
             after=(PROFILE_AGGREGATE,),
             on_branch=("17767603231790", "true"),
@@ -175,7 +175,7 @@ WORKFLOW = WorkflowDef(
         ),
         make_node(
             HOBBY_PROMPT,
-            "兴趣&关注点推断Prompt",
+            "兴趣&关注点推断 提示词",
             "template-transform",
             after=(PROFILE_AGGREGATE,),
             on_branch=("17767603231790", "true"),

@@ -1,4 +1,4 @@
-"""``人工确认信息提取（生产环境）`` 的 Python 定义。
+"""``人工确认信息提取`` 的 Python 定义。
 
 迁移前的定义基线：4 节点 / 3 边，``start → http-request(GET) → code → end``。
 它是 V0.2 用来验证「HTTP 读取与留痕」的载体。
@@ -23,7 +23,7 @@ from typing import Any
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "human_corrected_info"
-DISPLAY_NAME = "人工确认信息提取（生产环境）"
+DISPLAY_NAME = "人工确认信息提取"
 # 定义快照的 source_dsl 直接取这个显示名——原来那个指向 .yml 的追溯键已随
 # 定义文件一并废弃，字段保留只为不动快照形状。
 

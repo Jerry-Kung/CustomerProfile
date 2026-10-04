@@ -1,4 +1,4 @@
-"""``客户初始画像（生产环境）`` —— 全流程主入口的 Python 定义。
+"""``客户初始画像`` —— 全流程主入口的 Python 定义。
 
 迁移前的定义基线：6 节点 / 6 边。它是**编排图**：自己不做事，只按顺序调用三个子流程。
 
@@ -24,7 +24,7 @@ from typing import Any
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "customer_profile_entry"
-DISPLAY_NAME = "客户初始画像（生产环境）"
+DISPLAY_NAME = "客户初始画像"
 # 定义快照的 source_dsl 直接取这个显示名——原来那个指向 .yml 的追溯键已随
 # 定义文件一并废弃，字段保留只为不动快照形状。
 
@@ -65,7 +65,7 @@ WORKFLOW = WorkflowDef(
         ),
         make_node(
             EVIDENCE,
-            "证据线索汇总（生产环境）",
+            "证据线索汇总",
             "tool",
             after=(START,),
             inputs={"phone_number": (START, "phone_number")},
@@ -95,7 +95,7 @@ WORKFLOW = WorkflowDef(
         ),
         make_node(
             PRODUCTION,
-            "画像内容生成&回写（生产环境）",
+            "画像内容生成与回写",
             "tool",
             after=(PROFILE,),
             inputs={

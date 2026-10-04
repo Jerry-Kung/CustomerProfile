@@ -383,7 +383,7 @@ WORKFLOW = WorkflowDef(
         ),
         make_node(
             REPORT_TEMPLATE,
-            "反馈总结报告Prompt",
+            "反馈总结报告 提示词",
             "template-transform",
             after=(BRANCH,),
             on_branch=(BRANCH, "true"),

@@ -1,4 +1,4 @@
-"""``极光数据（生产环境）`` 的 Python 定义。
+"""``极光数据`` 的 Python 定义。
 
 迁移前的定义基线：7 节点 / 7 边，是结构最简单的一类子流程——「取一段数据，取到就原样输出，
 取不到给一句固定说明」。它也把改造里的一条口径摆得最清楚：**空串是合法产出**。
@@ -19,7 +19,7 @@ from typing import Any
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "jiguang_data"
-DISPLAY_NAME = "极光数据（生产环境）"
+DISPLAY_NAME = "极光数据"
 # 定义快照的 source_dsl 直接取这个显示名——原来那个指向 .yml 的追溯键已随
 # 定义文件一并废弃，字段保留只为不动快照形状。
 

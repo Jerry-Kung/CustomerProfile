@@ -1,4 +1,4 @@
-"""``证据线索汇总（生产环境）`` 的 Python 定义。
+"""``证据线索汇总`` 的 Python 定义。
 
 迁移前的定义基线：**21 节点 / 35 边**（2026-09-28 修订；修订前为 24 / 39），是全项目
 **扇出最宽**的图：一次取数之后 14 路并行取证。
@@ -12,7 +12,7 @@
            ├─ tool 用户人工Feedback
            └─ tool 手机号&企业信息分析 ──────────────────────────┐
       code 客户标准信息数据聚合（微信搜索 + 猛士IT）               ├→ template 客户数据聚合
-           └─ template 证据线索整理Prompt → llm 证据线索整理      │   → llm 证据线索整理
+           └─ template 证据线索整理 提示词 → llm 证据线索整理     │   → llm 证据线索整理
                 → end(result, original_data)                     ┘
 
 **2026-09-28 修订（业务方修订）**：原「取关联企业 → 拆运营商/企业 → 两个 LLM」
@@ -40,7 +40,7 @@ from typing import Any
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "evidence_subagent"
-DISPLAY_NAME = "证据线索汇总（生产环境）"
+DISPLAY_NAME = "证据线索汇总"
 # 定义快照的 source_dsl 直接取这个显示名——原来那个指向 .yml 的追溯键已随
 # 定义文件一并废弃，字段保留只为不动快照形状。
 
@@ -310,7 +310,7 @@ WORKFLOW = WorkflowDef(
         # 人工确认信息只需要手机号（走 mhero，与 history 无关）
         make_node(
             LOCKED_NOTES,
-            "人工确认信息提取（生产环境）",
+            "人工确认信息提取",
             "tool",
             after=(HISTORY_HTTP,),
             inputs={"phone_number": (START, "phone_number")},
@@ -320,7 +320,7 @@ WORKFLOW = WorkflowDef(
                 "@inputs": {"phone_number": "phone_number"},
             },
         ),
-        _tool(JIGUANG, "极光数据（生产环境）", "jiguang_data", "DatametInterestPoints"),
+        _tool(JIGUANG, "极光数据", "jiguang_data", "DatametInterestPoints"),
         _tool(
             MENGSHI_IT,
             "猛士IT系统数据信息",
@@ -394,7 +394,7 @@ WORKFLOW = WorkflowDef(
         ),
         make_node(
             EVIDENCE_PROMPT,
-            "证据线索整理Prompt",
+            "证据线索整理 提示词",
             "template-transform",
             after=(DATA_AGGREGATE, STANDARD_AGGREGATE),
             inputs={"arg1": (DATA_AGGREGATE, "output")},

@@ -1,4 +1,4 @@
-"""``画像内容生成&回写（生产环境）`` 的 Python 定义。
+"""``画像内容生成与回写`` 的 Python 定义。
 
 迁移前的定义基线：41 节点 / 55 边，是全项目最大的工作流。它把三段输入（证据线索、人设画像、
 原始客户数据）经 11 路 LLM 生成与 7 段 code 合并，拼成一份最终画像 JSON，再回写生产。
@@ -29,7 +29,7 @@ from typing import Any
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "customer_profile_production"
-DISPLAY_NAME = "画像内容生成与回写（生产环境）"
+DISPLAY_NAME = "画像内容生成与回写"
 # 定义快照的 source_dsl 直接取这个显示名——原来那个指向 .yml 的追溯键已随
 # 定义文件一并废弃，字段保留只为不动快照形状。
 
@@ -877,7 +877,7 @@ WORKFLOW = WorkflowDef(
         # ---------------------------------------------------------- 生成层
         make_node(
             DRIVE_EMOTION_PROMPT,
-            "客户试驾情绪分析prompt",
+            "客户试驾情绪分析 提示词",
             "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
@@ -898,7 +898,7 @@ WORKFLOW = WorkflowDef(
         ),
         make_node(
             SCRIPT_PROMPT,
-            "客户沟通话术生成Prompt",
+            "客户沟通话术生成 提示词",
             "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
@@ -914,7 +914,7 @@ WORKFLOW = WorkflowDef(
         _llm(SCRIPT_LLM, "客户沟通话术生成", SCRIPT_PROMPT, after=(SCRIPT_PROMPT,)),
         make_node(
             SCENARIO_PROMPT,
-            "客户用车场景生成Prompt",
+            "客户用车场景生成 提示词",
             "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
@@ -928,7 +928,7 @@ WORKFLOW = WorkflowDef(
         _llm(SCENARIO_LLM, "客户用车场景生成", SCENARIO_PROMPT, after=(SCENARIO_PROMPT,)),
         make_node(
             TAG_FILTER_PROMPT,
-            "客户标签初筛Prompt",
+            "客户标签初筛 提示词",
             "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
@@ -944,7 +944,7 @@ WORKFLOW = WorkflowDef(
         _llm(TAG_FILTER_LLM, "客户标签初筛", TAG_FILTER_PROMPT, after=(TAG_FILTER_PROMPT,)),
         make_node(
             TAGS_PROMPT,
-            "客户标签生成Prompt",
+            "客户标签生成 提示词",
             "template-transform",
             after=(TAG_FILTER_LLM,),
             inputs={
@@ -959,7 +959,7 @@ WORKFLOW = WorkflowDef(
         _llm(TAGS_LLM, "客户标签生成", TAGS_PROMPT, after=(TAGS_PROMPT,)),
         make_node(
             OVERVIEW_PROMPT,
-            "客户总体信息生成Prompt",
+            "客户总体信息生成 提示词",
             "template-transform",
             after=(TAG_FILTER_LLM,),
             inputs={
@@ -977,7 +977,7 @@ WORKFLOW = WorkflowDef(
         _llm(OVERVIEW_LLM, "客户总体信息生成", OVERVIEW_PROMPT, after=(OVERVIEW_PROMPT,)),
         make_node(
             LEAD_ANALYSIS_PROMPT,
-            "客户销售线索分析Prompt",
+            "客户销售线索分析 提示词",
             "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
@@ -992,7 +992,7 @@ WORKFLOW = WorkflowDef(
         _llm(LEAD_ANALYSIS_LLM, "客户销售线索分析", LEAD_ANALYSIS_PROMPT, after=(LEAD_ANALYSIS_PROMPT,)),
         make_node(
             LEVEL_PROMPT,
-            "客户等级及成交概率计算Prompt",
+            "客户等级及成交概率计算 提示词",
             "template-transform",
             after=(LEAD_ANALYSIS_LLM,),
             inputs={
@@ -1008,7 +1008,7 @@ WORKFLOW = WorkflowDef(
         _llm(LEVEL_LLM, "客户等级及成交概率计算", LEVEL_PROMPT, after=(LEVEL_PROMPT,)),
         make_node(
             LEAD_GEN_PROMPT,
-            "客户销售线索生成Prompt",
+            "客户销售线索生成 提示词",
             "template-transform",
             after=(LEAD_ANALYSIS_LLM, TAG_FILTER_LLM),
             inputs={
@@ -1084,7 +1084,7 @@ WORKFLOW = WorkflowDef(
         ),
         make_node(
             NOTES_GEN_PROMPT,
-            "Notes生成Prompt",
+            "Notes生成 提示词",
             "template-transform",
             after=(NOTES_TEMPLATE_HTTP,),
             inputs={
@@ -1101,7 +1101,7 @@ WORKFLOW = WorkflowDef(
         _llm(NOTES_GEN_LLM, "Notes生成", NOTES_GEN_PROMPT, after=(NOTES_GEN_PROMPT,)),
         make_node(
             NOTES_REVIEW_PROMPT,
-            "Notes审核Prompt",
+            "Notes审核 提示词",
             "template-transform",
             after=(PROFILE_MERGE_CODE, NOTES_GEN_LLM),
             inputs={
