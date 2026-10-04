@@ -3,10 +3,10 @@
 迁移前的定义基线：16 节点 / 19 边。链路是「以证据线索推断人设特征」，三路并行产出后合并：
 
     start(phone_number, evidence_items)
-      ├─ template 人设特征推断 Prompt → llm 人设特征推断 结果聚合 → end(profile_result)
-      └─ template 消费者风格推断Prompt → llm ┐
-         template 兴趣&关注点推断Prompt → llm ┴→ variable-aggregator 特征结果聚合(分组)
-                                                    └─ code 分组结果拆壳 → end(hobby/style)
+      ├─ llm 人设特征推断 → 结果聚合 → end(profile_result)
+      └─ llm 消费者风格推断   ┐
+         llm 兴趣&关注点推断  ┴→ variable-aggregator 特征结果聚合(分组)
+                                  └─ code 分组结果拆壳 → end(hobby/style)
 
 **本轮的关键判断：两套并行分支里，保留 ``tool`` 那一支，删除纯 ``llm`` 那一支。**
 
@@ -87,10 +87,11 @@ REMOVED_EDGES = (
 这里按 ``source → target`` 记录）。"""
 
 ADDED_EDGES = (
-    # 分支删除后，原由分支串起来的顺序改用直接依赖表达
-    ("1776670030415", "1777427777301"),
-    ("1776760253638", "1777427950125"),
-    ("1776760253638", "1777427955726"),
+    # 分支删除后，原由分支串起来的顺序改用直接依赖表达；
+    # 三个 target 后又随「提示词节点并入 llm 节点」由模板节点改指 llm 节点
+    ("1776670030415", "1777427788971"),
+    ("1776760253638", "1777427931123"),
+    ("1776760253638", "1777427938519"),
 )
 """分支归一后新增的边：把「分支按条件选一支执行」改成「上游直接连到该支的首节点」。"""
 
@@ -121,23 +122,13 @@ WORKFLOW = WorkflowDef(
             required_evidence_items=True,
         ),
         make_node(
-            PROFILE_PROMPT,
-            "人设特征推断 提示词",
-            "template-transform",
-            after=(START,),
-            on_branch=("1776760124715", "true"),
-            inputs={"evidence_items": (START, "evidence_items")},
-            outputs=("output",),
-            template=template_name(PROFILE_PROMPT),
-        ),
-        make_node(
             PROFILE_LLM,
             "人设特征推断",
             "llm",
-            after=(PROFILE_PROMPT,),
-            inputs={"input_prompt": (PROFILE_PROMPT, "output")},
+            after=(START,),
+            inputs={"evidence_items": (START, "evidence_items")},
             outputs=("result",),
-            prompt_field="input_prompt",
+            template=template_name(PROFILE_PROMPT),
             output="result",
             system_text=SYSTEM_TEXT,
         ),
@@ -150,50 +141,30 @@ WORKFLOW = WorkflowDef(
             outputs=("output",),
         ),
         make_node(
-            STYLE_PROMPT,
-            "消费者风格推断 提示词",
-            "template-transform",
-            after=(PROFILE_AGGREGATE,),
-            on_branch=("17767603231790", "true"),
-            inputs={
-                "evidence_items": (START, "evidence_items"),
-                "output": (PROFILE_AGGREGATE, "output"),
-            },
-            outputs=("output",),
-            template=template_name(STYLE_PROMPT),
-        ),
-        make_node(
             STYLE_LLM,
             "消费者风格推断",
             "llm",
-            after=(STYLE_PROMPT,),
-            inputs={"input_prompt": (STYLE_PROMPT, "output")},
-            outputs=("result",),
-            prompt_field="input_prompt",
-            output="result",
-            system_text=SYSTEM_TEXT,
-        ),
-        make_node(
-            HOBBY_PROMPT,
-            "兴趣&关注点推断 提示词",
-            "template-transform",
             after=(PROFILE_AGGREGATE,),
-            on_branch=("17767603231790", "true"),
             inputs={
                 "evidence_items": (START, "evidence_items"),
                 "output": (PROFILE_AGGREGATE, "output"),
             },
-            outputs=("output",),
-            template=template_name(HOBBY_PROMPT),
+            outputs=("result",),
+            template=template_name(STYLE_PROMPT),
+            output="result",
+            system_text=SYSTEM_TEXT,
         ),
         make_node(
             HOBBY_LLM,
             "兴趣&关注点推断",
             "llm",
-            after=(HOBBY_PROMPT,),
-            inputs={"input_prompt": (HOBBY_PROMPT, "output")},
+            after=(PROFILE_AGGREGATE,),
+            inputs={
+                "evidence_items": (START, "evidence_items"),
+                "output": (PROFILE_AGGREGATE, "output"),
+            },
             outputs=("result",),
-            prompt_field="input_prompt",
+            template=template_name(HOBBY_PROMPT),
             output="result",
             system_text=SYSTEM_TEXT,
         ),

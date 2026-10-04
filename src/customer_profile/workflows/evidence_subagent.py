@@ -12,7 +12,7 @@
            ├─ tool 用户人工Feedback
            └─ tool 手机号&企业信息分析 ──────────────────────────┐
       code 客户标准信息数据聚合（微信搜索 + 猛士IT）               ├→ template 客户数据聚合
-           └─ template 证据线索整理 提示词 → llm 证据线索整理     │   → llm 证据线索整理
+           └─ llm 证据线索整理                                    │   → llm 证据线索整理
                 → end(result, original_data)                     ┘
 
 **2026-09-28 修订（业务方修订）**：原「取关联企业 → 拆运营商/企业 → 两个 LLM」
@@ -393,23 +393,14 @@ WORKFLOW = WorkflowDef(
             function=f"customer_profile.workflows.{SLUG}:aggregate_customer_standard_info",
         ),
         make_node(
-            EVIDENCE_PROMPT,
-            "证据线索整理 提示词",
-            "template-transform",
-            after=(DATA_AGGREGATE, STANDARD_AGGREGATE),
-            inputs={"arg1": (DATA_AGGREGATE, "output")},
-            outputs=("output",),
-            template=template_name(EVIDENCE_PROMPT),
-        ),
-        make_node(
             EVIDENCE_LLM,
             "证据线索整理",
             "llm",
             # 迁移前的定义里的工具节点归一为一次 llm_call
-            after=(EVIDENCE_PROMPT,),
-            inputs={"input_prompt": (EVIDENCE_PROMPT, "output")},
+            after=(DATA_AGGREGATE, STANDARD_AGGREGATE),
+            inputs={"arg1": (DATA_AGGREGATE, "output")},
             outputs=("result",),
-            prompt_field="input_prompt",
+            template=template_name(EVIDENCE_PROMPT),
             output="result",
             system_text=SYSTEM_TEXT,
         ),

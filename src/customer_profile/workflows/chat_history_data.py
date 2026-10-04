@@ -6,8 +6,7 @@
       └─ code 数据提取（按 channel 取 raw_payload）
            └─ if-else 条件分支
                 ├─ true  → code 数据初步清洗&格式转换
-                │            └─ template 数据深度清洗 提示词
-                │                 └─ llm 数据深度清洗
+                │            └─ llm 数据深度清洗
                 └─ else  → template 无数据，输出默认信息
                               └─ variable-aggregator → end
 
@@ -538,22 +537,14 @@ WORKFLOW = WorkflowDef(
             function=f"customer_profile.workflows.{SLUG}:clean_chat_history",
         ),
         make_node(
-            DEEP_PROMPT,
-            "数据深度清洗 提示词",
-            "template-transform",
-            after=(CLEANSE,),
-            inputs={"dialog_markdown": (CLEANSE, "result")},
-            outputs=("output",),
-            template=template_name(DEEP_PROMPT),
-        ),
-        make_node(
             DEEP_LLM,
             "数据深度清洗",
             "llm",
             # 迁移前的定义里的工具节点归一为一次 llm_call
-            after=(DEEP_PROMPT,),
-            inputs={"input_prompt": (DEEP_PROMPT, "output")},
+            after=(CLEANSE,),
+            inputs={"dialog_markdown": (CLEANSE, "result")},
             outputs=("result",),
+            template=template_name(DEEP_PROMPT),
             output="result",
             system_text="You are a helpful AI assistant.",
         ),

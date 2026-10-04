@@ -9,7 +9,7 @@
            └─ code 拆分点赞与点踩（拆出 approved / rejected 两组字段）
                 └─ code 判断本轮是否有反馈
                      └─ if-else 条件分支
-                          ├─ true  → template 反馈总结报告Prompt → llm → 反馈报告汇总 → end
+                          ├─ true  → llm 客户画像反馈总结报告生成 → 反馈报告汇总 → end
                           └─ else → template 无数据提示 → 反馈报告汇总
 
 两处口径：
@@ -382,9 +382,10 @@ WORKFLOW = WorkflowDef(
             template=template_name(NO_DATA_TEMPLATE),
         ),
         make_node(
-            REPORT_TEMPLATE,
-            "反馈总结报告 提示词",
-            "template-transform",
+            REPORT_LLM,
+            "客户画像反馈总结报告生成",
+            "llm",
+            # 迁移前的定义里的工具节点归一为一次 llm_call
             after=(BRANCH,),
             on_branch=(BRANCH, "true"),
             inputs={
@@ -393,18 +394,8 @@ WORKFLOW = WorkflowDef(
                 "approved_feedback_json": (SPLIT_CODE, "approved_feedback_json"),
                 "rejected_feedback_json": (SPLIT_CODE, "rejected_feedback_json"),
             },
-            outputs=("output",),
-            template=template_name(REPORT_TEMPLATE),
-        ),
-        make_node(
-            REPORT_LLM,
-            "客户画像反馈总结报告生成",
-            "llm",
-            # 迁移前的定义里的工具节点归一为一次 llm_call
-            after=(REPORT_TEMPLATE,),
-            inputs={"input_prompt": (REPORT_TEMPLATE, "output")},
             outputs=("result",),
-            prompt_field="input_prompt",
+            template=template_name(REPORT_TEMPLATE),
             output="result",
             system_text="You are a helpful AI assistant.",
         ),

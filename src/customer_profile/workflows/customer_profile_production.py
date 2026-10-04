@@ -7,7 +7,7 @@
 
 1. **预置层**：6 个无入参的 ``template-transform``（标签库、各类格式模板、产品卖点、
    邀约话术），把大段固定文本准备好；
-2. **生成层**：13 个带引用的模板拼提示词 → 11 个 ``llm`` 节点产出各自片段；
+2. **生成层**：11 个 ``llm`` 节点各自按绑定渲染提示词、产出片段；
 3. **合并层**：7 个 ``code`` 节点逐级合并（录音证据 → 原始信息 → 人设卡 → 销售线索 →
    画像卡 → Notes → 最终数据）；
 4. **回写层**：``GET /config/note-attributes`` 取 Notes 模板，``POST /callback/update-profile``
@@ -98,23 +98,27 @@ def _llm(
     title: str,
     prompt_id: str,
     *,
+    inputs: Any = None,
     system: str = SYSTEM_TEXT,
     after: Any = (),
 ):
     """构造一个由工具节点归一而来的 ``llm`` 节点。
 
-    统一三件事：提示词来自上游模板节点的 ``output``、输出字段叫 ``result``
-    （与迁移前的定义的 ``tool_parameters`` 消费方一致）、系统消息固定。收在一处，
-    免得 11 份声明各写各的、日后改一处漏十处。
+    提示词取名为 ``<prompt_id>`` 的模板资源，由 ``execute_llm`` 用本节点的绑定渲染；
+    输出字段叫 ``result``（与迁移前的定义的 ``tool_parameters`` 消费方一致）、
+    系统消息固定。收在一处，免得 11 份声明各写各的、日后改一处漏十处。
+
+    迁移期这一对是「``template-transform`` 拼提示词 → ``llm`` 接住」，前一个节点
+    只为拼提示词而存在。本次合并删掉了它，绑定改由本节点直接声明。
     """
     return make_node(
         node_id,
         title,
         "llm",
         after=after,
-        inputs={"input_prompt": (prompt_id, "output")},
+        inputs=inputs or {},
         outputs=("result",),
-        prompt_field="input_prompt",
+        template=template_name(prompt_id),
         output="result",
         system_text=system,
     )
@@ -875,10 +879,10 @@ WORKFLOW = WorkflowDef(
             template=template_name(INPUT_BUNDLE),
         ),
         # ---------------------------------------------------------- 生成层
-        make_node(
+        _llm(
+            DRIVE_EMOTION_LLM,
+            "客户试驾情绪分析",
             DRIVE_EMOTION_PROMPT,
-            "客户试驾情绪分析 提示词",
-            "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
                 "evidence_output": (EVIDENCE_FORMAT, "output"),
@@ -887,19 +891,11 @@ WORKFLOW = WorkflowDef(
                 "evidence_items": (START, "evidence_items"),
                 "message_output": (PRODUCT_INFO_SHORT, "output"),
             },
-            outputs=("output",),
-            template=template_name(DRIVE_EMOTION_PROMPT),
         ),
         _llm(
-            DRIVE_EMOTION_LLM,
-            "客户试驾情绪分析",
-            DRIVE_EMOTION_PROMPT,
-            after=(DRIVE_EMOTION_PROMPT,),
-        ),
-        make_node(
+            SCRIPT_LLM,
+            "客户沟通话术生成",
             SCRIPT_PROMPT,
-            "客户沟通话术生成 提示词",
-            "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
                 "evidence_output": (EVIDENCE_FORMAT, "output"),
@@ -908,28 +904,22 @@ WORKFLOW = WorkflowDef(
                 "output_3": (PRODUCT_INFO, "output"),
                 "output_4": (INVITE_STRATEGY, "output"),
             },
-            outputs=("output",),
-            template=template_name(SCRIPT_PROMPT),
         ),
-        _llm(SCRIPT_LLM, "客户沟通话术生成", SCRIPT_PROMPT, after=(SCRIPT_PROMPT,)),
-        make_node(
+        _llm(
+            SCENARIO_LLM,
+            "客户用车场景生成",
             SCENARIO_PROMPT,
-            "客户用车场景生成 提示词",
-            "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
                 "output_1": (PROFILE_FORMAT, "output"),
                 "output_2": (INPUT_BUNDLE, "output"),
             },
-            outputs=("output",),
-            template=template_name(SCENARIO_PROMPT),
         ),
-        _llm(SCENARIO_LLM, "客户用车场景生成", SCENARIO_PROMPT, after=(SCENARIO_PROMPT,)),
-        make_node(
+        _llm(
+            TAG_FILTER_LLM,
+            "客户标签初筛",
             TAG_FILTER_PROMPT,
-            "客户标签初筛 提示词",
-            "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
@@ -938,14 +928,11 @@ WORKFLOW = WorkflowDef(
                 "result": (ORIGINAL_INFO_CODE, "result"),
                 "output_3": (TAG_LIBRARY, "output"),
             },
-            outputs=("output",),
-            template=template_name(TAG_FILTER_PROMPT),
         ),
-        _llm(TAG_FILTER_LLM, "客户标签初筛", TAG_FILTER_PROMPT, after=(TAG_FILTER_PROMPT,)),
-        make_node(
+        _llm(
+            TAGS_LLM,
+            "客户标签生成",
             TAGS_PROMPT,
-            "客户标签生成 提示词",
-            "template-transform",
             after=(TAG_FILTER_LLM,),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
@@ -953,14 +940,11 @@ WORKFLOW = WorkflowDef(
                 "output_2": (INPUT_BUNDLE, "output"),
                 "text": (TAG_FILTER_LLM, "result"),
             },
-            outputs=("output",),
-            template=template_name(TAGS_PROMPT),
         ),
-        _llm(TAGS_LLM, "客户标签生成", TAGS_PROMPT, after=(TAGS_PROMPT,)),
-        make_node(
+        _llm(
+            OVERVIEW_LLM,
+            "客户总体信息生成",
             OVERVIEW_PROMPT,
-            "客户总体信息生成 提示词",
-            "template-transform",
             after=(TAG_FILTER_LLM,),
             inputs={
                 "phone_number": (START, "phone_number"),
@@ -971,14 +955,11 @@ WORKFLOW = WorkflowDef(
                 "text": (TAG_FILTER_LLM, "result"),
                 "output_3": (PRODUCT_INFO_SHORT, "output"),
             },
-            outputs=("output",),
-            template=template_name(OVERVIEW_PROMPT),
         ),
-        _llm(OVERVIEW_LLM, "客户总体信息生成", OVERVIEW_PROMPT, after=(OVERVIEW_PROMPT,)),
-        make_node(
+        _llm(
+            LEAD_ANALYSIS_LLM,
+            "客户销售线索分析",
             LEAD_ANALYSIS_PROMPT,
-            "客户销售线索分析 提示词",
-            "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
@@ -986,14 +967,11 @@ WORKFLOW = WorkflowDef(
                 "output_2": (INPUT_BUNDLE, "output"),
                 "output_3": (PRODUCT_INFO_SHORT, "output"),
             },
-            outputs=("output",),
-            template=template_name(LEAD_ANALYSIS_PROMPT),
         ),
-        _llm(LEAD_ANALYSIS_LLM, "客户销售线索分析", LEAD_ANALYSIS_PROMPT, after=(LEAD_ANALYSIS_PROMPT,)),
-        make_node(
+        _llm(
+            LEVEL_LLM,
+            "客户等级及成交概率计算",
             LEVEL_PROMPT,
-            "客户等级及成交概率计算 提示词",
-            "template-transform",
             after=(LEAD_ANALYSIS_LLM,),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
@@ -1002,14 +980,11 @@ WORKFLOW = WorkflowDef(
                 "text": (LEAD_ANALYSIS_LLM, "result"),
                 "output_3": (PRODUCT_INFO_SHORT, "output"),
             },
-            outputs=("output",),
-            template=template_name(LEVEL_PROMPT),
         ),
-        _llm(LEVEL_LLM, "客户等级及成交概率计算", LEVEL_PROMPT, after=(LEVEL_PROMPT,)),
-        make_node(
+        _llm(
+            LEAD_GEN_LLM,
+            "客户销售线索生成",
             LEAD_GEN_PROMPT,
-            "客户销售线索生成 提示词",
-            "template-transform",
             after=(LEAD_ANALYSIS_LLM, TAG_FILTER_LLM),
             inputs={
                 "output": (PRODUCT_INFO_SHORT, "output"),
@@ -1019,10 +994,7 @@ WORKFLOW = WorkflowDef(
                 "output_2": (EVIDENCE_FORMAT, "output"),
                 "output_3": (PROFILE_FORMAT, "output"),
             },
-            outputs=("output",),
-            template=template_name(LEAD_GEN_PROMPT),
         ),
-        _llm(LEAD_GEN_LLM, "客户销售线索生成", LEAD_GEN_PROMPT, after=(LEAD_GEN_PROMPT,)),
         # ---------------------------------------------------------- 合并层
         make_node(
             PROFILE_CARD_CODE,
@@ -1082,10 +1054,10 @@ WORKFLOW = WorkflowDef(
                 "@outputs": {"body": "$text", "status": "$status"},
             },
         ),
-        make_node(
+        _llm(
+            NOTES_GEN_LLM,
+            "Notes生成",
             NOTES_GEN_PROMPT,
-            "Notes生成 提示词",
-            "template-transform",
             after=(NOTES_TEMPLATE_HTTP,),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
@@ -1095,14 +1067,11 @@ WORKFLOW = WorkflowDef(
                 "result": (ORIGINAL_INFO_CODE, "result"),
                 "output_3": (PRODUCT_INFO_SHORT, "output"),
             },
-            outputs=("output",),
-            template=template_name(NOTES_GEN_PROMPT),
         ),
-        _llm(NOTES_GEN_LLM, "Notes生成", NOTES_GEN_PROMPT, after=(NOTES_GEN_PROMPT,)),
-        make_node(
+        _llm(
+            NOTES_REVIEW_LLM,
+            "Notes审核",
             NOTES_REVIEW_PROMPT,
-            "Notes审核 提示词",
-            "template-transform",
             after=(PROFILE_MERGE_CODE, NOTES_GEN_LLM),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
@@ -1113,10 +1082,7 @@ WORKFLOW = WorkflowDef(
                 "result": (ORIGINAL_INFO_CODE, "result"),
                 "output_2": (PRODUCT_INFO_SHORT, "output"),
             },
-            outputs=("output",),
-            template=template_name(NOTES_REVIEW_PROMPT),
         ),
-        _llm(NOTES_REVIEW_LLM, "Notes审核", NOTES_REVIEW_PROMPT, after=(NOTES_REVIEW_PROMPT,)),
         make_node(
             NOTES_FIX_LLM,
             "Notes格式修正",

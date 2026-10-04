@@ -2,6 +2,26 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-10-05 — 系统优化：提示词模板节点并入 LLM 节点
+
+分支 `dev-system-opt`。承接上一节的命名整改：上一节只改名字，本节动结构。
+
+- **17 对「提示词节点 + LLM 节点」折叠为单节点**。这 17 对是迁移期「`template-transform`
+  拼提示词 → `llm` 接住」的形态，前者只为拼提示词而存在，前端流程列表里因此每处 LLM 调用
+  占两行。现删掉提示词节点，把它的 `template=` 与全部 `bindings` 搬到 `llm` 节点，
+  节点 ID 与标题不变。`template-transform` 从 46 降到 29，`llm` 从 27 升到 44。
+  涉及 production 11 对、profile_features 3 对、chat_history / evidence_subagent /
+  user_feedback 各 1 对。
+- **提示词正文零改动**。模板资源（`<slug>__<原节点ID>.txt`）名字与内容都不变——
+  资源名是不可见键，改名留待模板命名专项。
+- **丢弃三处悬空分支门**。`profile_features_analysis` 的 `on_branch` 指向两个早已删除的
+  `if-else` 节点，随提示词节点一并清掉；`user_feedback_data` 指向存活 `BRANCH` 的门保留。
+- **`prompt_field="input_prompt"` 退场**。提示词改由 `config['template']` 渲染，
+  `execute_llm` 的「先入参、后模板」判定顺序不变。
+
+方案与取舍见 `docs/history/系统优化-模板节点与LLM节点合并（方案）.md`。
+验证：374 passed / 30 skipped；结构校验零悬空引用、零占位符缺绑定。
+
 ## 2026-10-04 — 系统优化：运行台改流程视图、脱离画布依赖、迁移台账收口
 
 分支 `dev-system-opt`。五个批次（A 前端 / B 后端 / C 命名 / D 台账 / E 术语），按「前端 → 后端 → 术语 → 命名 → 台账」推进。
