@@ -58,6 +58,22 @@ export interface NodeExecution {
   attempt_count: number
 }
 
+/**
+ * 运行级详情（`GET /runs/{id}`）。
+ *
+ * 与 `/graph` 分开取，是因为**运行级产出只在这里**：`/graph` 给的是当次定义快照与
+ * 节点状态，不含 `inputs` / `outputs`，而顶部概览的「最终结果」正是运行级 `outputs`。
+ *
+ * 注意 `attempts` 会随本次响应一起返回（实测最大约 0.7 MB）。节点详情里的每次尝试
+ * 仍走 `nodeAttempts` 懒加载——这里不取 `attempts` 字段，只取运行级输入输出。
+ */
+export interface RunDetailPayload extends RunSummary {
+  inputs: Record<string, unknown>
+  outputs: Record<string, unknown>
+  definition_version_id: number | null
+  child_run_ids: string[]
+}
+
 /** 图中的一条边。`source_handle` 保留分支名（`true` / `false` / `source`）。 */
 export interface GraphEdge {
   source: string
@@ -223,6 +239,15 @@ export const api = {
 
   runGraph: (runId: string) =>
     getJson<RunGraph>(`/runs/${encodeURIComponent(runId)}/graph`),
+
+  /**
+   * 运行级输入输出。顶部概览的最终产出取自这里。
+   *
+   * 返回体里也带着 `attempts`，此处按约定不使用它：单次尝试按节点懒加载
+   * （见 `nodeAttempts`），避免首屏为了概览把全部响应正文拉下来。
+   */
+  runDetail: (runId: string) =>
+    getJson<RunDetailPayload>(`/runs/${encodeURIComponent(runId)}`),
 
   /**
    * 某个节点的每一次外部请求尝试。

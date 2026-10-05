@@ -43,7 +43,12 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>客户画像运行台</h1>
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">
+            CP
+          </span>
+          <h1>客户画像运行台</h1>
+        </div>
         <nav className="app-tabs">
           <button
             type="button"
@@ -63,7 +68,7 @@ function App() {
       </header>
 
       <main className="app-body">
-        {tab === 'submit' && (
+        {tab === 'submit' ? (
           <SubmitRun
             runtime={runtime}
             onSubmitted={(runId) => {
@@ -73,17 +78,17 @@ function App() {
               setTab('runs')
             }}
           />
-        )}
+        ) : null}
 
-        {tab === 'runs' && !currentRun && (
+        {tab === 'runs' && !currentRun ? (
           <RunList
             onOpenRun={(runId) => {
               setRunStack([runId])
             }}
           />
-        )}
+        ) : null}
 
-        {tab === 'runs' && currentRun && (
+        {tab === 'runs' && currentRun ? (
           <RunDetail
             runId={currentRun}
             onDrillDown={(runId) => setRunStack((stack) => [...stack, runId])}
@@ -91,7 +96,7 @@ function App() {
               setRunStack((stack) => (stack.length > 1 ? stack.slice(0, -1) : []))
             }
           />
-        )}
+        ) : null}
       </main>
     </div>
   )
