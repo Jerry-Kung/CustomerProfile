@@ -1,13 +1,13 @@
-"""``（新）SubAgent - 画像内容生成&回写（生产环境）（新）`` 的 Python 定义。
+"""``画像内容生成与回写`` 的 Python 定义。
 
-DSL 基线：41 节点 / 55 边，是全项目最大的工作流。它把三段输入（证据线索、人设画像、
+迁移前的定义基线：41 节点 / 55 边，是全项目最大的工作流。它把三段输入（证据线索、人设画像、
 原始客户数据）经 11 路 LLM 生成与 7 段 code 合并，拼成一份最终画像 JSON，再回写生产。
 
 结构上分四层：
 
 1. **预置层**：6 个无入参的 ``template-transform``（标签库、各类格式模板、产品卖点、
    邀约话术），把大段固定文本准备好；
-2. **生成层**：13 个带引用的模板拼提示词 → 11 个 ``llm`` 节点产出各自片段；
+2. **生成层**：11 个 ``llm`` 节点各自按绑定渲染提示词、产出片段；
 3. **合并层**：7 个 ``code`` 节点逐级合并（录音证据 → 原始信息 → 人设卡 → 销售线索 →
    画像卡 → Notes → 最终数据）；
 4. **回写层**：``GET /config/note-attributes`` 取 Notes 模板，``POST /callback/update-profile``
@@ -15,11 +15,11 @@ DSL 基线：41 节点 / 55 边，是全项目最大的工作流。它把三段�
 
 两处口径：
 
-- **有意差异 W2/W3**：11 个 ``gemini_retry_2_times`` 工具节点归一为 ``llm`` 节点，
+- **工具节点归一**：11 个工具节点归一为 ``llm`` 节点，
   输出字段仍叫 ``result``；重试下沉到 ``llm_call()`` 内部。
 - **回写默认关闭**：``POST /callback/update-profile`` 标记 ``@writeback``。缺省
   （``WRITEBACK_ENABLED=false``）时该节点**不发送请求**，只产出「已跳过」的可解释结果。
-  测试与影子模式禁止生产回写（`Dify迁移任务说明.md` §9.3）。
+  测试与影子模式禁止生产回写。
 """
 
 from __future__ import annotations
@@ -29,8 +29,9 @@ from typing import Any
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "customer_profile_production"
-DISPLAY_NAME = "（新）SubAgent - 画像内容生成&回写（生产环境）（新）"
-SOURCE_DSL = f"{DISPLAY_NAME}.yml"
+DISPLAY_NAME = "画像内容生成与回写"
+# 定义快照的 source_dsl 直接取这个显示名——原来那个指向 .yml 的追溯键已随
+# 定义文件一并废弃，字段保留只为不动快照形状。
 
 START = "1776754837871"
 END = "1776759135563"
@@ -57,7 +58,7 @@ FINAL_MERGE_CODE = "1776911599997"
 NOTES_TEMPLATE_HTTP = "1776911410253"
 WRITEBACK_HTTP = "1776912964274"
 
-# —— llm 节点（由 gemini_retry 工具节点归一而来）
+# —— llm 节点（由工具节点归一而来）
 DRIVE_EMOTION_PROMPT = "1777368178554"
 DRIVE_EMOTION_LLM = "1777368717878"
 SCRIPT_PROMPT = "1777371012576"
@@ -97,36 +98,39 @@ def _llm(
     title: str,
     prompt_id: str,
     *,
+    inputs: Any = None,
     system: str = SYSTEM_TEXT,
     after: Any = (),
 ):
-    """构造一个由 ``gemini_retry`` 工具节点归一而来的 ``llm`` 节点。
+    """构造一个由工具节点归一而来的 ``llm`` 节点。
 
-    统一三件事：提示词来自上游模板节点的 ``output``、输出字段叫 ``result``
-    （与 DSL 的 ``tool_parameters`` 消费方一致）、系统消息固定。收在一处，
-    免得 11 份声明各写各的、日后改一处漏十处。
+    提示词取名为 ``<prompt_id>`` 的模板资源，由 ``execute_llm`` 用本节点的绑定渲染；
+    输出字段叫 ``result``（与迁移前的定义的 ``tool_parameters`` 消费方一致）、
+    系统消息固定。收在一处，免得 11 份声明各写各的、日后改一处漏十处。
+
+    迁移期这一对是「``template-transform`` 拼提示词 → ``llm`` 接住」，前一个节点
+    只为拼提示词而存在。本次合并删掉了它，绑定改由本节点直接声明。
     """
     return make_node(
         node_id,
         title,
         "llm",
         after=after,
-        inputs={"input_prompt": (prompt_id, "output")},
+        inputs=inputs or {},
         outputs=("result",),
-        prompt_field="input_prompt",
+        template=template_name(prompt_id),
         output="result",
         system_text=system,
-        original_node_id=node_id,
     )
 
 
 # ====================================================================
-# code 节点正文（逐字符取自 DSL，只把 def main 换成业务名；
+# code 节点正文（逐字符取自迁移前的定义，只把 def main 换成业务名；
 # 跨节点重名的辅助函数加 __<节点后四位> 后缀，函数体一字未改）
 # ====================================================================
 
 
-# ---- DSL 节点 1776826087777 的正文（逐字符，仅函数名不同）
+# ---- 迁移前的定义节点 1776826087777 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -150,7 +154,7 @@ def _clean_json_string(value: str) -> str:
 
 def _parse_json(value):
     """
-    兼容 Dify 上游传入 String / Object 两种情况。
+    兼容上游传入 String / Object 两种情况。
     """
     if value is None:
         return {}
@@ -244,7 +248,7 @@ def extract_audio_evidence(json_str) -> dict:
     }
 
 
-# ---- DSL 节点 1776906696734 的正文（逐字符，仅函数名不同）
+# ---- 迁移前的定义节点 1776906696734 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -337,7 +341,7 @@ def build_profile_card_json(phone, batch_id, profile_summary, inferred_tags, usa
     }
 
 
-# ---- DSL 节点 1776910309479 的正文（逐字符，仅函数名不同）
+# ---- 迁移前的定义节点 1776910309479 的正文（逐字符，仅函数名不同）
 def merge_profile_card_data(json_text1: str, json_text2: str, json_text3: str) -> dict:
     import json
 
@@ -406,13 +410,13 @@ def merge_profile_card_data(json_text1: str, json_text2: str, json_text3: str) -
     }
 
 
-# ---- DSL 节点 1776911599997 的正文（逐字符，仅函数名不同）
+# ---- 迁移前的定义节点 1776911599997 的正文（逐字符，仅函数名不同）
 import json
 
 
 def _parse_json__9997(value):
     """
-    兼容 Dify 上游传入 String / Object 两种情况
+    兼容上游传入 String / Object 两种情况
     """
     if value is None:
         return {}
@@ -450,7 +454,7 @@ def merge_final_data(json_str_1, json_str_2) -> dict:
     }
 
 
-# ---- DSL 节点 1777020043726 的正文（逐字符，仅函数名不同）
+# ---- 迁移前的定义节点 1777020043726 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -471,7 +475,7 @@ def _clean_json_string__3726(value: str) -> str:
 
 def _parse_json__3726(value, field_name: str):
     """
-    兼容 Dify 上游传入 String / Object / None
+    兼容上游传入 String / Object / None
     """
     if value is None:
         return {}
@@ -590,13 +594,13 @@ def merge_sales_lead_data(phone, batch_id, business_level, customer_overview, cu
         }
     }
 
-    # 6. 以 String 类型输出，避免 Dify 下游把它识别为 Object
+    # 6. 以 String 类型输出，避免下游把它识别为 Object
     return {
         "result": json.dumps(merged_result, ensure_ascii=False)
     }
 
 
-# ---- DSL 节点 1777102704064 的正文（逐字符，仅函数名不同）
+# ---- 迁移前的定义节点 1777102704064 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -616,7 +620,7 @@ def _clean_json_string__4064(value: str) -> str:
 
 def _parse_json__4064(value, field_name: str = "json_str"):
     """
-    兼容 Dify 上游传入 String / Object / None
+    兼容上游传入 String / Object / None
     """
     if value is None:
         return {}
@@ -678,7 +682,7 @@ def organize_original_customer_info(json_str) -> dict:
     }
 
 
-# ---- DSL 节点 1777260507680 的正文（逐字符，仅函数名不同）
+# ---- 迁移前的定义节点 1777260507680 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -698,7 +702,7 @@ def _clean_json_string__7680(value: str) -> str:
 
 def _parse_json__7680(value, field_name: str = "json_str"):
     """
-    兼容 Dify 上游传入 String / Object / None
+    兼容上游传入 String / Object / None
     """
     if value is None:
         return {}
@@ -754,7 +758,7 @@ def split_notes_result(json_str) -> dict:
 WORKFLOW = WorkflowDef(
     workflow_id=WORKFLOW_ID,
     display_name=DISPLAY_NAME,
-    source_dsl=SOURCE_DSL,
+    source_dsl=DISPLAY_NAME,
     entries=(START,),
     exits=(END,),
     outputs={"result1": "merged_json"},
@@ -779,7 +783,6 @@ WORKFLOW = WorkflowDef(
             required_consumption_style_analysis=True,
             required_batch_id=False,
             required_original_cus_data=False,
-            coords=(80.0, 282.0),
         ),
         # ---------------------------------------------------------- 预置层
         make_node(
@@ -789,7 +792,6 @@ WORKFLOW = WorkflowDef(
             after=(START,),
             outputs=("output",),
             template=template_name(TAG_LIBRARY),
-            original_node_id=TAG_LIBRARY,
         ),
         make_node(
             EVIDENCE_FORMAT,
@@ -798,7 +800,6 @@ WORKFLOW = WorkflowDef(
             after=(START,),
             outputs=("output",),
             template=template_name(EVIDENCE_FORMAT),
-            original_node_id=EVIDENCE_FORMAT,
         ),
         make_node(
             PROFILE_FORMAT,
@@ -807,7 +808,6 @@ WORKFLOW = WorkflowDef(
             after=(START,),
             outputs=("output",),
             template=template_name(PROFILE_FORMAT),
-            original_node_id=PROFILE_FORMAT,
         ),
         make_node(
             PRODUCT_INFO,
@@ -816,7 +816,6 @@ WORKFLOW = WorkflowDef(
             after=(START,),
             outputs=("output",),
             template=template_name(PRODUCT_INFO),
-            original_node_id=PRODUCT_INFO,
         ),
         make_node(
             PRODUCT_INFO_SHORT,
@@ -825,7 +824,6 @@ WORKFLOW = WorkflowDef(
             after=(START,),
             outputs=("output",),
             template=template_name(PRODUCT_INFO_SHORT),
-            original_node_id=PRODUCT_INFO_SHORT,
         ),
         make_node(
             INVITE_STRATEGY,
@@ -834,7 +832,6 @@ WORKFLOW = WorkflowDef(
             after=(START,),
             outputs=("output",),
             template=template_name(INVITE_STRATEGY),
-            original_node_id=INVITE_STRATEGY,
         ),
         # ---------------------------------------------------------- code 首段
         make_node(
@@ -857,7 +854,6 @@ WORKFLOW = WorkflowDef(
                 "test_drive_evidence_items",
             ),
             function=f"customer_profile.workflows.{SLUG}:extract_audio_evidence",
-            original_node_id=AUDIO_EVIDENCE_CODE,
         ),
         make_node(
             ORIGINAL_INFO_CODE,
@@ -867,7 +863,6 @@ WORKFLOW = WorkflowDef(
             inputs={"json_str": (START, "original_cus_data")},
             outputs=("result",),
             function=f"customer_profile.workflows.{SLUG}:organize_original_customer_info",
-            original_node_id=ORIGINAL_INFO_CODE,
         ),
         make_node(
             INPUT_BUNDLE,
@@ -882,13 +877,12 @@ WORKFLOW = WorkflowDef(
             },
             outputs=("output",),
             template=template_name(INPUT_BUNDLE),
-            original_node_id=INPUT_BUNDLE,
         ),
         # ---------------------------------------------------------- 生成层
-        make_node(
+        _llm(
+            DRIVE_EMOTION_LLM,
+            "客户试驾情绪分析",
             DRIVE_EMOTION_PROMPT,
-            "客户试驾情绪分析prompt",
-            "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
                 "evidence_output": (EVIDENCE_FORMAT, "output"),
@@ -897,20 +891,11 @@ WORKFLOW = WorkflowDef(
                 "evidence_items": (START, "evidence_items"),
                 "message_output": (PRODUCT_INFO_SHORT, "output"),
             },
-            outputs=("output",),
-            template=template_name(DRIVE_EMOTION_PROMPT),
-            original_node_id=DRIVE_EMOTION_PROMPT,
         ),
         _llm(
-            DRIVE_EMOTION_LLM,
-            "客户试驾情绪分析 - 工具",
-            DRIVE_EMOTION_PROMPT,
-            after=(DRIVE_EMOTION_PROMPT,),
-        ),
-        make_node(
+            SCRIPT_LLM,
+            "客户沟通话术生成",
             SCRIPT_PROMPT,
-            "客户沟通话术生成Prompt",
-            "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
                 "evidence_output": (EVIDENCE_FORMAT, "output"),
@@ -919,30 +904,22 @@ WORKFLOW = WorkflowDef(
                 "output_3": (PRODUCT_INFO, "output"),
                 "output_4": (INVITE_STRATEGY, "output"),
             },
-            outputs=("output",),
-            template=template_name(SCRIPT_PROMPT),
-            original_node_id=SCRIPT_PROMPT,
         ),
-        _llm(SCRIPT_LLM, " 客户沟通话术生成 - 工具", SCRIPT_PROMPT, after=(SCRIPT_PROMPT,)),
-        make_node(
+        _llm(
+            SCENARIO_LLM,
+            "客户用车场景生成",
             SCENARIO_PROMPT,
-            "客户用车场景生成Prompt",
-            "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
                 "output_1": (PROFILE_FORMAT, "output"),
                 "output_2": (INPUT_BUNDLE, "output"),
             },
-            outputs=("output",),
-            template=template_name(SCENARIO_PROMPT),
-            original_node_id=SCENARIO_PROMPT,
         ),
-        _llm(SCENARIO_LLM, "客户用车场景生成 - 工具", SCENARIO_PROMPT, after=(SCENARIO_PROMPT,)),
-        make_node(
+        _llm(
+            TAG_FILTER_LLM,
+            "客户标签初筛",
             TAG_FILTER_PROMPT,
-            "客户标签初筛Prompt",
-            "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
@@ -951,15 +928,11 @@ WORKFLOW = WorkflowDef(
                 "result": (ORIGINAL_INFO_CODE, "result"),
                 "output_3": (TAG_LIBRARY, "output"),
             },
-            outputs=("output",),
-            template=template_name(TAG_FILTER_PROMPT),
-            original_node_id=TAG_FILTER_PROMPT,
         ),
-        _llm(TAG_FILTER_LLM, "客户标签初筛 - 工具", TAG_FILTER_PROMPT, after=(TAG_FILTER_PROMPT,)),
-        make_node(
+        _llm(
+            TAGS_LLM,
+            "客户标签生成",
             TAGS_PROMPT,
-            "客户标签生成Prompt",
-            "template-transform",
             after=(TAG_FILTER_LLM,),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
@@ -967,15 +940,11 @@ WORKFLOW = WorkflowDef(
                 "output_2": (INPUT_BUNDLE, "output"),
                 "text": (TAG_FILTER_LLM, "result"),
             },
-            outputs=("output",),
-            template=template_name(TAGS_PROMPT),
-            original_node_id=TAGS_PROMPT,
         ),
-        _llm(TAGS_LLM, "客户标签生成 - 工具", TAGS_PROMPT, after=(TAGS_PROMPT,)),
-        make_node(
+        _llm(
+            OVERVIEW_LLM,
+            "客户总体信息生成",
             OVERVIEW_PROMPT,
-            "客户总体信息生成Prompt",
-            "template-transform",
             after=(TAG_FILTER_LLM,),
             inputs={
                 "phone_number": (START, "phone_number"),
@@ -986,15 +955,11 @@ WORKFLOW = WorkflowDef(
                 "text": (TAG_FILTER_LLM, "result"),
                 "output_3": (PRODUCT_INFO_SHORT, "output"),
             },
-            outputs=("output",),
-            template=template_name(OVERVIEW_PROMPT),
-            original_node_id=OVERVIEW_PROMPT,
         ),
-        _llm(OVERVIEW_LLM, "客户总体信息生成 - 工具", OVERVIEW_PROMPT, after=(OVERVIEW_PROMPT,)),
-        make_node(
+        _llm(
+            LEAD_ANALYSIS_LLM,
+            "客户销售线索分析",
             LEAD_ANALYSIS_PROMPT,
-            "客户销售线索分析Prompt",
-            "template-transform",
             after=(INPUT_BUNDLE,),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
@@ -1002,15 +967,11 @@ WORKFLOW = WorkflowDef(
                 "output_2": (INPUT_BUNDLE, "output"),
                 "output_3": (PRODUCT_INFO_SHORT, "output"),
             },
-            outputs=("output",),
-            template=template_name(LEAD_ANALYSIS_PROMPT),
-            original_node_id=LEAD_ANALYSIS_PROMPT,
         ),
-        _llm(LEAD_ANALYSIS_LLM, "客户销售线索分析 - 工具", LEAD_ANALYSIS_PROMPT, after=(LEAD_ANALYSIS_PROMPT,)),
-        make_node(
+        _llm(
+            LEVEL_LLM,
+            "客户等级及成交概率计算",
             LEVEL_PROMPT,
-            "客户等级及成交概率计算Prompt",
-            "template-transform",
             after=(LEAD_ANALYSIS_LLM,),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
@@ -1019,15 +980,11 @@ WORKFLOW = WorkflowDef(
                 "text": (LEAD_ANALYSIS_LLM, "result"),
                 "output_3": (PRODUCT_INFO_SHORT, "output"),
             },
-            outputs=("output",),
-            template=template_name(LEVEL_PROMPT),
-            original_node_id=LEVEL_PROMPT,
         ),
-        _llm(LEVEL_LLM, "客户等级及成交概率计算 - 工具", LEVEL_PROMPT, after=(LEVEL_PROMPT,)),
-        make_node(
+        _llm(
+            LEAD_GEN_LLM,
+            "客户销售线索生成",
             LEAD_GEN_PROMPT,
-            "客户销售线索生成Prompt",
-            "template-transform",
             after=(LEAD_ANALYSIS_LLM, TAG_FILTER_LLM),
             inputs={
                 "output": (PRODUCT_INFO_SHORT, "output"),
@@ -1037,11 +994,7 @@ WORKFLOW = WorkflowDef(
                 "output_2": (EVIDENCE_FORMAT, "output"),
                 "output_3": (PROFILE_FORMAT, "output"),
             },
-            outputs=("output",),
-            template=template_name(LEAD_GEN_PROMPT),
-            original_node_id=LEAD_GEN_PROMPT,
         ),
-        _llm(LEAD_GEN_LLM, "客户销售线索生成 - 工具", LEAD_GEN_PROMPT, after=(LEAD_GEN_PROMPT,)),
         # ---------------------------------------------------------- 合并层
         make_node(
             PROFILE_CARD_CODE,
@@ -1058,7 +1011,6 @@ WORKFLOW = WorkflowDef(
             },
             outputs=("result_json",),
             function=f"customer_profile.workflows.{SLUG}:build_profile_card_json",
-            original_node_id=PROFILE_CARD_CODE,
         ),
         make_node(
             SALES_LEAD_CODE,
@@ -1074,7 +1026,6 @@ WORKFLOW = WorkflowDef(
             },
             outputs=("result",),
             function=f"customer_profile.workflows.{SLUG}:merge_sales_lead_data",
-            original_node_id=SALES_LEAD_CODE,
         ),
         make_node(
             PROFILE_MERGE_CODE,
@@ -1088,7 +1039,6 @@ WORKFLOW = WorkflowDef(
             },
             outputs=("result",),
             function=f"customer_profile.workflows.{SLUG}:merge_profile_card_data",
-            original_node_id=PROFILE_MERGE_CODE,
         ),
         make_node(
             NOTES_TEMPLATE_HTTP,
@@ -1103,12 +1053,11 @@ WORKFLOW = WorkflowDef(
                 "@auth": True,
                 "@outputs": {"body": "$text", "status": "$status"},
             },
-            original_node_id=NOTES_TEMPLATE_HTTP,
         ),
-        make_node(
+        _llm(
+            NOTES_GEN_LLM,
+            "Notes生成",
             NOTES_GEN_PROMPT,
-            "Notes生成Prompt",
-            "template-transform",
             after=(NOTES_TEMPLATE_HTTP,),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
@@ -1118,15 +1067,11 @@ WORKFLOW = WorkflowDef(
                 "result": (ORIGINAL_INFO_CODE, "result"),
                 "output_3": (PRODUCT_INFO_SHORT, "output"),
             },
-            outputs=("output",),
-            template=template_name(NOTES_GEN_PROMPT),
-            original_node_id=NOTES_GEN_PROMPT,
         ),
-        _llm(NOTES_GEN_LLM, "Notes生成 - 工具", NOTES_GEN_PROMPT, after=(NOTES_GEN_PROMPT,)),
-        make_node(
+        _llm(
+            NOTES_REVIEW_LLM,
+            "Notes审核",
             NOTES_REVIEW_PROMPT,
-            "Notes审核Prompt",
-            "template-transform",
             after=(PROFILE_MERGE_CODE, NOTES_GEN_LLM),
             inputs={
                 "output": (EVIDENCE_FORMAT, "output"),
@@ -1137,14 +1082,10 @@ WORKFLOW = WorkflowDef(
                 "result": (ORIGINAL_INFO_CODE, "result"),
                 "output_2": (PRODUCT_INFO_SHORT, "output"),
             },
-            outputs=("output",),
-            template=template_name(NOTES_REVIEW_PROMPT),
-            original_node_id=NOTES_REVIEW_PROMPT,
         ),
-        _llm(NOTES_REVIEW_LLM, "Notes审核 - 工具", NOTES_REVIEW_PROMPT, after=(NOTES_REVIEW_PROMPT,)),
         make_node(
             NOTES_FIX_LLM,
-            "LLM",
+            "Notes格式修正",
             "llm",
             after=(NOTES_REVIEW_LLM,),
             inputs={"result": (NOTES_REVIEW_LLM, "result")},
@@ -1153,7 +1094,6 @@ WORKFLOW = WorkflowDef(
             system_text=NOTES_FIX_SYSTEM,
             # 下游 code 节点对它的输出做 JSON 解析 → 按消费方语义要求 JSON（§6.4.2 / M2）
             expect_json=True,
-            original_node_id=NOTES_FIX_LLM,
         ),
         make_node(
             NOTES_SPLIT_CODE,
@@ -1163,7 +1103,6 @@ WORKFLOW = WorkflowDef(
             inputs={"json_str": (NOTES_FIX_LLM, "text")},
             outputs=("basic_notes_updates", "problem_list"),
             function=f"customer_profile.workflows.{SLUG}:split_notes_result",
-            original_node_id=NOTES_SPLIT_CODE,
         ),
         make_node(
             FINAL_MERGE_CODE,
@@ -1176,12 +1115,11 @@ WORKFLOW = WorkflowDef(
             },
             outputs=("merged_json",),
             function=f"customer_profile.workflows.{SLUG}:merge_final_data",
-            original_node_id=FINAL_MERGE_CODE,
         ),
         # ---------------------------------------------------------- 回写层
         make_node(
             WRITEBACK_HTTP,
-            "HTTP 请求 2",
+            "画像回写",
             "http-request",
             after=(FINAL_MERGE_CODE,),
             outputs=("body", "status"),
@@ -1190,7 +1128,7 @@ WORKFLOW = WorkflowDef(
                 "@method": "post",
                 "@path": f"{PROFILE_API_PREFIX}callback/update-profile",
                 "@auth": True,
-                # 请求体逐字符取自 DSL；引用位于 JSON 字符串**内部**，因此只转义、不补引号
+                # 请求体逐字符取自迁移前的定义；引用位于 JSON 字符串**内部**，因此只转义、不补引号
                 "@body_template": (
                     '{"data": [{"id": "key-value-149", "key": "", "type": "text", '
                     '"value": "{{#1776911599997.merged_json#}}"}], "type": "json"}'
@@ -1199,7 +1137,6 @@ WORKFLOW = WorkflowDef(
                 "@writeback": True,
                 "@outputs": {"body": "$text", "status": "$status"},
             },
-            original_node_id=WRITEBACK_HTTP,
         ),
         make_node(
             END,
@@ -1208,7 +1145,6 @@ WORKFLOW = WorkflowDef(
             after=(WRITEBACK_HTTP,),
             inputs={"result1": (FINAL_MERGE_CODE, "merged_json")},
             outputs=("result1",),
-            original_node_id=END,
         ),
     ),
 )
@@ -1239,10 +1175,10 @@ def default_inputs(
 # ====================================================================
 # code 节点 -> 函数名映射
 #
-# 迁移只允许改函数名，不许改函数体。跨节点重名的辅助函数（同一份 DSL 里不同
+# 改造只允许改函数名，不许改函数体。跨节点重名的辅助函数（同一份定义 里不同
 # 节点各写了一份 ``_parse_json`` 之类）必须改名，否则后一份会覆盖前一份。
-# 这里如实记录每个节点用了什么名字，``tests/test_code_verbatim.py`` 按它把
-# DSL 原文里的旧名换成新名后再逐字符比对——差异因此只剩下「名字」。
+# 这里如实记录每个节点用了什么名字，逐字符比对按它把
+# 迁移前的定义文本里的旧名换成新名后再逐字符比对——差异因此只剩下「名字」。
 # ====================================================================
 
 CODE_SPECS: dict[str, dict] = {

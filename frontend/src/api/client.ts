@@ -5,7 +5,7 @@
  * 走相对路径。开发模式用 Vite 的 proxy 转给后端（见 `vite.config.ts`）。
  *
  * **不引入任何会把数据发往第三方的 SDK。** 运行数据含客户信息（手机号、通话内容、
- * 截图内容），按 docs/specs/V0.4只读运行台.md §5 的约定，前端只与自家后端通信。
+ * 截图内容），按 docs/history/V0.4只读运行台.md §5 的约定，前端只与自家后端通信。
  */
 
 /** 运行状态。与后端 `definitions.RunStatus` 同值。 */
@@ -58,6 +58,22 @@ export interface NodeExecution {
   attempt_count: number
 }
 
+/**
+ * 运行级详情（`GET /runs/{id}`）。
+ *
+ * 与 `/graph` 分开取，是因为**运行级产出只在这里**：`/graph` 给的是当次定义快照与
+ * 节点状态，不含 `inputs` / `outputs`，而顶部概览的「最终结果」正是运行级 `outputs`。
+ *
+ * 注意 `attempts` 会随本次响应一起返回（实测最大约 0.7 MB）。节点详情里的每次尝试
+ * 仍走 `nodeAttempts` 懒加载——这里不取 `attempts` 字段，只取运行级输入输出。
+ */
+export interface RunDetailPayload extends RunSummary {
+  inputs: Record<string, unknown>
+  outputs: Record<string, unknown>
+  definition_version_id: number | null
+  child_run_ids: string[]
+}
+
 /** 图中的一条边。`source_handle` 保留分支名（`true` / `false` / `source`）。 */
 export interface GraphEdge {
   source: string
@@ -73,7 +89,6 @@ export interface GraphNode {
   branch_gates: Record<string, string>
   outputs: string[]
   config: Record<string, unknown>
-  coords: [number, number] | null
 }
 
 export interface Definition {
@@ -85,8 +100,6 @@ export interface Definition {
   outputs: Record<string, string>
   nodes: GraphNode[]
   edges: GraphEdge[]
-  /** 节点 ID → `[x, y]`。后端按最长路径分层算出，见 layout.py。 */
-  layout: Record<string, [number, number]>
 }
 
 export interface RunGraph {
@@ -147,22 +160,13 @@ export interface RuntimeInfo {
   serve_ui: boolean
 }
 
-/** 一个工作流的元信息，用于结构页的下拉选择。 */
+/** 一个工作流的元信息，用于提交页与列表页的工作流选择。 */
 export interface WorkflowBrief {
   workflow_id: string
   display_name: string
   source_dsl: string | null
   node_count: number
   outputs: Record<string, string>
-}
-
-export interface DefinitionVersion {
-  version_id: number
-  workflow_id: string
-  definition_hash: string
-  code_commit: string | null
-  created_at_ms: number
-  definition: Definition
 }
 
 const BASE = ''
@@ -233,16 +237,17 @@ export const api = {
     business_ref?: string
   }) => postJson<SubmitResult>('/runs', payload),
 
-  topology: (workflowId: string) =>
-    getJson<Definition>(
-      `/workflows/${encodeURIComponent(workflowId)}/topology`,
-    ),
-
-  definitionVersion: (versionId: number) =>
-    getJson<DefinitionVersion>(`/definition-versions/${versionId}`),
-
   runGraph: (runId: string) =>
     getJson<RunGraph>(`/runs/${encodeURIComponent(runId)}/graph`),
+
+  /**
+   * 运行级输入输出。顶部概览的最终产出取自这里。
+   *
+   * 返回体里也带着 `attempts`，此处按约定不使用它：单次尝试按节点懒加载
+   * （见 `nodeAttempts`），避免首屏为了概览把全部响应正文拉下来。
+   */
+  runDetail: (runId: string) =>
+    getJson<RunDetailPayload>(`/runs/${encodeURIComponent(runId)}`),
 
   /**
    * 某个节点的每一次外部请求尝试。

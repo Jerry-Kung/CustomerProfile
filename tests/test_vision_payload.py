@@ -1,12 +1,12 @@
 """vision 请求体：图片形态与 ``detail`` 透传。
 
 12 个 vision 节点全部位于 6 个截图类工作流（每流 2 个：单张与迭代内各一），它们的
-图片输入都来自 http 节点下载到的 ``files`` 字段——Dify 把下载结果包成
+图片输入都来自 http 节点下载到的 ``files`` 字段——执行器把下载结果包成
 ``data:image/...;base64,...`` 的列表。这里把「下载 → 组装 → 下发」这条链的契约钉住：
 
 1. http 的 ``files`` 是 **data URI 列表**，不是单个字符串；
 2. 组装出的请求体用多模态的 ``content`` 数组，图片走 ``image_url``；
-3. ``detail`` 原样透传（实测 DSL 的 ``vision.configs.detail`` 为 ``high``）；
+3. ``detail`` 原样透传（实测迁移前的定义的 ``vision.configs.detail`` 为 ``high``）；
 4. 没有图片时不构造 ``content`` 数组——不给模型发空图片列表。
 """
 
@@ -172,7 +172,7 @@ async def _run(workflow: WorkflowDef, inputs: dict, tmp_path):
 
 
 def test_real_image_http_nodes_use_literal_url_plus_binding():
-    """真实迁移里图片 http 节点用的是「字面量 ``@url`` + ``@url`` 绑定」，不是 ``@url_field``。
+    """真实改造里图片 http 节点用的是「字面量 ``@url`` + ``@url`` 绑定」，不是 ``@url_field``。
 
     执行器文档提到过 ``@url_field``（URL 整段来自绑定值），但 19 个真实 http 节点
     **一个都没用它**——连图片直链也是 ``@url: ""`` 加绑定值拼接。本用例把这个事实钉住，
@@ -271,7 +271,7 @@ async def test_vision_payload_carries_image_and_detail(tmp_path):
     assert len(image_parts) == 1, f"应带 1 张图片，实际 {len(image_parts)} 张"
     assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
     assert image_parts[0]["image_url"]["detail"] == "high", (
-        "detail 必须原样透传（DSL 实测为 high）"
+        "detail 必须原样透传（迁移前的定义实测为 high）"
     )
 
 

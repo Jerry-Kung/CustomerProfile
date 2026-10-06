@@ -47,27 +47,27 @@ class Settings(BaseSettings):
     """
 
     worker_replicas: int = 1
-    """worker 进程数。**配额语义由它决定**（V0.5.3，规划 Q8 无明确数值时的显式口径）。
+    """worker 进程数。**配额语义由它决定**（V0.5.3）。
 
     限额是**进程内**的，因此 ``LLM_RPM_LIMIT`` 的含义是「每进程限额」，全局限额 =
     每进程 × 本值。这就是验收要求的「显式分配」：不共享，只按进程数划分。跨进程共享
-    配额需要中间件，与「不引入未实际需要的重型框架」冲突（规划 §5 约束 7）。
+    配额需要中间件，与「不引入未实际需要的重型框架」冲突。
 
     本值同时参与校验：限额必须能被进程数整除，否则会出现静默超发（如 RPM=60 配 4 个
     worker，实际打到 240）。
     """
 
     llm_temperature: float = 0.5
-    """全项目统一，不可按节点覆盖（规划 §6.4.4）。"""
+    """全项目统一，不可按节点覆盖。"""
 
     llm_enable_thinking: bool | None = None
     """是否启用模型的思维链（``LLM_ENABLE_THINKING``）。
 
     ``None``（未设置）时**不发这个键**，沿用服务端默认值；
     只有显式设为 ``true`` / ``false`` 时才把它写进请求体。
-    这是有意的：原规划 §6.4.4 要求“不设其他参数”，且不同服务
+    这是有意的：既定要求“不设其他参数”，且不同服务
     商对这个开关的默认取值不同，发送一个我们猜测的
-    值会把服务端的默认覆盖掉。见差异 W51。
+    值会把服务端的默认覆盖掉。
     """
 
     llm_max_tokens: int | None = None
@@ -75,23 +75,23 @@ class Settings(BaseSettings):
 
     存在的理由是**实测出来的截断**：关闭思维链后，服务端在未指定上限时把输出卡在
     8192 token，长 JSON 会被拦腰截断，而 ``detect_output_anomaly`` 不检查 ``finish_reason``，
-    截断因此能静默通过并在下游解析时炸掉。见差异 W51。
+    截断因此能静默通过并在下游解析时炸掉。
     """
 
     # ------------------------------------------------------------ 外部服务
     auc_base_url: str = "https://openspeech.bytedance.com/api/v3/auc/bigmodel"
     """AUC 语音识别服务的基地址。
 
-    原 DSL 指向内网自建服务 ``http://192.168.0.5:5005``（无鉴权）。该服务长期不可达，
-    按用户 2026-09-23 决定改接火山引擎云服务。DSL 的 ``/submit_analyze`` 与
+    迁移前的定义指向内网自建服务 ``http://192.168.0.5:5005``（无鉴权）。该服务长期不可达，
+    按用户 2026-09-23 决定改接火山引擎云服务。迁移前的定义的 ``/submit_analyze`` 与
     ``/query_analyze`` 两个节点契约由 :mod:`customer_profile.execution.auc` 保持不变——
-    下游的两个 code 节点是逐字符取自 DSL 的，不能改。
+    下游的两个 code 节点是逐字符取自迁移前的定义的，不能改。
     """
 
     auc_ssl_verify: bool = True
     auc_api_key: str = ""
     """火山引擎控制台的 API Key。原以明文硬编码在一份未跟踪的 handler 文件里，
-    按 ``secrets_report.md`` 的口径视为已暴露，建议轮换后填入。
+    按 `归档的密钥盘点` 的口径视为已暴露，建议轮换后填入。
 
     与 ``profile_api_key`` 等一致：只从 ``.env`` 读，定义里不出现。
     """
@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     auc_poll_max_attempts: int = 1800
     """轮询次数上限。每次间隔 1s，即默认 30 分钟封顶。
 
-    缺省值对着「录音文件大、单次识别可达 20–30 分钟」这一实测口径（规划 §V0.3.2）。
+    缺省值对着「录音文件大、单次识别可达 20–30 分钟」这一实测口径。
     """
 
     profile_api_base_url: str = "http://118.145.238.50:8084"
@@ -129,9 +129,9 @@ class Settings(BaseSettings):
     max_queued_runs: int | None = 50
     """待跑队列的深度上限（V0.5.2）。置空表示不限。
 
-    语义变化（差异 W23）：v0.5.1 之前 ``POST /runs`` 的 429 来自「运行名额满」，
+    语义变化：v0.5.1 之前 ``POST /runs`` 的 429 来自「运行名额满」，
     进入队列模型后执行已不在 API 进程内，名额判断挪到 worker 侧；API 侧改为按
-    **队列深度**拒绝。缺省 50 是保守值（规划 Q8 无数值），不是压测结论。
+    **队列深度**拒绝。缺省 50 是保守值，不是压测结论。
     """
 
     log_level: str = "INFO"
@@ -142,14 +142,14 @@ class Settings(BaseSettings):
     replay_mode: Literal["off", "fixture"] = "off"
     """``fixture`` 时 LLM 与 HTTP 全部走本地固定响应，不出网。
 
-    测试与影子模式禁止生产回写（`Dify迁移任务说明.md` §9.3），固定响应模式下
+    测试与影子模式禁止生产回写，固定响应模式下
     任何外部写请求都不会真的发出。
     """
 
     writeback_enabled: bool = False
     """是否真的发送生产回写请求（``POST /callback/update-profile``）。
 
-    缺省 **false**：测试与影子模式禁止生产回写（`Dify迁移任务说明.md` §9.3）。
+    缺省 **false**：测试与影子模式禁止生产回写。
     置为 false 时回写节点只记录「本应发出的请求」并把结果标记为未发送，不产生任何
     生产副作用。真实冒烟也保持 false——V0.3 的验收目标是端到端**读**通，不含写。
     """
@@ -161,7 +161,7 @@ class Settings(BaseSettings):
     """是否由后端托管前端构建产物（``frontend/dist``）。
 
     缺省 **false**：托管要求先跑过 ``npm run build``，而测试与无前端环境不应因此失败。
-    置 true 时在 ``/`` 挂载静态资源，见 ``docs/specs/V0.4只读运行台.md`` §4。
+    置 true 时在 ``/`` 挂载静态资源，见 `归档的运行台设计` §4。
     """
 
     interrupt_on_start: bool = True
@@ -193,7 +193,7 @@ class Settings(BaseSettings):
 
     缺省 true：API 进程同时充当一个消费者，这样「提交后立即可查、可跑」的既有契约
     不变——测试与单机部署都不需要额外起一个 worker 进程。生产按
-    Dify迁移任务说明.md §4 单独跑 ``python -m customer_profile.worker`` 时，
+    单独跑 ``python -m customer_profile.worker`` 时，
     可把 API 侧置为 false，让执行集中在一个进程里。
     """
 
@@ -261,8 +261,8 @@ class Settings(BaseSettings):
     def _only_unified_temperature(cls, value: float) -> float:
         if value != 0.5:
             raise ValueError(
-                "temperature 全项目统一为 0.5（规划 §6.4.4）；"
-                "如需变更请先修改规划文档并记入差异清单"
+                "temperature 全项目统一为 0.5；"
+                "如需变更请先修改配置并记入 ``docs/design/执行语义口径.md``"
             )
         return value
 

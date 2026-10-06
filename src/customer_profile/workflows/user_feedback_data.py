@@ -1,22 +1,22 @@
-"""``（新）SubAgent - 用户人工Feedback数据提取`` 的 Python 定义。
+"""``用户人工反馈数据提取`` 的 Python 定义。
 
-DSL 基线：11 节点 / 12 边。链路是「取反馈原文 + 拉历史画像 → 拆点赞/点踩 → 判断有无反馈
+迁移前的定义基线：11 节点 / 12 边。链路是「取反馈原文 + 拉历史画像 → 拆点赞/点踩 → 判断有无反馈
 → 有则生成总结报告，无则给一句固定说明」：
 
     start(phone_number, customer_data, data_source)
       ├─ code 数据提取（取 channel 的 raw_payload）
       └─ http 获取历史数据&Feedback记录（mhero 画像）
-           └─ code 代码执行 2（拆出 approved / rejected 两组字段）
-                └─ code 代码执行 3（判断有无反馈）
+           └─ code 拆分点赞与点踩（拆出 approved / rejected 两组字段）
+                └─ code 判断本轮是否有反馈
                      └─ if-else 条件分支
-                          ├─ true  → template 模板转换 2 → llm → 变量聚合器 → end
-                          └─ else → template 模板转换 → 变量聚合器
+                          ├─ true  → llm 客户画像反馈总结报告生成 → 反馈报告汇总 → end
+                          └─ else → template 无数据提示 → 反馈报告汇总
 
 两处口径：
 
-- ``code`` 节点的两个解析辅助函数在本模块内同名（``_strip_code_fence`` 在两段 DSL
+- ``code`` 节点的两个解析辅助函数在本模块内同名（``_strip_code_fence`` 在两段迁移前的定义
   正文里都有但实现不同），因此第二个被重命名为 ``_strip_code_fence__6946``；改名只动
-  函数名，正文一字未改（见 ``tests/test_code_verbatim.py``）。
+  函数名，正文一字未改。
 - 回写类接口不在此工作流内；这里只有一次 GET 读请求（mhero），按幂等重试。
 """
 
@@ -27,7 +27,7 @@ from typing import Any
 from ..definitions import WorkflowDef, make_node
 
 
-# ---- DSL 节点 1779414084761 的正文（逐字符，仅函数名不同）
+# ---- 迁移前的定义节点 1779414084761 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -47,7 +47,7 @@ def _strip_code_fence(text: str) -> str:
 
 def _parse_json_string(value):
     """
-    兼容 Dify 上游传入 String / Object / None 三种情况。
+    兼容上游传入 String / Object / None 三种情况。
     解析失败时返回空 dict，避免代码节点中断。
     """
     if value is None:
@@ -165,7 +165,7 @@ def split_feedback_notes(input_json) -> dict:
     }
 
 
-# ---- DSL 节点 1779414516946 的正文（逐字符，仅函数名不同）
+# ---- 迁移前的定义节点 1779414516946 的正文（逐字符，仅函数名不同）
 import json
 import re
 
@@ -247,7 +247,7 @@ def detect_feedback_presence(feedback_content, approved_feedback_json, rejected_
     ])
 
     return {
-        # Dify Code 节点不支持 boolean 类型，所以用 number 输出
+        # ``code`` 节点不支持 boolean 类型，所以用 number 输出
         # 1 = True，有反馈
         # 0 = False，无反馈
         "has_feedback": 1 if has_feedback else 0
@@ -259,8 +259,9 @@ def detect_feedback_presence(feedback_content, approved_feedback_json, rejected_
 # ====================================================================
 
 WORKFLOW_ID = "user_feedback_data"
-DISPLAY_NAME = "（新）SubAgent - 用户人工Feedback数据提取"
-SOURCE_DSL = f"{DISPLAY_NAME}.yml"
+DISPLAY_NAME = "用户人工反馈数据提取"
+# 定义快照的 source_dsl 直接取这个显示名——原来那个指向 .yml 的追溯键已随
+# 定义文件一并废弃，字段保留只为不动快照形状。
 
 START = "1773748103758"
 END = "1773748343861"
@@ -291,7 +292,7 @@ def template_name(node_id: str) -> str:
 WORKFLOW = WorkflowDef(
     workflow_id=WORKFLOW_ID,
     display_name=DISPLAY_NAME,
-    source_dsl=SOURCE_DSL,
+    source_dsl=DISPLAY_NAME,
     entries=(START,),
     exits=(END,),
     outputs={"result": "output"},
@@ -300,7 +301,7 @@ WORKFLOW = WorkflowDef(
             START,
             "用户输入",
             "start",
-            # 有意差异 W4：llm_model 入参按 §6.4.5 删除
+            # llm_model 入参按 §6.4.5 删除
             variables=("phone_number", "customer_data", "data_source"),
             required_phone_number=True,
             required_customer_data=True,
@@ -317,7 +318,6 @@ WORKFLOW = WorkflowDef(
             },
             outputs=("result",),
             function=f"{SHARED_CODE_MODULE}:extract_raw_payload",
-            original_node_id=EXTRACT,
         ),
         make_node(
             HISTORY_HTTP,
@@ -333,21 +333,19 @@ WORKFLOW = WorkflowDef(
                 "@auth": True,
                 "@outputs": {"body": "$text", "status": "$status"},
             },
-            original_node_id=HISTORY_HTTP,
         ),
         make_node(
             SPLIT_CODE,
-            "代码执行 2",
+            "拆分点赞与点踩",
             "code",
             after=(HISTORY_HTTP,),
             inputs={"input_json": (HISTORY_HTTP, "body")},
             outputs=("approved_feedback_json", "rejected_feedback_json"),
             function=f"customer_profile.workflows.{SLUG}:split_feedback_notes",
-            original_node_id=SPLIT_CODE,
         ),
         make_node(
             PRESENCE_CODE,
-            "代码执行 3",
+            "判断本轮是否有反馈",
             "code",
             after=(SPLIT_CODE, EXTRACT),
             inputs={
@@ -357,7 +355,6 @@ WORKFLOW = WorkflowDef(
             },
             outputs=("has_feedback",),
             function=f"customer_profile.workflows.{SLUG}:detect_feedback_presence",
-            original_node_id=PRESENCE_CODE,
         ),
         make_node(
             BRANCH,
@@ -368,28 +365,27 @@ WORKFLOW = WorkflowDef(
             branches=(
                 {
                     "id": TRUE_BRANCH,
-                    # DSL: has_feedback = 1（number）。code 节点用 number 表达布尔
-                    # （Dify 不支持 boolean 输出），因此按文本比较即可。
+                    # 迁移前的定义: has_feedback = 1（number）。code 节点用 number 表达布尔
+                    # （不支持 boolean 输出），因此按文本比较即可。
                     "condition": {"field": "has_feedback", "operator": "eq", "value": "1"},
                 },
             ),
             else_id=ELSE_BRANCH,
-            original_node_id=BRANCH,
         ),
         make_node(
             NO_DATA_TEMPLATE,
-            "模板转换",
+            "无数据提示",
             "template-transform",
             after=(BRANCH,),
             on_branch=(BRANCH, "false"),
             outputs=("output",),
             template=template_name(NO_DATA_TEMPLATE),
-            original_node_id=NO_DATA_TEMPLATE,
         ),
         make_node(
-            REPORT_TEMPLATE,
-            "模板转换 2",
-            "template-transform",
+            REPORT_LLM,
+            "客户画像反馈总结报告生成",
+            "llm",
+            # 迁移前的定义里的工具节点归一为一次 llm_call
             after=(BRANCH,),
             on_branch=(BRANCH, "true"),
             inputs={
@@ -398,31 +394,18 @@ WORKFLOW = WorkflowDef(
                 "approved_feedback_json": (SPLIT_CODE, "approved_feedback_json"),
                 "rejected_feedback_json": (SPLIT_CODE, "rejected_feedback_json"),
             },
-            outputs=("output",),
-            template=template_name(REPORT_TEMPLATE),
-            original_node_id=REPORT_TEMPLATE,
-        ),
-        make_node(
-            REPORT_LLM,
-            "Gemini（异常输出重试版）",
-            "llm",
-            # 有意差异 W2/W3：DSL 的 gemini_retry_2_times 工具节点归一为一次 llm_call
-            after=(REPORT_TEMPLATE,),
-            inputs={"input_prompt": (REPORT_TEMPLATE, "output")},
             outputs=("result",),
-            prompt_field="input_prompt",
+            template=template_name(REPORT_TEMPLATE),
             output="result",
             system_text="You are a helpful AI assistant.",
-            original_node_id=REPORT_LLM,
         ),
         make_node(
             AGGREGATE,
-            "变量聚合器",
+            "反馈报告汇总",
             "variable-aggregator",
             after=(NO_DATA_TEMPLATE, REPORT_LLM),
             variables=((REPORT_LLM, "result"), (NO_DATA_TEMPLATE, "output")),
             outputs=("output",),
-            original_node_id=AGGREGATE,
         ),
         make_node(
             END,
@@ -431,7 +414,6 @@ WORKFLOW = WorkflowDef(
             after=(AGGREGATE,),
             inputs={"result": (AGGREGATE, "output")},
             outputs=("result",),
-            original_node_id=END,
         ),
     ),
 )
@@ -453,10 +435,10 @@ def default_inputs(customer_data: str, phone_number: str = "") -> dict[str, Any]
 # ====================================================================
 # code 节点 -> 函数名映射
 #
-# 迁移只允许改函数名，不许改函数体。跨节点重名的辅助函数（同一份 DSL 里不同
+# 改造只允许改函数名，不许改函数体。跨节点重名的辅助函数（同一份定义 里不同
 # 节点各写了一份 ``_parse_json`` 之类）必须改名，否则后一份会覆盖前一份。
-# 这里如实记录每个节点用了什么名字，``tests/test_code_verbatim.py`` 按它把
-# DSL 原文里的旧名换成新名后再逐字符比对——差异因此只剩下「名字」。
+# 这里如实记录每个节点用了什么名字，逐字符比对按它把
+# 迁移前的定义文本里的旧名换成新名后再逐字符比对——差异因此只剩下「名字」。
 # ====================================================================
 
 CODE_SPECS: dict[str, dict] = {

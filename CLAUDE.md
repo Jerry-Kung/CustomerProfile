@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **项目名**：Customer Profile，潜在目标客户人设画像分析工作流。
 - **定位**：用于汽车营销场景中对潜在目标客户进行人设画像分析，帮助销售人员快速掌握客户基础信息，便于针对性制定销售策略。
 - **完整愿景与功能规划**：见 `README.md`
-- **当前阶段**：项目 V0 技术验证DEMO开发阶段，遵循“小步快跑”式开发原则。工作流主体设计由Dify上的工作流迁移而来，V0阶段聚焦于完成Dify工作流转代码相关任务。
+- **当前阶段**：项目 V0 技术验证DEMO开发阶段，遵循“小步快跑”式开发原则。
 
 ## 2. 工作规范
 
@@ -23,12 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 默认不进行全量文档阅读，仅阅读与当前任务直接相关的项目文档，默认不阅读历史版本归档文件；
 - 如有必要更新CLAUDE.md与README.md等核心文档，遵守最小化更新原则，不得添加任务无关的冗余内容。
 
-## 4. Dify迁移相关信息
-
-- 需迁移所有的Dify工作流及子工作流的DSL文件统一存放在dify_dsl_data目录；
-- Dify工作流的主入口为：**（新）客户初始画像（生产环境）**
-
-## 5. 环境设置
+## 4. 环境设置
 
 - 本机 Claude Code 已从 C 盘迁移到 **D 盘**，所有相关本地文件（插件、Marketplace、配置、项目数据、自动记忆）都在 `D:\KLH\DevTools\ClaudeCode\ClaudeCodeData\`。
 - 查找 Claude Code 插件 / skill / 项目记忆时**不要**去 C 盘 `C:\Users\konglinghan\.claude`（该处已空），一律用 D 盘路径。

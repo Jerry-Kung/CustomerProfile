@@ -1,10 +1,10 @@
 # 客户画像运行台
 
-V0.4 起的工作台前端。Vite + React + TypeScript + [@xyflow/react](https://reactflow.dev)（React Flow 12）。
+V0.4 起的工作台前端。Vite + React + TypeScript。
 
-设计依据：`docs/specs/V0.4只读运行台.md`（结构/列表/详情）、`docs/specs/V0.5工作台任务触发入口.md`（提交入口）。
+设计依据：`docs/history/V0.4只读运行台.md`（结构/列表/详情）、`docs/history/V0.5工作台任务触发入口.md`（提交入口）。
 
-**仍然只读的是「图」**：没有拖拽保存、没有连线编辑、没有工作流编辑（`Dify迁移任务说明.md` §8）。
+**仍然只读的是「过程」**：运行详情只展示、不编辑。
 V0.5.1 起增加了**唯一的写操作**——提交任务（`POST /runs`），页面为「提交任务」标签页。
 
 ## 构建与入库约定（重要）
@@ -37,14 +37,13 @@ npm run dev          # Vite dev server，API 请求按 vite.config.ts 的 proxy 
 
 ## 与后端的两条契约
 
-1. **坐标由后端给**（`definition.layout`），前端**不**计算布局。布局算法在
-   `src/customer_profile/layout.py`，由 Python 测试覆盖（`tests/test_layout.py`）。
-   前端只渲染，保证「只有一份拓扑」。
-2. **图与状态分两个字段**（`definition` / `nodes`）。不要合并：合并后「图里有但没执行」
-   与「执行了但已不在图里」无从分辨。
+1. **过程按时间线排列**，前端不重排成别的顺序。节点行按 `started_at_ms` 排；并行关系
+   不做分组，由每行的「前置依赖项」对照看出——列表本身不伪造拓扑。
+2. **定义与执行分两个字段**（`definition` / `nodes`）。不要合并：合并后「定义里有但没执行」
+   与「执行了但已不在定义里」无从分辨。
 
-相关端点（读）：`GET /workflows`、`GET /workflows/{id}/topology`、`GET /definition-versions/{id}`、
-`GET /runs/{id}/graph`、`GET /runtime`。
+相关端点（读）：`GET /workflows`、`GET /runs/{id}/graph`、
+`GET /runs/{id}/nodes/{node_id}/attempts`、`GET /runtime`。
 相关端点（写）：`POST /runs` —— 前端**唯一**的写操作，由 `api/client.ts` 的 `submitRun` 调用。
 
 提交入口有三条约定值得记住：
@@ -59,5 +58,5 @@ npm run dev          # Vite dev server，API 请求按 vite.config.ts 的 proxy 
 ## 数据边界
 
 运行数据含客户信息（手机号、通话内容、截图内容），后端按用户决定**原文返回**、由部署侧鉴权。
-前端侧约束（`docs/specs/V0.4只读运行台.md` §5）：不记录日志到外部、不把数据发往任何第三方、
+前端侧约束（`docs/history/V0.4只读运行台.md` §5）：不记录日志到外部、不把数据发往任何第三方、
 不引入会把数据外发的 SDK。新增依赖时请守住这一条。

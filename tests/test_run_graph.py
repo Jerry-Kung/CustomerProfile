@@ -1,4 +1,4 @@
-"""运行详情主数据（``/runs/{id}/graph``）与历史定义快照（``/definition-versions/{id}``）的测试。
+"""运行详情主数据（``/runs/{id}/graph``）与历史定义快照的测试。
 
 V0.4 有两条容易被实现破坏、且破坏了也不报错的契约，因此专门钉住：
 
@@ -65,8 +65,8 @@ async def _run_to_completion(client, workflow_id: str, inputs: dict) -> str:
 # ---------------------------------------------------------------- 图快照
 
 
-async def test_graph_returns_definition_with_layout(client):
-    """图里必须带 ``layout``——前端不算布局（§2.4）。"""
+async def test_graph_carries_the_definition_snapshot(client):
+    """图必须来自运行开始时的定义快照，且节点集合与当前定义一致。"""
     run_id = await _run_to_completion(
         client, hci.WORKFLOW_ID, {"phone_number": "13800000001"}
     )
@@ -74,20 +74,9 @@ async def test_graph_returns_definition_with_layout(client):
 
     definition = body["definition"]
     assert definition, "运行没有关联定义快照"
-    assert "layout" in definition, "图缺少 layout 字段"
-    assert set(definition["layout"]) == {
-        node["node_id"] for node in definition["nodes"]
-    }, "布局未覆盖全部节点"
-
-
-async def test_graph_layout_matches_the_topology_endpoint(client):
-    """同一份定义，详情页与结构页算出的坐标必须一致。"""
-    run_id = await _run_to_completion(
-        client, hci.WORKFLOW_ID, {"phone_number": "13800000001"}
-    )
-    graph = (await client.get(f"/runs/{run_id}/graph")).json()
-    topology = (await client.get(f"/workflows/{hci.WORKFLOW_ID}/topology")).json()
-    assert graph["definition"]["layout"] == topology["layout"]
+    assert {n["node_id"] for n in definition["nodes"]} == {
+        node.node_id for node in hci.WORKFLOW.nodes
+    }, "快照里的节点集合与当次定义不一致"
 
 
 async def test_graph_carries_node_executions_separately_from_the_definition(client):
@@ -113,34 +102,6 @@ async def test_graph_404_for_unknown_run(client):
 # ---------------------------------------------------------------- 历史版本
 
 
-async def test_definition_version_is_retrievable_and_has_layout(client):
-    """``/definition-versions/{id}`` 返回嵌套的 ``definition``，与 ``/runs/{id}/graph`` 同形。
-
-    形状一致性是有意的：两个端点返回同一类东西，形状不同会让前端出现两套取图代码。
-    """
-    run_id = await _run_to_completion(
-        client, hci.WORKFLOW_ID, {"phone_number": "13800000001"}
-    )
-    graph = (await client.get(f"/runs/{run_id}/graph")).json()
-    version_id = graph["definition_version_id"]
-    assert version_id is not None
-
-    version = (await client.get(f"/definition-versions/{version_id}")).json()
-    assert version["workflow_id"] == hci.WORKFLOW_ID
-    assert version["version_id"] == version_id
-    assert "definition" in version, "定义应嵌套在 definition 键下"
-    assert "layout" in version["definition"]
-    # 同一份定义，两个端点的图必须逐字段相同——含布局
-    assert version["definition"]["layout"] == graph["definition"]["layout"]
-    assert {n["node_id"] for n in version["definition"]["nodes"]} == {
-        n["node_id"] for n in graph["definition"]["nodes"]
-    }
-
-
-async def test_definition_version_404(client):
-    assert (await client.get("/definition-versions/999999")).status_code == 404
-
-
 async def test_history_view_is_not_overwritten_by_new_definitions(client):
     """历史运行展示当时的图；新版本不得覆盖旧运行的展示（§7 验收标准）。
 
@@ -162,10 +123,8 @@ async def test_history_view_is_not_overwritten_by_new_definitions(client):
     # 同一定义、同一指纹 → 版本表按 (workflow_id, hash) 唯一，两次复用同一版本
     assert graph_a["definition_version_id"] == graph_b["definition_version_id"]
 
-    version_id = graph_a["definition_version_id"]
-    once = (await client.get(f"/definition-versions/{version_id}")).json()
-    twice = (await client.get(f"/definition-versions/{version_id}")).json()
-    assert once == twice, "同一版本的两次读取结果不同"
+    # 同一份定义、同一指纹 → 版本表按 (workflow_id, hash) 唯一，两次运行复用同一版本
+    assert graph_a["definition_version_id"] == graph_b["definition_version_id"]
 
 
 # ---------------------------------------------------------------- 子运行下钻
@@ -271,7 +230,6 @@ async def test_a_new_definition_version_does_not_change_an_old_run(tmp_path):
                     "bindings": [],
                     "outputs": [],
                     "config": {},
-                    "coords": None,
                 }
             ]
             version_b = await service_obj.store.ensure_definition_version(
@@ -290,11 +248,11 @@ async def test_a_new_definition_version_does_not_change_an_old_run(tmp_path):
             }, "旧运行的图里出现了新版本才有的节点"
 
             # ---- 4. 而版本 B 自身可查，内容确实是新的
-            fetched_b = (await c.get(f"/definition-versions/{version_b}")).json()
+            fetched_b = await service_obj.store.definition_version(version_b)
             assert "FAKE_NEW_NODE" in {
                 n["node_id"] for n in fetched_b["definition"]["nodes"]
             }
-            fetched_a = (await c.get(f"/definition-versions/{version_a}")).json()
+            fetched_a = await service_obj.store.definition_version(version_a)
             assert "FAKE_NEW_NODE" not in {
                 n["node_id"] for n in fetched_a["definition"]["nodes"]
             }

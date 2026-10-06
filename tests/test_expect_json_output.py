@@ -7,7 +7,7 @@
 - 下游 code 节点输出的却是 ``is_valid: false``。
 
 根因是执行器把**解析后的 dict** 放进了 ``text``。两个消费方（``判断结果提取``、
-``Notes结果拆分``）都是逐字符取自 DSL 的 code 节点，函数体里对 ``text`` 做
+``Notes结果拆分``）都是逐字符取自迁移前的定义的 code 节点，函数体里对 ``text`` 做
 ``json.loads``——传入 dict 会抛异常，而两者的 ``except`` 都会吞掉错误并按缺省值返回
 （``is_valid=False`` / 空列表），于是**静默给出错误的业务结论**。
 
@@ -81,7 +81,6 @@ def _workflow(*, expect_json: bool) -> WorkflowDef:
                 # 固定系统提示，避免依赖模板资源
                 system_text="你是一个有用的AI助手",
                 expect_json=expect_json,
-                original_node_id=LLM,
             ),
             make_node(
                 END, "输出", "end", after=(LLM,),
@@ -110,7 +109,7 @@ async def _run(tmp_path, *, expect_json: bool):
 async def test_expect_json_text_is_a_json_string_not_a_dict(tmp_path):
     """``expect_json=True`` 时 ``text`` 必须是能被 ``json.loads`` 读回的字符串。
 
-    这是 Dify 的契约：``llm`` 节点的输出一律是文本，下游 code 节点按文本消费。
+    ``llm`` 节点的输出一律是文本，下游 code 节点按文本消费。
     放 dict 进去会让它们的 ``except`` 吞掉错误并返回缺省值——静默的错误业务结论。
     """
     outcome = await _run(tmp_path, expect_json=True)
@@ -143,7 +142,7 @@ async def test_plain_llm_text_is_unchanged(tmp_path):
 async def test_real_audio_validity_node_can_parse_the_text(tmp_path):
     """真实定义的消费方：``判断结果提取`` 对 ``text`` 取值必须得到正确的布尔。
 
-    这条是把「契约」与「真实消费方」接起来：用修复后的形状喂给**逐字符取自 DSL 的**
+    这条是把「契约」与「真实消费方」接起来：用修复后的形状喂给**逐字符取自迁移前的定义的**
     那个 code 节点，它必须能解析出 ``True`` 而不是因异常退化成 ``False``。
     """
     from customer_profile.workflows import shared_code

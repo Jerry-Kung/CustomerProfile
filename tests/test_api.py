@@ -98,20 +98,6 @@ async def test_workflow_list_has_counts(client):
     assert by_id[hci.WORKFLOW_ID]["node_count"] == 4
 
 
-async def test_topology_comes_from_the_same_definition(client):
-    """前端拓扑与调度器取自同一份定义，不存在第二张图。"""
-    topology = (await client.get(f"/workflows/{hci.WORKFLOW_ID}/topology")).json()
-    assert topology["workflow_id"] == hci.WORKFLOW_ID
-    assert {n["node_id"] for n in topology["nodes"]} == {
-        node.node_id for node in hci.WORKFLOW.nodes
-    }
-    assert len(topology["edges"]) == len(hci.WORKFLOW.edge_list())
-
-
-async def test_topology_404_for_unknown_workflow(client):
-    assert (await client.get("/workflows/nope/topology")).status_code == 404
-
-
 # ---------------------------------------------------------------- 提交与查询
 
 

@@ -1,6 +1,6 @@
 """最小 HTTP API。
 
-范围刻意收窄到 V0.2 需要的五个端点（规划 §3 V0.2 交付物 5）：提交任务返回 run_id、
+范围刻意收窄到 V0.2 需要的五个端点：提交任务返回 run_id、
 查询运行状态与节点明细。**没有**前端、没有编辑、没有流式推送——那些属 V0.4/V0.5。
 
 调用方协议仍是 Q7 的缺省处理：只提供异步提交 + 查询 run_id。
@@ -19,8 +19,7 @@ from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .definitions import NodeDef, RunStatus, WorkflowDef
-from .layout import layout
+from .definitions import RunStatus
 from .runner import QueueFull, RunSlotUnavailable, Service, build_service
 from .settings import get_settings
 
@@ -104,7 +103,7 @@ class RunGraph(BaseModel):
     run: RunSummary
     definition_version_id: int | None = None
     definition: dict[str, Any] = Field(
-        default_factory=dict, description="当次定义快照，含 layout 字段"
+        default_factory=dict, description="当次定义快照，取运行开始时落库的那一份"
     )
     nodes: list[dict[str, Any]] = Field(default_factory=list)
     child_runs: dict[str, dict[str, Any]] = Field(
@@ -236,7 +235,11 @@ def create_app(service_factory: Any = None) -> FastAPI:
 
     @app.get("/workflows", tags=["meta"])
     async def list_workflows() -> list[dict[str, Any]]:
-        """列出可运行的工作流及其拓扑（前端与调度器共用这一份定义）。"""
+        """列出可运行的业务工作流（前端与调度器共用这一份定义）。
+
+        人工构造的验证用图（``is_synthetic``）仍注册在定义集合里，但不在此列出：
+        它们的存在意义是给调度与执行的测试当装置，出现在界面的下拉框里只会误导。
+        """
         service = get_service()
         return [
             {
@@ -247,43 +250,8 @@ def create_app(service_factory: Any = None) -> FastAPI:
                 "outputs": dict(definition.outputs),
             }
             for definition in service.definitions.values()
+            if not definition.is_synthetic
         ]
-
-    @app.get("/workflows/{workflow_id}/topology", tags=["meta"])
-    async def workflow_topology(workflow_id: str) -> dict[str, Any]:
-        service = get_service()
-        try:
-            return service.topology(workflow_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @app.get("/definition-versions/{version_id}", tags=["meta"])
-    async def definition_version(version_id: int) -> dict[str, Any]:
-        """取一份定义快照，并附加布局坐标。
-
-        运行详情展示的是**当时的**图与提示词版本，因此前端取图走这里而不是当前定义。
-        快照已在每次运行开始时由留痕层写入（``definition_versions`` 表）。
-
-        返回形状与 ``/runs/{id}/graph`` 一致——图**嵌套**在 ``definition`` 键下。
-        两个端点返回同一类东西，形状不同会让前端出现两套取图代码；嵌套也让
-        「快照缺失时 ``definition`` 为空字典」这一情形有稳定的形状可断言。
-        """
-        service = get_service()
-        if service.store is None:
-            raise HTTPException(status_code=503, detail="未启用留痕存储")
-        row = await service.store.definition_version(version_id)
-        if row is None:
-            raise HTTPException(
-                status_code=404, detail=f"定义版本 {version_id} 不存在"
-            )
-        return {
-            "version_id": version_id,
-            "workflow_id": row.get("workflow_id"),
-            "definition_hash": row.get("definition_hash"),
-            "code_commit": row.get("code_commit"),
-            "created_at_ms": row.get("created_at_ms"),
-            "definition": _with_layout(row, service),
-        }
 
     # ------------------------------------------------------------ 运行
 
@@ -291,7 +259,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
     async def submit_run(payload: SubmitRequest = Body(...)) -> SubmitResponse:
         """提交任务，立即返回 ``run_id``。
 
-        任务先落库再返回（`Dify迁移任务说明.md` §4），因此不会出现「拿到 run_id 但
+        任务先落库再返回，因此不会出现「拿到 run_id 但
         数据库里查不到」的情况。
         """
         service = get_service()
@@ -306,7 +274,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except QueueFull as exc:
             # 队列满时明确拒绝（429），不排队等待。带 Retry-After 让调用方知道该等多久。
-            # 触发条件自 V0.5.2 起是**队列深度**而非运行名额（差异 W23）——执行已挪到
+            # 触发条件自 V0.5.2 起是**队列深度**而非运行名额——执行已挪到
             # worker，API 侧无从同步判断「运行名额」。
             raise HTTPException(
                 status_code=429,
@@ -431,7 +399,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
         if version_id is not None:
             version_row = await service.store.definition_version(version_id)
             if version_row is not None:
-                definition = _with_layout(version_row, service)
+                definition = dict(version_row.get("definition") or {})
 
         nodes = await service.store.list_node_executions(run_id)
         children = await service.store.list_child_runs(run_id)
@@ -500,7 +468,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
 
         为什么需要这个出口：worker 崩溃或停机时，正在跑的运行会被标成 ``interrupted``，
         并**保留已完成结果、不做自动续跑**——这是对的（进程中断不能证明外部副作用未
-        发生，见 `Dify迁移任务说明.md` §7.3）。但「交人工处理」若没有任何出口，这些
+        发生，见 既定约束）。但「交人工处理」若没有任何出口，这些
         运行会永远留在列表里，看不出是「待处理」还是「已处理」。本端点给出那个出口。
 
         **只接受 ``interrupted``**：其它状态一律 409。特别是不能拿它去停一条正在跑的
@@ -561,45 +529,6 @@ def _summary_of(row: Mapping[str, Any]) -> RunSummary:
     )
 
 
-def _with_layout(
-    version_row: Mapping[str, Any], service: Service
-) -> dict[str, Any]:
-    """给一份**历史定义快照**附加布局坐标。
-
-    快照是经 JSON 往返的普通 dict，不是 :class:`~customer_profile.WorkflowDef`，因此
-    不能直接复用 :func:`layout.attach_layout`（它按 ``NodeDef`` 工作）。这里从 dict 取
-    出分层所需的最小信息（节点 ID 与前置关系），复用同一个分层函数算坐标。
-
-    只有 ``predecessors`` 参与分层，不用 ``bindings``：展示坐标不关心变量绑定。
-    """
-    definition = dict(version_row.get("definition") or {})
-    nodes = definition.get("nodes") or []
-
-    # 用 NodeDef 的最小投影喂给分层函数，避免为 dict 再写一套分层逻辑。
-    projected = WorkflowDef(
-        workflow_id=definition.get("workflow_id") or "",
-        display_name=definition.get("display_name") or "",
-        nodes=tuple(
-            NodeDef(
-                node_id=n["node_id"],
-                title=n.get("title") or n["node_id"],
-                node_type=n.get("type") or "code",
-                predecessors=tuple(n.get("direct_predecessors") or ()),
-                coords=(
-                    tuple(n["coords"])  # type: ignore[arg-type]
-                    if n.get("coords")
-                    else None
-                ),
-            )
-            for n in nodes
-            if n.get("node_id")
-        ),
-    )
-    definition["layout"] = {
-        node_id: [round(x, 2), round(y, 2)]
-        for node_id, (x, y) in layout(projected).items()
-    }
-    return definition
 
 
 app = create_app()

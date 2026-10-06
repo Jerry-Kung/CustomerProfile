@@ -1,6 +1,6 @@
-"""``（新）SubAgent - 外呼录音信息提取`` 的 Python 定义。
+"""``外呼录音信息提取`` 的 Python 定义。
 
-DSL 基线：20 节点 / 21 边，与「外呼录音信息提取」**图结构逐节点相同**，只有渠道名
+迁移前的定义基线：20 节点 / 21 边，与「外呼录音信息提取」**图结构逐节点相同**，只有渠道名
 （``AIOutboundCallRecordingFile``）与提示词正文不同。结构复用
 :mod:`customer_profile.workflows.audio_flow`。
 
@@ -16,8 +16,8 @@ from ..definitions import WorkflowDef
 from .audio_flow import AudioFlow, build_audio_workflow
 
 WORKFLOW_ID = "outbound_call_audio"
-DISPLAY_NAME = "（新）SubAgent - 外呼录音信息提取"
-SOURCE_DSL = f"{DISPLAY_NAME}.yml"
+DISPLAY_NAME = "外呼录音信息提取"
+
 DATA_SOURCE = "AIOutboundCallRecordingFile"
 
 FLOW = AudioFlow(

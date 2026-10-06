@@ -1,7 +1,7 @@
 """非外部依赖的节点执行器：start / end / code / template-transform / if-else。
 
-``code`` 节点遵循规划 §6.2：原节点代码逻辑**直接提取**为普通 Python 函数，
-只剥离 Dify 特有的入参加载与返回值包装，不在迁移中顺手重构。
+``code`` 节点遵循既定口径：原节点代码逻辑**直接提取**为普通 Python 函数，
+只剥离入参加载与返回值包装，不在改造中顺手重构。
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ async def execute_start(
 ) -> ExecutionOutcome:
     """``start`` 节点：把工作流入参原样暴露为输出。
 
-    Dify 的 ``start`` 声明的变量即工作流入参，因此在迁移后它就是函数签名参数
+    ``start`` 节点声明的变量即工作流入参，因此在现在它就是函数签名参数
     的具体化：定义里只需要字段名，值由调用方传入。
     """
     declared = node.config.get("variables") or tuple(ctx.inputs)
@@ -84,7 +84,7 @@ async def execute_end(
 ) -> ExecutionOutcome:
     """``end`` 节点：按定义的输出字段收集结果。
 
-    ``result1`` 为字符串是现有对外契约（`Dify迁移任务说明.md` §3.1）；要改为对象
+    ``result1`` 为字符串是现有对外契约；要改为对象
     必须作为单独的 API 版本变更，因此这里对 ``result1`` 强制字符串化。
     """
     outputs: dict[str, Any] = {}
@@ -123,7 +123,7 @@ async def execute_code(
     """``code`` 节点：调用已登记的普通 Python 函数。
 
     约定：函数以 ``**inputs`` 接收已解析的入参，返回字段字典。函数本身不含任何
-    Dify 概念——入参加载与返回值包装都在这里完成。
+    入参加载与返回值包装都在这里完成。
     """
     function = _lookup_code_function(node, rt)
     inputs = ctx.bind_inputs(node.bindings)
@@ -168,7 +168,7 @@ async def execute_template_transform(
 ) -> ExecutionOutcome:
     """``template-transform`` 节点：按模板资源渲染出文本。
 
-    迁移后一个模板节点等价于一次渲染函数调用；同一模块的多个模板节点可合并为顺序
+    现在一个模板节点等价于一次渲染函数调用；同一模块的多个模板节点可合并为顺序
     代码，提示词正文仍独立存放（§6.5）。
     """
     repository = _template_repository(rt)
@@ -226,7 +226,7 @@ async def execute_if_else(
 ) -> ExecutionOutcome:
     """``if-else`` 节点：按声明顺序求值条件，命中即返回该分支。
 
-    分支语义在迁移后退化为普通 ``if / elif / else``（§6.2）。条件表达式写成
+    分支语义在现在退化为普通 ``if / elif / else``（§6.2）。条件表达式写成
     ``{"field": 入参名, "operator": "...", "value": ...}`` 的声明式结构，
     避免在定义里塞入可执行字符串。
     """

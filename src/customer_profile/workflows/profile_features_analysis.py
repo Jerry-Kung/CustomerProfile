@@ -1,20 +1,20 @@
-"""``（新）SubAgent - 人设特征判断`` 的 Python 定义。
+"""``人设特征判断`` 的 Python 定义。
 
-DSL 基线：16 节点 / 19 边。链路是「以证据线索推断人设特征」，三路并行产出后合并：
+迁移前的定义基线：16 节点 / 19 边。链路是「以证据线索推断人设特征」，三路并行产出后合并：
 
     start(phone_number, evidence_items)
-      ├─ template 人设特征推断 Prompt → llm 人设特征推断 结果聚合 → end(profile_result)
-      └─ template 消费者风格推断Prompt → llm ┐
-         template 兴趣&关注点推断Prompt → llm ┴→ variable-aggregator 特征结果聚合(分组)
-                                                    └─ code 代码执行 → end(hobby/style)
+      ├─ llm 人设特征推断 → 结果聚合 → end(profile_result)
+      └─ llm 消费者风格推断   ┐
+         llm 兴趣&关注点推断  ┴→ variable-aggregator 特征结果聚合(分组)
+                                  └─ code 分组结果拆壳 → end(hobby/style)
 
 **本轮的关键判断：两套并行分支里，保留 ``tool`` 那一支，删除纯 ``llm`` 那一支。**
 
-DSL 用两个 ``if-else``（``1776760124715`` / ``17767603231790``）按 ``llm_model == "gemini"``
-在「纯 llm 节点」与「``gemini_retry_2_times`` 工具节点」之间二选一。两条实现口径叠加：
+迁移前的定义用两个 ``if-else``（``1776760124715`` / ``17767603231790``）按 ``llm_model == "gemini"``
+在「纯 llm 节点」与「工具节点」之间二选一。两条实现口径叠加：
 
-- 有意差异 W4：``llm_model`` 入参按 §6.4.5 删除，两个 ``if-else`` 因此必须归一；
-- 有意差异 W2/W3：``gemini_retry_2_times`` 工具节点归一为一次 ``llm_call()``。
+- ``llm_model`` 入参按 §6.4.5 删除，两个 ``if-else`` 因此必须归一；
+- 工具节点归一为一次 ``llm_call()``。
 
 归一到哪一支**不是任意的**，实测证据有两条：
 
@@ -25,7 +25,7 @@ DSL 用两个 ``if-else``（``1776760124715`` / ``17767603231790``）按 ``llm_m
    ``You are a helpful AI assistant.``，属较早的版本。
 
 因此保留工具支（转换为 ``llm`` 节点，输出字段仍叫 ``result``），删除两个 ``if-else``
-与三个纯 ``llm`` 节点。被删节点与边记入 ``tests/test_ledger_crosscheck.py`` 的差异表。
+与三个纯 ``llm`` 节点。被删节点与边已从本定义里移除。
 """
 
 from __future__ import annotations
@@ -35,8 +35,9 @@ from typing import Any
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "profile_features_analysis"
-DISPLAY_NAME = "（新）SubAgent - 人设特征判断"
-SOURCE_DSL = f"{DISPLAY_NAME}.yml"
+DISPLAY_NAME = "人设特征判断"
+# 定义快照的 source_dsl 直接取这个显示名——原来那个指向 .yml 的追溯键已随
+# 定义文件一并废弃，字段保留只为不动快照形状。
 
 START = "1776670030415"
 END = "1776677585621"
@@ -58,7 +59,7 @@ SHARED_CODE_MODULE = "customer_profile.workflows.shared_code"
 SLUG = "profile_features_analysis"
 SYSTEM_TEXT = "You are a helpful AI assistant."
 
-# 有意差异 W4 + W2/W3 删除的节点（DSL 有、迁移后没有）
+# 删除的节点（迁移前的定义有、现在没有）
 REMOVED_NODES = (
     "1776760124715",  # 条件分支（llm_model 判定）
     "17767603231790",  # 条件分支 (1)（llm_model 判定）
@@ -82,14 +83,15 @@ REMOVED_EDGES = (
     ("17767603231790", "1777427950125"),
     ("17767603231790", "1777427955726"),
 )
-"""因 ``if-else`` 归一而消失的边（DSL 的 sourceHandle 是 ``true``/``false``，
-台账里按 ``source → target`` 记录）。"""
+"""因 ``if-else`` 归一而消失的边（迁移前的定义的 sourceHandle 是 ``true``/``false``，
+这里按 ``source → target`` 记录）。"""
 
 ADDED_EDGES = (
-    # 分支删除后，原由分支串起来的顺序改用直接依赖表达
-    ("1776670030415", "1777427777301"),
-    ("1776760253638", "1777427950125"),
-    ("1776760253638", "1777427955726"),
+    # 分支删除后，原由分支串起来的顺序改用直接依赖表达；
+    # 三个 target 后又随「提示词节点并入 llm 节点」由模板节点改指 llm 节点
+    ("1776670030415", "1777427788971"),
+    ("1776760253638", "1777427931123"),
+    ("1776760253638", "1777427938519"),
 )
 """分支归一后新增的边：把「分支按条件选一支执行」改成「上游直接连到该支的首节点」。"""
 
@@ -101,7 +103,7 @@ def template_name(node_id: str) -> str:
 WORKFLOW = WorkflowDef(
     workflow_id=WORKFLOW_ID,
     display_name=DISPLAY_NAME,
-    source_dsl=SOURCE_DSL,
+    source_dsl=DISPLAY_NAME,
     entries=(START,),
     exits=(END,),
     outputs={
@@ -114,33 +116,21 @@ WORKFLOW = WorkflowDef(
             START,
             "用户输入",
             "start",
-            # 有意差异 W4：llm_model 入参按 §6.4.5 删除
+            # llm_model 入参按 §6.4.5 删除
             variables=("phone_number", "evidence_items"),
             required_phone_number=True,
             required_evidence_items=True,
         ),
         make_node(
-            PROFILE_PROMPT,
-            "人设特征推断 Prompt",
-            "template-transform",
-            after=(START,),
-            on_branch=("1776760124715", "true"),
-            inputs={"evidence_items": (START, "evidence_items")},
-            outputs=("output",),
-            template=template_name(PROFILE_PROMPT),
-            original_node_id=PROFILE_PROMPT,
-        ),
-        make_node(
             PROFILE_LLM,
-            "人设特征推断 - 工具",
+            "人设特征推断",
             "llm",
-            after=(PROFILE_PROMPT,),
-            inputs={"input_prompt": (PROFILE_PROMPT, "output")},
+            after=(START,),
+            inputs={"evidence_items": (START, "evidence_items")},
             outputs=("result",),
-            prompt_field="input_prompt",
+            template=template_name(PROFILE_PROMPT),
             output="result",
             system_text=SYSTEM_TEXT,
-            original_node_id=PROFILE_LLM,
         ),
         make_node(
             PROFILE_AGGREGATE,
@@ -149,59 +139,34 @@ WORKFLOW = WorkflowDef(
             after=(PROFILE_LLM,),
             variables=((PROFILE_LLM, "result"),),
             outputs=("output",),
-            original_node_id=PROFILE_AGGREGATE,
-        ),
-        make_node(
-            STYLE_PROMPT,
-            "消费者风格推断Prompt",
-            "template-transform",
-            after=(PROFILE_AGGREGATE,),
-            on_branch=("17767603231790", "true"),
-            inputs={
-                "evidence_items": (START, "evidence_items"),
-                "output": (PROFILE_AGGREGATE, "output"),
-            },
-            outputs=("output",),
-            template=template_name(STYLE_PROMPT),
-            original_node_id=STYLE_PROMPT,
         ),
         make_node(
             STYLE_LLM,
-            "消费者风格推断 - 工具",
+            "消费者风格推断",
             "llm",
-            after=(STYLE_PROMPT,),
-            inputs={"input_prompt": (STYLE_PROMPT, "output")},
-            outputs=("result",),
-            prompt_field="input_prompt",
-            output="result",
-            system_text=SYSTEM_TEXT,
-            original_node_id=STYLE_LLM,
-        ),
-        make_node(
-            HOBBY_PROMPT,
-            "兴趣&关注点推断Prompt",
-            "template-transform",
             after=(PROFILE_AGGREGATE,),
-            on_branch=("17767603231790", "true"),
             inputs={
                 "evidence_items": (START, "evidence_items"),
                 "output": (PROFILE_AGGREGATE, "output"),
             },
-            outputs=("output",),
-            template=template_name(HOBBY_PROMPT),
-            original_node_id=HOBBY_PROMPT,
+            outputs=("result",),
+            template=template_name(STYLE_PROMPT),
+            output="result",
+            system_text=SYSTEM_TEXT,
         ),
         make_node(
             HOBBY_LLM,
-            "兴趣&关注点推断 - 工具",
+            "兴趣&关注点推断",
             "llm",
-            after=(HOBBY_PROMPT,),
-            inputs={"input_prompt": (HOBBY_PROMPT, "output")},
+            after=(PROFILE_AGGREGATE,),
+            inputs={
+                "evidence_items": (START, "evidence_items"),
+                "output": (PROFILE_AGGREGATE, "output"),
+            },
             outputs=("result",),
-            prompt_field="input_prompt",
+            template=template_name(HOBBY_PROMPT),
             output="result",
             system_text=SYSTEM_TEXT,
-            original_node_id=HOBBY_LLM,
         ),
         make_node(
             FEATURE_AGGREGATE,
@@ -221,11 +186,10 @@ WORKFLOW = WorkflowDef(
                     "variables": ((STYLE_LLM, "result"),),
                 },
             ),
-            original_node_id=FEATURE_AGGREGATE,
         ),
         make_node(
             SPLIT_CODE,
-            "代码执行",
+            "分组结果拆壳",
             "code",
             after=(FEATURE_AGGREGATE,),
             inputs={
@@ -234,13 +198,12 @@ WORKFLOW = WorkflowDef(
             },
             outputs=("consumption_result", "hobby_result"),
             function=f"{SHARED_CODE_MODULE}:split_grouped_features",
-            original_node_id=SPLIT_CODE,
         ),
         make_node(
             END,
             "输出",
             "end",
-            # DSL 里 END 的直接前置只有「代码执行」；profile_result 由 END 的
+            # 迁移前的定义里 END 的直接前置只有「代码执行」；profile_result 由 END 的
             # value_selector 跨节点引用获取，不构成边。
             after=(SPLIT_CODE,),
             inputs={
@@ -249,7 +212,6 @@ WORKFLOW = WorkflowDef(
                 "style_result": (SPLIT_CODE, "consumption_result"),
             },
             outputs=("profile_result", "hobby_result", "style_result"),
-            original_node_id=END,
         ),
     ),
 )

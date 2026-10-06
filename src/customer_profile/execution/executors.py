@@ -1,9 +1,9 @@
 """节点执行器注册表与内置执行器。
 
-对齐 `docs/specs/V0迁移规划.md` §6.2 的「节点 → Python」映射原则：执行器只负责把
+对齐 既定设计原则 的「节点 → Python」映射原则：执行器只负责把
 节点声明翻译成一次函数调用，业务逻辑本身写在 `workflows/` 下的普通 Python 里。
 
-V0.3 覆盖 DSL 的全部节点类型：start / end / code / template-transform / if-else /
+V0.3 覆盖迁移前的定义的全部节点类型：start / end / code / template-transform / if-else /
 llm（含 vision）/ http-request / tool / iteration（含 iteration-start）/
 variable-aggregator（含分组）。
 """

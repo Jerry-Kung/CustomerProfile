@@ -1,7 +1,7 @@
 """SQLite 持久化：建库、写入与查询。
 
 用标准库 ``sqlite3`` 而非 ORM——V0.2 的表结构与查询都很直白，引入 ORM 只会多一层
-需要解释的间接（`Dify迁移任务说明.md` §4「不引入未实际需要的重型框架」）。
+需要解释的间接（既定约束「不引入未实际需要的重型框架」）。
 
 **线程模型是这里唯一需要小心的地方。** ``sqlite3.Connection`` 不是线程安全的：
 默认甚至禁止跨线程使用，而 ``check_same_thread=False`` 只是关掉那道检查，并不能让
@@ -513,8 +513,7 @@ class Store:
         在重启后能继续。「重启不丢任务」与「把 queued 标 interrupted」不能同时成立，
         故保留 ``queued`` 交由 worker 重新领取。
 
-        ``running`` 只标不续跑：进程中断不能证明外部副作用未发生（`Dify迁移任务说明.md`
-        §7.3），因此这些运行**保留已完成结果**并交人工处理。
+        ``running`` 只标不续跑：进程中断不能证明外部副作用未发生（既定约束），因此这些运行**保留已完成结果**并交人工处理。
         """
         rows = await self._read(
             "SELECT run_id FROM workflow_runs WHERE status = ?", (RunStatus.RUNNING,)
@@ -702,7 +701,7 @@ class Store:
         """写入或更新一条节点执行记录。
 
         以 ``(run_id, node_id, call_path)`` 为唯一键：同一静态节点 ID 在迭代或子流程里
-        会多次执行，靠 ``call_path`` 区分（`Dify迁移任务说明.md` §5.3）。
+        会多次执行，靠 ``call_path`` 区分。
         """
         await self._write(
             "INSERT INTO node_executions (run_id, node_id, node_title, node_type, "

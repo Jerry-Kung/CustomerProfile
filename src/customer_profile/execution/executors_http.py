@@ -1,9 +1,9 @@
 """``http-request`` 节点执行器。
 
-迁移原则（规划 §6.2、§2.5）：保留方法、路径、业务 body 与必要 headers，**鉴权从环境
-变量注入**；DSL 中的明文 ``X-API-Key`` 不再出现在定义里。
+迁移原则：保留方法、路径、业务 body 与必要 headers，**鉴权从环境
+变量注入**；迁移前的定义中的明文 ``X-API-Key`` 不再出现在定义里。
 
-``timeout`` 与 ``retry_interval`` 一律不照搬 DSL 原值（Q5 缺省处理），改用
+``timeout`` 与 ``retry_interval`` 一律不照搬迁移前的定义的取值，改用
 :class:`~customer_profile.settings.Settings` 里的显式配置。
 """
 
@@ -24,7 +24,7 @@ from .executors import (
 )
 from .http import HttpCallError
 
-DIFY_REF_IN_BODY = re.compile(r"\{\{#([^#{}]+)#\}\}")
+NODE_REF_IN_BODY = re.compile(r"\{\{#([^#{}]+)#\}\}")
 
 
 def register_all(registry: ExecutorRegistry) -> ExecutorRegistry:
@@ -42,12 +42,12 @@ async def execute_http_request(
     - ``@method``：HTTP 方法（``get`` / ``post`` …）；
     - ``@path`` 或 ``@url``：路径（相对 ``@service`` 的 base_url）。含 ``{{#...#}}``
       引用时须在绑定的 ``@path`` 里声明来源，由这里拼接；
-    - ``@url_field``：URL **整段来自绑定的值**（DSL 里图片直链就是这种写法：
+    - ``@url_field``：URL **整段来自绑定的值**（迁移前的定义里图片直链就是这种写法：
       ``url: '{{#node.image_url#}}'``，没有字面前缀）。指定它时忽略 ``@path``；
     - ``@service``：``auc`` / ``profile`` / ``mhero``，决定 base_url 与凭据；
     - ``@headers``：非敏感 header 字面量；
     - ``@body``：请求体字面量（写请求用）；
-    - ``@body_template``：请求体是**含引用的 JSON 文本**（DSL 里 AUC 的两个节点就是这种
+    - ``@body_template``：请求体是**含引用的 JSON 文本**（迁移前的定义里 AUC 的两个节点就是这种
       写法，如 ``'{ "file_url": {{#node.file_url#}} }'``）。与 ``@body`` 的区别在于它由
       引用拼成，且引用的值恒为字符串、需要加引号；渲染结果按 JSON 解析后作为请求体；
     - ``@outputs``：响应字段映射，如 ``{"body": "$text", "status": "$status"}``；
@@ -101,7 +101,7 @@ def _resolve_body(
 ) -> Any:
     """还原请求体。
 
-    DSL 的 http 节点把请求体写成「含 ``{{#node.field#}}`` 引用的 JSON 文本」，例如
+    迁移前的定义的 http 节点把请求体写成「含 ``{{#node.field#}}`` 引用的 JSON 文本」，例如
     ``{ "file_url": {{#1773112560827.file_url#}} }``。它的含义是：把引用替换成**带引号的
     字符串值**，整体作为 JSON 发送。因此这里按引用逐段替换并对值做 JSON 转义，再解析成
     对象；解析失败说明模板本身不合法，直接报错而不是把坏载荷发出去。
@@ -116,9 +116,9 @@ def _resolve_body(
     text = str(template)
 
     def _substitute(source: str, raw: str) -> str:
-        """把模板里的 Dify 引用换成值。
+        """把模板里的节点引用换成值。
 
-        引用有两种位置，Dify 的语义不同，必须分开处理：
+        引用有两种位置，语义不同，必须分开处理：
 
         - **不在字符串里**（``{ "file_url": {{#n.f#}} }``）：值是字符串，要**补引号**；
         - **已在字符串里**（``{"value": "{{#n.f#}}"}"``）：直接插入并做 JSON 转义，
@@ -138,7 +138,7 @@ def _resolve_body(
                 return json.dumps(value, ensure_ascii=False)[1:-1]
             return _json_quote(value)
 
-        return DIFY_REF_IN_BODY.sub(_replace, source)
+        return NODE_REF_IN_BODY.sub(_replace, source)
 
     text = _substitute(text, text)
 
@@ -170,7 +170,7 @@ def _resolve_path(node: NodeDef, ctx: RunContext, config: Mapping[str, Any]) -> 
     路径里的 ``{{#node.field#}}`` 在定义里登记为 ``@path`` 绑定，因此这里直接把
     绑定值拼到字面路径上，不做通用字符串替换。
 
-    ``@url_field`` 声明「URL 整段来自绑定值」，此时不做拼接：DSL 里图片直链就是
+    ``@url_field`` 声明「URL 整段来自绑定值」，此时不做拼接：迁移前的定义里图片直链就是
     ``url: '{{#node.image_url#}}'``，本身没有字面前缀。
     """
     if config.get("@url_field"):
@@ -226,7 +226,7 @@ def _build_headers(
 def _map_outputs(node: NodeDef, config: Mapping[str, Any], attempt: Any) -> dict[str, Any]:
     """把响应映射成节点输出字段。
 
-    缺省同时给出 ``body``（文本）与 ``status``，因为 DSL 下游对 GET 的消费方式就是
+    缺省同时给出 ``body``（文本）与 ``status``，因为迁移前的定义下游对 GET 的消费方式就是
     取响应体文本（如人工确认提取节点把 ``body`` 当 JSON 字符串喂给 code 节点）。
     """
     mapping = config.get("@outputs") or {"body": "$text", "status": "$status"}
@@ -234,7 +234,7 @@ def _map_outputs(node: NodeDef, config: Mapping[str, Any], attempt: Any) -> dict
         "$text": attempt.response_text,
         "$status": attempt.status_code,
         "$json": _try_json(attempt.response_text),
-        # 图片/文件直链下载的响应体就是文件内容。Dify 把它包成 files（data URI 列表），
+        # 图片/文件直链下载的响应体就是文件内容。下载响应被包成 files（data URI 列表），
         # vision 节点消费的正是这个字段。这里按同一形态给出。
         "$files": _files_of(attempt),
     }
@@ -250,7 +250,7 @@ def _map_outputs(node: NodeDef, config: Mapping[str, Any], attempt: Any) -> dict
 
 
 def _files_of(attempt: Any) -> list[str]:
-    """把一次下载响应整理成 Dify 的 ``files`` 形态：一个 data URI 列表。
+    """把一次下载响应整理成 ``files`` 形态：一个 data URI 列表。
 
     返回列表而不是单个字符串，因为 vision 节点的 ``variable_selector`` 指向该字段后
     期望拿到列表（多图时逐张追加）。非图片内容按原样包成 ``data:`` URI，让语法保持
