@@ -102,6 +102,45 @@ def test_short_anchor_is_dropped():
     assert json.loads(result["dropped_detail"])[0]["reason"] == "anchor_too_short"
 
 
+def test_unique_short_anchor_is_kept():
+    """短但在原文里**只出现一次**的锚点应保留：长度只是「能否唯一定位」的代理指标。
+
+    R1 实测：226 条被长度门丢掉的短锚里 163 条在原文中唯一出现，切出来是确定的原文切片。
+    """
+    result = pipe.localize_claims(
+        records_json(record("试驾录音信息", "我以前做充电桩的，这两年没做了。")),
+        claims_json(claim(anchor="做充电桩")),
+    )
+    assert result["kept"] == 1
+    assert result["claims_json"] and "做充电桩" in json.loads(result["claims_json"])["claims"][0]["quote"]
+
+
+def test_repeated_short_anchor_is_still_dropped():
+    """短锚**出现多次**时定位有歧义 → 仍丢（这是原判据真正要防的情形）。"""
+    result = pipe.localize_claims(
+        records_json(record("试驾录音信息", "好的好的，我下周来，好的。")),
+        claims_json(claim(anchor="好的")),
+    )
+    assert result["kept"] == 0
+    assert json.loads(result["dropped_detail"])[0]["reason"] == "anchor_too_short"
+
+
+def test_anchor_below_floor_is_dropped_even_if_unique():
+    """短于下限（4 字）的锚点即使唯一也没有证据价值 → 丢。"""
+    result = pipe.localize_claims(
+        records_json(record("试驾录音信息", "下周一见面，下周一定来。")),
+        claims_json(claim(anchor="下周")),
+    )
+    assert result["kept"] == 0
+    assert json.loads(result["dropped_detail"])[0]["reason"] == "anchor_too_short"
+
+
+def test_occurrences_matches_locate_whitespace_fallback():
+    """计数与定位必须同口径，否则会出现「定位得到、计数数不到」的错位而白丢短锚。"""
+    assert pipe._occurrences("我 下 周 来 看 车", "我下周来看车") == 1
+    assert pipe._occurrences("好的好的", "好的") == 2
+
+
 def test_unknown_channel_is_dropped():
     """渠道对不上记录层 → 丢弃（断言指不到任何一份记录）。"""
     result = pipe.localize_claims(
@@ -249,12 +288,18 @@ def test_enum_key_guide_is_generated_from_contract_not_handcopied():
     assert "油耗" in guide and "讨厌被催" in guide and "限牌城市" in guide
 
 
-def test_l1_input_appends_guide_after_records():
-    """附录置于正文**之后**：对照表紧贴输出指令，不打断前面的记录阅读。"""
+def test_l1_input_places_guide_before_records():
+    """附录置于正文**之前**，让记录原文成为模型最后读到的内容。
+
+    R1 实测：附录放在末尾时，末尾那串短 token（``Mr=先生 / Ms=女士``）会把 anchor 也
+    诱导成同样短的裸串（同案中位锚长 16 → 6），大量正确断言因此过不了长度门。
+    """
     body = "（客户）我上次说的那个价格……"
     built = pipe.build_l1_input(records_json(record("外呼录音信息", body, kind="transcript")))
-    assert built["output"].index(body) < built["output"].index("可选字段的合法取值")
+    assert built["output"].index("可选字段的合法取值") < built["output"].index(body)
     assert built["guide_chars"] == len(pipe.enum_key_guide())
+    # 记录原文必须是**最后一段**：模型对上下文尾部最敏感。
+    assert built["output"].rstrip().endswith(body)
 
 
 # ---------------------------------------------------------------- project_claims
@@ -356,6 +401,24 @@ def test_overwrite_preserves_other_sections():
     assert json.loads(result["result1"])["analysis_result"]["emotion_state"] == {"emotion": "平静"}
 
 
+def test_empty_notes_never_blank_production_fields():
+    """L2 产出为空时**不得覆写**：一次空响应不该把 production 已填好的字段清空。
+
+    R1 实测 16761543238 的 L1 返回 `{"claims": []}`——合法 JSON、重试不触发，
+    照原实现覆写后 production 的 8 个字段全部消失。
+    """
+    payload = json.dumps(
+        {"analysis_result": {"basic_notes_updates": [
+            {"attribute_key": "title", "attribute_value": "Mr"}]}},
+        ensure_ascii=False,
+    )
+    out = pipe.overwrite_notes_updates(payload, "[]")
+    assert out["overwrite_applied"] is False
+    kept = json.loads(out["result1"])["analysis_result"]["basic_notes_updates"]
+    assert kept and kept[0]["attribute_key"] == "title"
+    assert out["overwrite_reason"]
+
+
 def test_overwrite_unparsable_result1_passes_through():
     """解不动就原样返回并留痕，不抛异常——notes 为空与整案失败是两件事。"""
     result = pipe.overwrite_notes_updates("{不是 JSON", "[]")
@@ -370,6 +433,7 @@ def test_overwrite_missing_analysis_result_passes_through():
 
 
 def test_overwrite_accepts_parsed_dict():
-    """result1 已是对象时也要能覆写。"""
-    result = pipe.overwrite_notes_updates({"analysis_result": {"basic_notes_updates": []}}, "[]")
-    assert result["overwrite_applied"] is True
+    """result1 已是对象时也要能覆写（用**非空**产出，空产出按设计不覆写，另有用例钉住）。"""
+    updates = json.dumps([{"attribute_key": "title", "attribute_value": "Mr"}], ensure_ascii=False)
+    result = pipe.overwrite_notes_updates({"analysis_result": {"basic_notes_updates": []}}, updates)
+    assert result["overwrite_applied"] is True and result["notes_count"] == 1

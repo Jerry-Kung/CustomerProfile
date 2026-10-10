@@ -728,6 +728,33 @@ def _claims_payload(claims_json) -> tuple[list[dict], bool]:
     return [c for c in data if isinstance(c, dict)], True
 
 
+MIN_SHORT_ANCHOR = 4
+"""短锚可用性的**下限**：短于这个长度即使唯一命中也不作数。
+
+``min_anchor``（8）是提示词给模型的口径，也是「长到足以唯一定位」的期望值；
+本常量是**代码侧能接受的最短引文**——再短就没有证据价值了（「好」「幺三九」
+这种切片指不回任何有内容的原话）。R1 实测的短锚绝大多数落在 4–7 字，都在此之上。
+"""
+
+
+def _occurrences(content: str, anchor: str) -> int:
+    """数 ``anchor`` 在 ``content`` 里出现几次（与 :func:`_locate` 同口径）。
+
+    逐字匹配优先；一次都没命中时按**忽略空白**再数一次——与 ``_locate`` 的回落一致，
+    否则会出现「``_locate`` 找得到、这里数不到」的错位，短锚会被白白丢掉。
+    """
+    if not content or not anchor:
+        return 0
+    count = content.count(anchor)
+    if count:
+        return count
+    compact_content = "".join(c for c in content if not c.isspace())
+    compact_anchor = "".join(c for c in anchor if not c.isspace())
+    if not compact_anchor:
+        return 0
+    return compact_content.count(compact_anchor)
+
+
 def _locate(content: str, anchor: str) -> tuple[int, int, str] | None:
     """在 ``content`` 里定位 ``anchor``，返回 ``(起, 止, 原文切片)``。
 
@@ -832,9 +859,11 @@ def build_l1_input(records_json) -> dict:
         sections.append("\n".join(header) + "\n\n" + str(record.get("content")))
 
     body = "\n\n---\n\n".join(sections)
-    # 枚举键清单置于**末尾**：它是对照表，紧贴输出指令之前，不打断前面的记录阅读。
+    # 枚举键清单置于**开头**：R1 实测把它放在末尾时，尾部这一串短 token（`Mr=先生 /
+    # Ms=女士`）会诱导模型把 anchor 也写成同样短的裸串（R0 中位锚长 16 → R1 的 6），
+    # 导致大量正确断言被长度门丢弃。改置开头，让**记录原文仍是最后读到的内容**。
     guide = enum_key_guide()
-    output = f"{body}\n\n---\n\n{guide}" if body else guide
+    output = f"{guide}\n\n---\n\n{body}" if body else guide
     return {
         "output": output,
         "section_count": len(sections),
@@ -851,8 +880,9 @@ def localize_claims(records_json, claims_json, min_anchor: int = 8) -> dict:
     丢弃口径：
 
     - 渠道对不上记录层 → 丢弃；
-    - ``anchor`` 短于 ``min_anchor``（提示词契约要求 >=8 字）→ 丢弃。过短的锚点极易
-      偶然命中，留下它换来的不是召回而是噪声；
+    - ``anchor`` 短于 ``min_anchor``**且在同一份记录里出现多次** → 丢弃。
+      长度不是目的，**能否唯一定位**才是：短锚只要在原文里唯一出现，切出来的仍是
+      确定的原文切片，没有引入歧义。R1 实测被长度门丢掉的 226 条里有 163 条属此类。
     - 在原文里找不到 → 丢弃。
 
     被丢弃的断言收集在 ``dropped_detail`` 里，供 R0/R1 逐案核对——静默丢弃会让人误以为
@@ -882,12 +912,17 @@ def localize_claims(records_json, claims_json, min_anchor: int = 8) -> dict:
             continue
 
         anchor = str(raw.get("anchor") or "").strip()
-        if len(anchor) < min_anchor:
-            dropped.append({"claim_id": raw.get("claim_id"), "reason": "anchor_too_short", "anchor": anchor})
-            continue
         located = _locate(content, anchor)
         if located is None:
             dropped.append({"claim_id": raw.get("claim_id"), "reason": "anchor_not_found", "anchor": anchor})
+            continue
+        # 短锚不一律丢，改为**看唯一性**：长度从来只是「能不能唯一定位」的代理指标，
+        # R1 实测 226 条短锚里 189 条逐字存在于原文、其中 163 条**只出现一次**——
+        # 也就是说它们在原文里本来就唯一可定位，长度门杀的是正确断言。
+        if len(anchor) < min_anchor and (
+            len(anchor) < MIN_SHORT_ANCHOR or _occurrences(content, anchor) != 1
+        ):
+            dropped.append({"claim_id": raw.get("claim_id"), "reason": "anchor_too_short", "anchor": anchor})
             continue
 
         start, end, quote = located
@@ -1016,6 +1051,18 @@ def overwrite_notes_updates(result1, notes_updates_json) -> dict:
             "overwrite_applied": False,
             "notes_count": 0,
             "overwrite_reason": "result1 缺少 analysis_result，保持原样",
+        }
+
+    # **空产出不得覆写**：R1 实测 16761543238 的 L1 返回 `{"claims": []}`（一次合法但为空的
+    # 响应，重试机制不会触发），若照此覆写，production 本来填好的 8 个字段会被一个字段都不剩
+    # 地清空——「L2 认定这些字段无据」与「L1 这次什么都没抽到」是完全不同的两件事。
+    # 按 D4「正确性优先」的口径，产出为空时保持 production 原样并留痕。
+    if not updates:
+        return {
+            "result1": json.dumps(payload, ensure_ascii=False, default=str),
+            "overwrite_applied": False,
+            "notes_count": 0,
+            "overwrite_reason": "L2 产出为空，保持 production 原样（避免空响应清空既有字段）",
         }
 
     analysis["basic_notes_updates"] = updates
