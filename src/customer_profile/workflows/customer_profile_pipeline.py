@@ -908,13 +908,15 @@ def localize_claims(records_json, claims_json, min_anchor: int = 8) -> dict:
         if content is None and channel:
             content = by_name.get(proj._match_channel(channel))
         if content is None:
-            dropped.append({"claim_id": raw.get("claim_id"), "reason": "unknown_channel", "channel": channel})
+            dropped.append({"claim_id": raw.get("claim_id"), "attribute": raw.get("attribute"),
+                            "reason": "unknown_channel", "channel": channel})
             continue
 
         anchor = str(raw.get("anchor") or "").strip()
         located = _locate(content, anchor)
         if located is None:
-            dropped.append({"claim_id": raw.get("claim_id"), "reason": "anchor_not_found", "anchor": anchor})
+            dropped.append({"claim_id": raw.get("claim_id"), "attribute": raw.get("attribute"),
+                            "reason": "anchor_not_found", "anchor": anchor})
             continue
         # 短锚不一律丢，改为**看唯一性**：长度从来只是「能不能唯一定位」的代理指标，
         # R1 实测 226 条短锚里 189 条逐字存在于原文、其中 163 条**只出现一次**——
@@ -922,7 +924,8 @@ def localize_claims(records_json, claims_json, min_anchor: int = 8) -> dict:
         if len(anchor) < min_anchor and (
             len(anchor) < MIN_SHORT_ANCHOR or _occurrences(content, anchor) != 1
         ):
-            dropped.append({"claim_id": raw.get("claim_id"), "reason": "anchor_too_short", "anchor": anchor})
+            dropped.append({"claim_id": raw.get("claim_id"), "attribute": raw.get("attribute"),
+                            "reason": "anchor_too_short", "anchor": anchor})
             continue
 
         start, end, quote = located
