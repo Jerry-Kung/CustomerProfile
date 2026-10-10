@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import json
+
 from customer_profile import notes_contract as nc
 from customer_profile import projection as proj
 from customer_profile.workflows import customer_profile_pipeline as pipe
@@ -281,3 +283,80 @@ def test_split_multi_handles_list_and_string():
     assert proj.split_multi("a||b") == ["a", "b"]
     assert proj.split_multi(["a", "b||c"]) == ["a", "b", "c"]
     assert proj.split_multi("single") == ["single"]
+
+
+# ---------------------------------------------------------------- h 落库序列化（R0 §5.2/契约）
+
+def test_multi_value_enum_serialized_with_double_pipe():
+    """多选枚举落库恒为 ``a||b`` 字符串（基线 18 个字段用此形态）。"""
+    result = proj.project([claim("emotion", "straightforward||hate_being_rushed")])
+    entry = next(u for u in result.notes_updates if u["attribute_key"] == "emotion")
+    assert entry["attribute_value"] == "straightforward||hate_being_rushed"
+    assert isinstance(entry["attribute_value"], str)
+
+
+def test_structured_enum_serialized_as_json_string():
+    """结构化枚举落库为 JSON **字符串**（基线 69 处全部如此），不是字典。"""
+    result = proj.project([claim("driver_license_status", '{"key":"yes","input_value":"5年"}')])
+    entry = next(u for u in result.notes_updates if u["attribute_key"] == "driver_license_status")
+    assert isinstance(entry["attribute_value"], str)
+    assert json.loads(entry["attribute_value"]) == {"key": "yes", "input_value": "5年"}
+
+
+def test_attribute_value_is_always_a_string():
+    """契约只认字符串：任何字段的 `attribute_value` 都不得是 list/dict。"""
+    result = proj.project(
+        [
+            claim("emotion", "straightforward||hate_being_rushed"),
+            claim("hobbies", "钓鱼", channel="试驾录音信息"),
+            claim("hobbies", "露营", channel="试驾录音信息"),
+            claim("driver_license_status", '{"key":"yes","input_value":"5年"}'),
+            claim("age", "40-49岁"),
+        ]
+    )
+    assert result.notes_updates
+    for entry in result.notes_updates:
+        assert isinstance(entry["attribute_value"], str), entry
+
+
+def test_facts_keep_rich_types_serialization_is_output_only():
+    """序列化只作用于 Notes 出口；``facts`` 仍保留 list/dict，供 L3 直接消费。"""
+    result = proj.project([claim("emotion", "straightforward||hate_being_rushed")])
+    assert isinstance(result.facts.get("emotion"), list)
+
+
+# ---------------------------------------------------------------- 聚合语义字段（R0 §5.2）
+
+def test_aggregate_text_field_sums_same_tier_values():
+    """聚合语义字段同档多值应**汇总**，不得判冲突留白（R0 实测爱好全丢的成因）。"""
+    result = proj.project(
+        [
+            claim("hobbies", "打篮球", channel="试驾录音信息"),
+            claim("hobbies", "按摩", channel="试驾录音信息"),
+            claim("hobbies", "喝酒吃烧鸡", channel="试驾录音信息"),
+        ]
+    )
+    entry = next(u for u in result.notes_updates if u["attribute_key"] == "hobbies")
+    assert entry["attribute_value"] == "打篮球、按摩、喝酒吃烧鸡"
+    assert not any(r["rule"] == "c_conflict" for r in result.rejected)
+
+
+def test_single_semantic_text_field_still_conflicts():
+    """单值语义字段同档互斥取值仍应留白转确认（宁空勿错），不被聚合规则误伤。"""
+    result = proj.project(
+        [
+            claim("occupation", "教师", channel="试驾录音信息"),
+            claim("occupation", "医生", channel="试驾录音信息"),
+        ]
+    )
+    assert "occupation" not in result.facts
+    assert any(t["attribute_key"] == "occupation" for t in result.to_confirm)
+
+
+def test_aggregate_key_set_is_deliberate():
+    """聚合集合是**决策产物**，不是「所有文本字段」——改动会静默改变留白行为。"""
+    assert proj.AGGREGATE_TEXT_KEYS == frozenset(
+        {"hobbies", "pain_points", "special_requirements", "intended_brand", "intended_model"}
+    )
+    # 集合内的字段都是契约里的自由文本字段（无 enum_options），否则归类无意义。
+    assert all(not nc.is_enum(k) for k in proj.AGGREGATE_TEXT_KEYS)

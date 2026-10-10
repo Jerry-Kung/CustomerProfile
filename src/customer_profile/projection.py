@@ -93,6 +93,35 @@ IDENTITY_SUBJECT_EXEMPT: frozenset[str] = frozenset({"family_structure"})
 「``subject != customer`` 的断言不得写入身份字段；**可写入家庭结构**、可进入卡片叙述」）。
 因此归属过滤对这一项放行，其余 15 个身份字段一律要求主体是客户本人。"""
 
+AGGREGATE_TEXT_KEYS: frozenset[str] = frozenset(
+    {
+        "hobbies",
+        "pain_points",
+        "special_requirements",
+        "intended_brand",
+        "intended_model",
+    }
+)
+"""**聚合语义**的自由文本字段：同来源档给出多个不同值时应当**汇总**，而不是判冲突留白。
+
+契约里这 21 个字段全是 `field_type: "text"`、`enum_options: null`，因此
+:func:`notes_contract.is_multi_value` 对它们一律为假。但「多个值算不算冲突」是**字段语义**
+问题，契约没给这个标志位：
+
+- **聚合语义**（本集合）：`hobbies`「钓鱼」「露营」并存不矛盾，是同一客户的多面；
+  判冲突会把整字段留白（R0 实测 `16761543238` 因此丢掉全部三个爱好）。
+- **单值语义**（其余 16 个文本字段）：`occupation`「教师」与「医生」互斥，
+  同档并列时确应留白转确认（宁空勿错）。
+
+集合的选取依据是契约 `description` 的措辞：「提取…兴趣爱好或生活话题」「提取非常规个性化
+需求」「提取客户购车正在考虑的**品牌**/**车型**」——这些描述本身就在要求**列举多项**；
+而 `occupation`「提取客户行业+职位」、`company`「提取客户具体供职的公司名称」等，
+描述指向**唯一取值**。
+
+**边界**：`usage_frequency`（描述输出「高频/中频/低频」）与 `budget_range`（上下限）
+虽可有多段表述，但描述指向单一结论，故不纳入本集合，仍走「同档多值 → 留白转确认」。
+"""
+
 # 跨产物字段：同一事实在卡片与 Notes 各有一处，L2 在这里**唯一化**。
 LEVEL_KEYS: tuple[str, ...] = ("deal_level", "business_opp_level")
 """等级在卡片里有两个载体（``profile_summary.deal_level`` 与
@@ -383,8 +412,13 @@ def project(
         best, same_tier = _pick_best(group)
         values = _diverse(claim.value for claim in same_tier)
 
-        if len(values) > 1 and not nc.is_multi_value(attribute):
+        if (
+            len(values) > 1
+            and not nc.is_multi_value(attribute)
+            and attribute not in AGGREGATE_TEXT_KEYS
+        ):
             # 同来源档给出多个不同值 → 不可判，留白转确认，绝不两个都写。
+            # 例外：聚合语义字段（见 AGGREGATE_TEXT_KEYS）本就该汇总，落到下方的 else 分支。
             result.to_confirm.append(
                 {
                     "attribute_key": attribute,
@@ -538,6 +572,53 @@ def _unify_level(result: Projection) -> None:
         )
 
 
+MULTI_JOIN = "||"
+"""多选**枚举**的落库连接符。契约提示词原文：多个选项值之间使用双竖线「||」连接。"""
+
+TEXT_JOIN = "、"
+"""自由文本**聚合**字段的落库连接符。与基线同形（`hobbies="美食、按摩/推拿"`）。"""
+
+
+def serialize_value(attribute: str, value: Any) -> str:
+    """把 ``facts`` 里的取值序列化成契约要求的**字符串**形态。
+
+    契约（`GET /config/note-attributes` 字段说明与 production 提示词）只认字符串：
+    `attribute_value` 一律是 ``str``，三种子形态各有约定——
+
+    - 结构化枚举项 → **JSON 字符串**，形如 ``{"key":"yes","input_value":"5年"}``；
+      基线 39 案实测 69 处全部如此（`family_structure` 16 / `driver_license_status` 23 /
+      `trade_in_requirement` 14 / `seating_requirement` 16）。
+    - 多选枚举 → ``a||b``。基线实测 18 个字段用此形态。
+    - 自由文本聚合 → 中文顿号连接。
+
+    阶段二实测违约：实验臂曾把 ``purchase_purpose`` 写成 ``["family"]``、
+    ``driver_license_status`` 写成字典，而基线同字段是字符串。这是**下游契约违约**，
+    与「枚举键填中文」同一性质，故在 L2 出口统一收口，不指望模型自觉。
+    """
+    if isinstance(value, Mapping) or (
+        isinstance(value, (list, tuple))
+        and any(isinstance(item, Mapping) for item in value)
+    ):
+        if isinstance(value, (list, tuple)):
+            items = list(value)
+        else:
+            items = [value]
+        return MULTI_JOIN.join(
+            json.dumps(item, ensure_ascii=False, default=str) for item in items
+        ) if len(items) > 1 else json.dumps(value, ensure_ascii=False, default=str)
+
+    if isinstance(value, (list, tuple)):
+        parts = [_as_text(item) for item in value]
+        parts = [part for part in parts if part]
+        if not parts:
+            return ""
+        if nc.is_enum(attribute) and nc.is_multi_value(attribute):
+            return MULTI_JOIN.join(parts)
+        return TEXT_JOIN.join(parts)
+
+    return _as_text(value)
+
+
 def _to_notes_updates(
     result: Projection, grouped: Mapping[str, list[Claim]]
 ) -> list[dict[str, Any]]:
@@ -557,6 +638,9 @@ def _to_notes_updates(
             continue
         if key == "age":
             value = normalize_age(value) or value
+        value = serialize_value(key, value)
+        if not value:
+            continue
 
         sources = grouped.get(key) or []
         evidence: list[str] = []
