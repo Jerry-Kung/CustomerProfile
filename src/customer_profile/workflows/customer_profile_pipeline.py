@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .. import notes_contract as nc
 from .. import projection as proj
 from ..definitions import WorkflowDef, make_node
 
@@ -760,6 +761,38 @@ def _locate(content: str, anchor: str) -> tuple[int, int, str] | None:
     return start, end, content[start:end]
 
 
+def enum_key_guide() -> str:
+    """把契约里的**合法枚举键清单**渲染成给 L1 看的附录。
+
+    **为什么要有这一段**：R0 实测（`docs/business_opt01/R0结果.md` §5.1）暴露，L1 原提示词
+    要求「照实写原始表述、归一化交给下游」，但 L2 的 ``normalize_enum`` 只能**精确匹配**
+    合法键或展示名，客户口语（「担心电池衰减」）一概归不了，断言整条被丢弃。基线能做对，
+    是因为 production 有 ``GET /config/note-attributes`` 把这份清单渲染进了提示词输入——
+    实验臂此前缺的正是这一段。
+
+    **清单由契约快照生成，不手抄**：字段一改附录跟着改，不会与
+    :mod:`customer_profile.notes_contract` 漂移。
+    """
+    lines = ["## 可选字段的合法取值（枚举字段必须用英文键）", ""]
+    for entry in nc.RAW_CONFIGS:
+        options = entry.get("enum_options")
+        if not options:
+            continue
+        plural = "多选，多个值用 || 连接" if options.get("multiple_value") else "单选"
+        parts: list[str] = []
+        for enum_key, value in (options.get("items") or {}).items():
+            if isinstance(value, dict):
+                display = value.get("display_name") or enum_key
+                extra = value.get("input_value")
+                parts.append(
+                    f"{enum_key}={display}（**需随带填{extra}**）" if extra else f"{enum_key}={display}"
+                )
+            else:
+                parts.append(f"{enum_key}={value}")
+        lines.append(f"- `{entry['attribute_key']}`（{plural}）：" + " / ".join(parts))
+    return "\n".join(lines)
+
+
 def build_l1_input(records_json) -> dict:
     """L1 取证层的输入装配：把有内容的渠道排成分节文本。
 
@@ -798,10 +831,15 @@ def build_l1_input(records_json) -> dict:
         header.append(f"内容形态：{record.get('content_kind') or 'text'}")
         sections.append("\n".join(header) + "\n\n" + str(record.get("content")))
 
+    body = "\n\n---\n\n".join(sections)
+    # 枚举键清单置于**末尾**：它是对照表，紧贴输出指令之前，不打断前面的记录阅读。
+    guide = enum_key_guide()
+    output = f"{body}\n\n---\n\n{guide}" if body else guide
     return {
-        "output": "\n\n---\n\n".join(sections),
+        "output": output,
         "section_count": len(sections),
-        "chars": sum(len(s) for s in sections),
+        "chars": len(output),
+        "guide_chars": len(guide),
     }
 
 
@@ -1279,7 +1317,7 @@ WORKFLOW = WorkflowDef(
             "code",
             after=(L0_RECORDS,),
             inputs={"records_json": (L0_RECORDS, "records_json")},
-            outputs=("output", "section_count", "chars"),
+            outputs=("output", "section_count", "chars", "guide_chars"),
             function=f"customer_profile.workflows.{SLUG}:build_l1_input",
         ),
         make_node(

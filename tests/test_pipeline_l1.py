@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 
+from customer_profile import notes_contract as nc
 from customer_profile.workflows import customer_profile_pipeline as pipe
 
 
@@ -198,9 +199,62 @@ def test_l1_input_keeps_transcript_verbatim():
     assert body in built["output"]
 
 
-def test_l1_input_empty_records():
+def test_l1_input_empty_records_still_carries_enum_guide():
+    """无记录时正文为空，但**枚举键附录恒在**——它是字段对照表，不随记录有无而变。"""
     built = pipe.build_l1_input("[]")
-    assert built["section_count"] == 0 and built["output"] == ""
+    assert built["section_count"] == 0
+    assert built["output"] == pipe.enum_key_guide()
+    assert built["guide_chars"] > 0
+
+
+# ---------------------------------------------------------------- 枚举键附录（R0 §5.1 修复）
+
+def test_enum_key_guide_covers_every_enum_field():
+    """附录必须逐条列出契约里**全部** 21 个枚举字段，不多不少。"""
+    guide = pipe.enum_key_guide()
+    listed = {
+        line.split("`")[1]
+        for line in guide.splitlines()
+        if line.startswith("- `") and line.count("`") >= 2
+    }
+    expected = {k for k in nc.ALL_KEYS if nc.is_enum(k)}
+    assert listed == expected
+    assert len(expected) == 21
+
+
+def test_enum_key_guide_marks_structured_input_value():
+    """结构化枚举要标出随带填写的字段名，否则 L2 只能补空串。"""
+    guide = pipe.enum_key_guide()
+    assert "有孩子（**需随带填孩子人数**）" in guide
+    assert "有（**需随带填驾龄年限**）" in guide
+    assert "需大空间（**需随带填乘坐人数**）" in guide
+    assert "有（**需随带填旧车品牌**）" in guide
+
+
+def test_enum_key_guide_labels_multi_value_fields():
+    """多选字段要标出「多个值用 || 连接」，与 L2 的落库序列化口径一致。"""
+    guide = pipe.enum_key_guide()
+    for key in ("purchase_purpose", "core_concerns", "driving_preference", "emotion", "frequent_social_media"):
+        line = next(l for l in guide.splitlines() if l.startswith(f"- `{key}`"))
+        assert "多选，多个值用 || 连接" in line
+    assert "多选" not in next(l for l in guide.splitlines() if l.startswith("- `purchase_type`"))
+
+
+def test_enum_key_guide_is_generated_from_contract_not_handcopied():
+    """附录是契约快照的投影：改契约则附录跟着变（钉住「不手抄」这一约束）。"""
+    guide = pipe.enum_key_guide()
+    for key in ("fuel_efficiency", "hate_being_rushed", "large_space", "needs_license"):
+        assert key in guide
+    # 展示名也在，模型才可能把口语对上
+    assert "油耗" in guide and "讨厌被催" in guide and "限牌城市" in guide
+
+
+def test_l1_input_appends_guide_after_records():
+    """附录置于正文**之后**：对照表紧贴输出指令，不打断前面的记录阅读。"""
+    body = "（客户）我上次说的那个价格……"
+    built = pipe.build_l1_input(records_json(record("外呼录音信息", body, kind="transcript")))
+    assert built["output"].index(body) < built["output"].index("可选字段的合法取值")
+    assert built["guide_chars"] == len(pipe.enum_key_guide())
 
 
 # ---------------------------------------------------------------- project_claims
