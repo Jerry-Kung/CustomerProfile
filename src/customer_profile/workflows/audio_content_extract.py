@@ -184,8 +184,12 @@ WORKFLOW = WorkflowDef(
             inputs={
                 "is_valid": (VALIDITY_CODE, "is_valid"),
                 "file_content": (PROOFREAD_LLM, "text"),
+                # 逐字原文（ASR 六字段数组文本）。取值自「识别结果提取」，**不经校对 LLM**。
+                # 供 L0 记录层留存原文用：`file_content` 是校对后的产物，且内容判为无效时
+                # 会被替换成一句固定提示，逐字原话在那条路径上会整个丢失。
+                "auc_result": (EXTRACT_RESULT, "auc_result"),
             },
-            outputs=("is_valid", "file_content"),
+            outputs=("is_valid", "file_content", "auc_result"),
         ),
         make_node(
             END_INVALID,
@@ -195,8 +199,10 @@ WORKFLOW = WorkflowDef(
             inputs={
                 "is_valid": (VALIDITY_CODE, "is_valid"),
                 "file_content": (NO_CONTENT_TEMPLATE, "output"),
+                # 同上：内容判无效也要留下原文，否则「输入有录音、输出却说无录音」无法纠正。
+                "auc_result": (EXTRACT_RESULT, "auc_result"),
             },
-            outputs=("is_valid", "file_content"),
+            outputs=("is_valid", "file_content", "auc_result"),
         ),
     ),
 )

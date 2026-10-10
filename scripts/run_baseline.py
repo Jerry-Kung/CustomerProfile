@@ -510,7 +510,9 @@ async def run_batch(args: argparse.Namespace) -> int:
         "created_at": previous.get("created_at")
         or datetime.now(timezone.utc).isoformat(),
         "code_commit": commit,
-        "workflow_id": ENTRY_WORKFLOW,
+        # 记录**实际使用**的入口工作流，而不是缺省常量：AB 两臂共用本脚本，
+        # 写死会让实验臂的 manifest 声称自己跑的是基线图，可比性判据随之失效。
+        "workflow_id": args.workflow_id,
         "phones_source": str(source_list),
         "phones_count": len(snapshot_phones),
         "phones_sha256": hashlib.sha256(list_bytes).hexdigest(),
@@ -560,6 +562,7 @@ async def run_batch(args: argparse.Namespace) -> int:
                     timeout=args.per_phone_timeout,
                     policy=policy,
                     batch_dir=batch_dir,
+                    workflow_id=args.workflow_id,
                 )
                 results[phone] = item
                 _log(
@@ -615,6 +618,13 @@ async def run_batch(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="数据基线：批量跑真实工作流并归档留痕")
     parser.add_argument("--batch-id", default=None, help="缺省按 UTC 时刻 + 提交号生成")
+    parser.add_argument(
+        "--workflow-id", default=ENTRY_WORKFLOW,
+        help=(
+            "入口工作流 ID（缺省 %(default)s）。AB 实验用它区分两臂："
+            "基线臂 customer_profile_entry、实验臂 customer_profile_pipeline"
+        ),
+    )
     parser.add_argument("--phones", default=str(DEFAULT_PHONES), help="手机号清单文件")
     parser.add_argument("--only", default=None, help="只跑这些号码，逗号分隔")
     parser.add_argument(
@@ -656,6 +666,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if not 1 <= args.concurrency <= MAX_CONCURRENCY:
         raise SystemExit(f"--concurrency 须在 1..{MAX_CONCURRENCY} 之间，实际 {args.concurrency}")
+    # 开跑前把工作流 ID 判掉：拼错一个字母就会在跑完几十个号码之后才以「子工作流未注册」
+    # 暴露，或者更糟——静默跑成另一张图。这里只做「能不能取到定义」的检查，不建服务、不出网。
+    from customer_profile.workflows import load_all  # noqa: PLC0415
+
+    if args.workflow_id not in load_all():
+        raise SystemExit(
+            f"--workflow-id {args.workflow_id!r} 未定义；已定义：{sorted(load_all())}"
+        )
     return asyncio.run(run_batch(args))
 
 

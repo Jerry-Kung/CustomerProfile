@@ -34,6 +34,7 @@ WORKFLOW_MODULES: tuple[str, ...] = (
     "customer_profile.workflows.phone_company_analysis",
     "customer_profile.workflows.customer_profile_production",
     "customer_profile.workflows.customer_profile_entry",
+    "customer_profile.workflows.customer_profile_pipeline",
 )
 
 
