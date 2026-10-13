@@ -1,7 +1,7 @@
 /**
  * 提交任务。
  *
- * 这是运行台**唯一**的写操作。四条口径：
+ * 这是运行台**唯一**的写操作。五条口径：
  *
  * 1. **只服务主入口的手机号触发。** 本次不做通用入参表单：其它工作流的入参契约各不相同
  *    （录音类要 `customer_data` / `data_source`），做成一个「什么都能填」的表单等于假装
@@ -10,8 +10,10 @@
  *    往返；**不替代**后端校验——真正生效的是后端那条。
  * 3. **提交中禁用按钮。** 真实运行一次约二十一分钟，重复点击会堆叠真实模型调用，
  *    而后端会以 429 拒绝后来者。禁用是最容易做对的一道闸门。
- * 4. **成功后跳运行详情**，不在这里显示进度。详情页已能表达过程（依赖图 + 时间线 +
- *    每次尝试）并支持子运行下钻，另做一套简化进度视图等于维护第二份展示逻辑。
+ * 4. **成功后跳运行详情**，不在这里显示进度。详情页已能表达过程并支持子流程下钻，
+ *    另做一套简化进度视图等于维护第二份展示逻辑。
+ * 5. **运行态原样报，不美化。** 回写关闭时运行仍会显示成功，这一点必须写在页面上，
+ *    否则「成功」会被读成「已写进生产库」。
  */
 
 import { useState } from 'react'
@@ -61,7 +63,7 @@ export function SubmitRun({ runtime, onSubmitted }: SubmitRunProps) {
   return (
     <div className="submit-run">
       <form
-        className="submit-form"
+        className="card submit-form"
         onSubmit={(event) => {
           event.preventDefault()
           void submit()
@@ -94,51 +96,59 @@ export function SubmitRun({ runtime, onSubmitted }: SubmitRunProps) {
           onChange={(event) => setBatchId(event.target.value)}
         />
 
-        <button type="submit" disabled={!looksValid || submitting}>
+        <button type="submit" className="btn btn-primary" disabled={!looksValid || submitting}>
           {submitting ? '提交中…' : '提交任务'}
         </button>
 
-        {trimmed !== '' && !looksValid && (
+        {trimmed !== '' && !looksValid ? (
           <div className="submit-warn">
             手机号须为 11 位中国大陆号码（1 开头，第二位 3-9）
           </div>
-        )}
-        {error && <div className="submit-error">{error}</div>}
+        ) : null}
+        {error ? <div className="submit-error">{error}</div> : null}
       </form>
 
-      {runtime && (
-        <aside className="submit-runtime">
+      {runtime ? (
+        <aside className="card runtime-card">
           <h3>当前运行态</h3>
-          <dl>
-            <dt>回写</dt>
-            <dd className={runtime.writeback_enabled ? '' : 'runtime-off'}>
-              {runtime.writeback_enabled
-                ? '开启（会写入生产库）'
-                : '已关闭（不回写生产库）'}
-            </dd>
-            <dt>回放</dt>
-            <dd>
-              {runtime.replay_mode === 'off'
-                ? '关闭（走真实模型与接口）'
-                : `开启（${runtime.replay_mode}，不出网）`}
-            </dd>
-            <dt>模型</dt>
-            <dd>{runtime.llm_model || '—'}</dd>
-            <dt>并发</dt>
-            <dd>
-              {runtime.max_active_runs === null
-                ? '不限制'
-                : `${runtime.active_runs ?? 0}/${runtime.max_active_runs}`}
-            </dd>
+          <dl className="runtime-list">
+            <div>
+              <dt>回写</dt>
+              <dd className={runtime.writeback_enabled ? '' : 'runtime-off'}>
+                {runtime.writeback_enabled
+                  ? '开启（会写入生产库）'
+                  : '已关闭（不回写生产库）'}
+              </dd>
+            </div>
+            <div>
+              <dt>回放</dt>
+              <dd>
+                {runtime.replay_mode === 'off'
+                  ? '关闭（走真实模型与接口）'
+                  : `开启（${runtime.replay_mode}，不出网）`}
+              </dd>
+            </div>
+            <div>
+              <dt>模型</dt>
+              <dd>{runtime.llm_model || '—'}</dd>
+            </div>
+            <div>
+              <dt>并发</dt>
+              <dd>
+                {runtime.max_active_runs === null
+                  ? '不限制'
+                  : `${runtime.active_runs ?? 0}/${runtime.max_active_runs}`}
+              </dd>
+            </div>
           </dl>
-          {!runtime.writeback_enabled && (
+          {!runtime.writeback_enabled ? (
             <p className="submit-hint">
               回写被 <code>WRITEBACK_ENABLED=false</code> 拦下时，回写节点只产出
               「已跳过」的结果，而运行仍会显示成功——**成功不等于画像已写进生产库**。
             </p>
-          )}
+          ) : null}
         </aside>
-      )}
+      ) : null}
     </div>
   )
 }

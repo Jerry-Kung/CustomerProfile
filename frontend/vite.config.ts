@@ -12,13 +12,12 @@ export default defineConfig({
     proxy: {
       '/workflows': 'http://127.0.0.1:8000',
       '/runs': 'http://127.0.0.1:8000',
-      '/definition-versions': 'http://127.0.0.1:8000',
       '/health': 'http://127.0.0.1:8000',
     },
   },
   build: {
     outDir: 'dist',
-    // 产物入库（docs/specs/V0.4只读运行台.md §4），因此关掉 sourcemap 缩小体积。
+    // 产物入库（docs/history/V0.4只读运行台.md §4），因此关掉 sourcemap 缩小体积。
     sourcemap: false,
   },
 })

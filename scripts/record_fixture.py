@@ -46,7 +46,7 @@ PHONE_PATTERN = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 """中国大陆手机号。录制结果里出现它就意味着真实客户信息，必须掩码。"""
 
 SECRET_PATTERN = re.compile(r"sk-[A-Za-z0-9_\-]{6,}")
-"""API 密钥。台账提取器用的是同一形状（见 ledger/secrets_report.md）。"""
+"""API 密钥。录制结果里绝不能留下它。"""
 
 MASK = "***REDACTED***"
 
@@ -153,7 +153,7 @@ def read_first_phone() -> str:
 
 
 def parse_inputs(pairs: list[str]) -> dict[str, Any]:
-    """把 ``k=v`` 列表转成入参字典。值一律按字符串处理（与 Dify 入参一致）。"""
+    """把 ``k=v`` 列表转成入参字典。值一律按字符串处理（与工作流入参的字符串契约一致）。"""
     result: dict[str, Any] = {}
     for pair in pairs:
         key, sep, value = pair.partition("=")

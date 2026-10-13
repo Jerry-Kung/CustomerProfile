@@ -1,10 +1,10 @@
 """``支付宝个人页信息提取`` 的 Python 定义。
 
-DSL 基线：18 节点 / 18 边，与其余 6 个截图流程**图结构逐节点相同**，只有渠道名
+迁移前的定义基线：18 节点 / 18 边，与其余 6 个截图流程**图结构逐节点相同**，只有渠道名
 （``AlipayPersonalPageScreenshot``）与提示词正文不同。因此这里只给出参数，结构复用
 :mod:`customer_profile.workflows.screenshot_flow`。
 
-渠道名来自 DSL ``start`` 节点由父图传入的 ``data_source`` 字面量；图片直链来自
+渠道名来自迁移前的定义 ``start`` 节点由父图传入的 ``data_source`` 字面量；图片直链来自
 ``GET /api/v1/remote/data/history/{phone}`` 响应里 ``channel == AlipayPersonalPageScreenshot``
 那条记录的 ``media_urls``。
 """
@@ -17,8 +17,8 @@ from ..definitions import WorkflowDef
 from .screenshot_flow import ScreenshotFlow, build_screenshot_workflow
 
 WORKFLOW_ID = "alipay_homepage"
-DISPLAY_NAME = "（新）SubAgent - 支付宝个人页信息提取"
-SOURCE_DSL = f"{DISPLAY_NAME}.yml"
+DISPLAY_NAME = "支付宝个人页信息提取"
+
 DATA_SOURCE = "AlipayPersonalPageScreenshot"
 
 FLOW = ScreenshotFlow(

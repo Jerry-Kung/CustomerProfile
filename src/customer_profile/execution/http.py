@@ -2,10 +2,9 @@
 
 三件事必须在这里做对：
 
-1. **不把 DSL 原值直接传给 HTTP 库。** ``timeout: 0``、无单位的 ``retry_interval``
-   语义不明（规划 Q5），一律走显式配置的默认值。
-2. **写请求不自动重试。** 超时可能发生在服务端已完成写入之后（`Dify迁移任务说明.md`
-   §7.1）。POST 默认 ``retry_max=0``，需要重试须在节点配置里显式声明。
+1. **不把迁移前的定义的取值直接传给 HTTP 库。** ``timeout: 0``、无单位的 ``retry_interval``
+   语义不明，一律走显式配置的默认值。
+2. **写请求不自动重试。** 超时可能发生在服务端已完成写入之后（既定约束）。POST 默认 ``retry_max=0``，需要重试须在节点配置里显式声明。
 3. **凭据永不落痕。** ``X-API-Key``、``Authorization`` 在写记录前被替换为掩码（§6）。
 """
 
@@ -205,7 +204,7 @@ class HttpClient:
         """发起一次请求，返回**最后一次成功的尝试**；全部失败时抛 :class:`HttpCallError`。
 
         重试策略：GET 类幂等方法按配置重试；写方法默认不重试，除非显式传
-        ``retry_enabled=True``（调用方需自行确认接口幂等，规划 Q2）。
+        ``retry_enabled=True``（调用方需自行确认接口幂等）。
 
         ``service="auc"`` 时转交 :class:`~customer_profile.execution.auc.AucClient`：
         该服务的真实实现对内是「一次调用内跑完提交 + 轮询」，与逐次请求的模型不同，
@@ -261,7 +260,7 @@ class HttpClient:
             enabled = True if retry_enabled is None else retry_enabled
             budget = self._settings.http_retry_max if retry_max is None else retry_max
         else:
-            # 写方法：默认不自动重试（Q2 缺省处理）
+            # 写方法：默认不自动重试
             enabled = bool(retry_enabled)
             budget = 0 if retry_max is None else retry_max
         return max(1, budget + 1) if enabled else 1

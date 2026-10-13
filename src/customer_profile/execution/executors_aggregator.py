@@ -1,12 +1,12 @@
 """``variable-aggregator`` 节点执行器。
 
-DSL 里这个节点负责「多个来源里取一个可用值」，两种形态：
+迁移前的定义里这个节点负责「多个来源里取一个可用值」，两种形态：
 
 - **普通形态**（22 处）：给一组 ``variables``，取其中第一个可用的。
 - **分组形态**（1 处，``人设特征判断`` 节点 ``1776760747042``）：``advanced_settings``
   之下开 ``group_enabled``，每组各自聚合，输出是一个**多字段对象**，下游按属性取。
 
-**取值口径（有意差异 P4，见差异清单）**：判据是「该来源节点是否真的执行过」
+**取值口径**：判据是「该来源节点是否真的执行过」
 （``ctx.has``），而不是「取到的值是否非空」。理由：空字符串是合法产出——
 ``无数据，输出默认信息`` 这类模板节点的正常结果就是一段固定提示文本、各截图流程的
 code 节点在「没找到该 channel」时也**明确返回空串**。若用非空判据，这些正常结果会被
@@ -43,7 +43,7 @@ async def execute_variable_aggregator(
     - ``variables``：``[(node_id, field), ...]``，按优先级排列。也可由绑定的
       ``@variables`` 键给出（定义层通常直接写在 ``config["variables"]``）；
     - ``groups``：分组形态，``[{name, output_type, variables}, ...]``；
-    - ``output``：输出字段名（缺省 ``output``，与 Dify 的默认输出名一致）；
+    - ``output``：输出字段名（缺省 ``output``，与迁移前的定义的默认输出名一致）；
     - ``output_type``：用于回写时的类型还原（``string`` / ``any`` …）。
     """
     groups = node.config.get("groups")
@@ -79,7 +79,7 @@ def _execute_grouped(
     """分组聚合：每组各取第一个已执行的来源，每组包成 ``{"output": 值}``。
 
     输出字段名即组名（``hobby`` / ``consumption``）。**每组的值是对象而不是裸值**：
-    DSL 里下游 ``code`` 节点取的是 ``hobby_result_object["output"]``，且把这两个入参
+    迁移前的定义里下游 ``code`` 节点取的是 ``hobby_result_object["output"]``，且把这两个入参
     声明为 ``value_type: object``。返回裸字符串会让那段 code 直接 ``KeyError``，
     因此这里按下游实际消费的形态产出（P3 的实测口径）。
     """
@@ -114,7 +114,7 @@ def _execute_grouped(
                 f"variable-aggregator 节点 {node.node_id} 的分组 {name!r} 全部来源都未产出结果："
                 f"{[f'{n}.{f}' for n, f in variables]}"
             )
-        # 包成 {"output": 值}：下游 code 按 ["output"] 取值（DSL 已明确）
+        # 包成 {"output": 值}：下游 code 按 ["output"] 取值（迁移前的定义已明确）
         result[name] = {"output": value}
         if origin:
             result.setdefault("_origins", {})[name] = origin

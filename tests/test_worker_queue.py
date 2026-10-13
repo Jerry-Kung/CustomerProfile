@@ -289,7 +289,7 @@ async def test_queue_full_becomes_http_429(tmp_path):
             service.store.close()
 
 
-# ---------------------------------------------------------------- 补列迁移
+# ---------------------------------------------------------------- 补列机制
 
 
 def test_migration_adds_missing_columns_to_an_existing_db(tmp_path):

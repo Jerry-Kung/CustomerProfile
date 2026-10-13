@@ -1,7 +1,7 @@
 """对外契约：入参口径与最终产出形态。
 
-主入口 `（新）客户初始画像（生产环境）` 是外部系统唯一的调用面
-（`Dify迁移任务说明.md` §3.1）。它的入参名、必填性、以及 ``result1`` 的类型
+主入口 `客户初始画像` 是外部系统唯一的调用面
+。它的入参名、必填性、以及 ``result1`` 的类型
 一旦漂移，上游调用方就会静默出错——因此这里逐项钉住，而不是依赖某个端到端用例
 顺带覆盖。
 
@@ -102,7 +102,7 @@ def _runtime(settings: Settings, stub) -> NodeRuntime:
 async def test_entry_result1_is_a_string(tmp_path):
     """``result1`` 必须是**字符串**。
 
-    这是最容易在迁移中被无意改掉的契约：Dify 的 ``end`` 节点原样透传，而子流程内部
+    这是最容易在改造中被无意改掉的契约：``end`` 节点原样透传，而子流程内部
     的结构化结果（证据数组、三段画像）很容易被顺手一并带出来。上游按文本消费，
     拿到对象就会出错。
     """
@@ -152,13 +152,13 @@ async def test_entry_tool_nodes_declare_subworkflows():
 
 
 def test_entry_graph_shape_is_five_nodes_four_edges():
-    """有意差异 W1：入口图是 5 节点 / 4 边（删去了冗余的第二个回写节点）。"""
+    """入口图是 5 节点 / 4 边：迁移时删去了冗余的第二个回写节点。"""
     assert len(entry.WORKFLOW.nodes) == 5
     assert len(entry.WORKFLOW.edge_list()) == 4
 
 
 def test_entry_removed_writeback_node_is_absent():
-    """W1 删除的节点确实不在图里，且它引用的边也没有残留。"""
+    """被删的那个回写节点确实不在图里，且它引用的边也没有残留。"""
     assert entry.REMOVED_NODES[0] not in entry.WORKFLOW.node_map
     for source, target in entry.REMOVED_EDGES:
         assert (source, target) not in {

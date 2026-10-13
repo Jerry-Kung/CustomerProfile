@@ -1,12 +1,12 @@
 """``iteration`` 节点执行器。
 
-Dify 的迭代由两半组成：``iteration`` 节点声明迭代配置，``iteration-start`` 是循环体
-入口哨兵，循环体内的节点（``isInIteration`` 为真、带 ``iteration_id``）挂在**迭代节点
+迭代由两半组成：``iteration`` 节点声明迭代配置，``iteration-start`` 是循环体
+入口哨兵，循环体内的节点（带 ``iteration_id`` 归属标记）挂在**迭代节点
 内部**，与父图没有直接连边。
 
 三处关键口径，都是有意的：
 
-1. **串行执行（P1，见差异清单）**：实测 8 处迭代全部是 ``is_parallel: false`` +
+1. **串行执行（P1，见 ``docs/design/执行语义口径.md``）**：实测 8 处迭代全部是 ``is_parallel: false`` +
    ``parallel_nums: 10``。``is_parallel`` 是权威信号，``parallel_nums`` 在其下不生效，
    因此逐项串行，不引入并发。
 2. **失败即终止（P2）**：8 处全部 ``error_handle_mode: terminated``。某项失败即终止
@@ -48,8 +48,7 @@ async def execute_iteration_start(
 ) -> ExecutionOutcome:
     """``iteration-start`` 哨兵：把当前项暴露为 ``item`` 与 ``index``。
 
-    它自身不含逻辑，只是 Dify 表达「循环体入口」的方式（规划 §6.2：这类节点可在行为
-    等价的前提下并入顺序代码）。在本实现里它仍是一个真实节点，因为循环体要按依赖顺序
+    它自身不含逻辑，只是表达「循环体入口」的方式。在本实现里它仍是一个真实节点，因为循环体要按依赖顺序
     执行，哨兵提供了「谁的输出是当前项」这个明确的来源。
     """
     item = ctx.iteration_locals.get("item", _UNSET)
@@ -75,7 +74,7 @@ async def execute_iteration(
 
     - ``@iterator`` / ``iterator_selector`` 绑定：被遍历的数组来源；
     - ``@output`` / ``output_selector`` 绑定：每项收集的字段来源（在循环体内）；
-    - ``body``：循环体节点 ID（不含迭代节点自身），由定义层按 DSL 的
+    - ``body``：循环体节点 ID（不含迭代节点自身），由定义层按迁移前的定义的
       ``iteration_id`` 归属整理；
     - ``flatten_output``：是否把每项结果展开（实测全部为 ``true``）；
     - ``error_handle_mode``：``terminated`` 时某项失败即终止整轮。

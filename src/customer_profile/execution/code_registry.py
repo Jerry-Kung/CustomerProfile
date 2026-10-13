@@ -1,8 +1,8 @@
 """``code`` 节点的函数登记表。
 
-原 Dify ``code`` 节点里的 Python 直接提取为普通函数，登记在这里，节点定义只保存一个
+``code`` 节点里的 Python 直接提取为普通函数，登记在这里，节点定义只保存一个
 ``config['function']`` 引用。这样业务逻辑是「人写的普通代码」，而不是节点图的一部分
-（规划 §6.1）。
+。
 
 登记用 ``module:callable`` 形式，例如
 ``customer_profile.workflows.mengshi_it_system_data:extract_channel_payload``。

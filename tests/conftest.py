@@ -4,9 +4,8 @@
 
 1. **不触达外网。** 所有测试用固定响应（``ReplaySource``）或纯确定性代码节点。
    DB 用临时文件，测试之间互不干扰。
-2. **缺 DSL 时跳过而非失败。** ``dify_dsl_data/`` 被 gitignore，业务方提供后才能跑
-   逐字符比对。相关测试用 ``requires_dsl`` 标记跳过，并在跳过原因里说明缺什么，
-   不伪装成通过。
+2. **不出网也能覆盖全部路径。** 需要真实模型或外部服务的用例一律走回放固定响应，
+   不依赖任何本地外部文件；测试在干净检出上应当全绿，不出现「缺文件所以跳过」。
 """
 
 from __future__ import annotations
@@ -21,18 +20,7 @@ from customer_profile.runner import build_service
 from customer_profile.settings import Settings
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DSL_DIR = REPO_ROOT / "dify_dsl_data"
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "replay"
-
-requires_dsl = pytest.mark.skipif(
-    not DSL_DIR.is_dir(),
-    reason=f"缺少 {DSL_DIR}（被 gitignore，需业务方提供）——逐字符比对无法执行",
-)
-
-
-@pytest.fixture(scope="session")
-def dsl_dir() -> Path:
-    return DSL_DIR
 
 
 def make_settings(tmp_path: Path, **overrides) -> Settings:

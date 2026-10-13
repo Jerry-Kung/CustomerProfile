@@ -1,4 +1,4 @@
-"""``@body_template``：把含 Dify 引用的 JSON 文本还原成请求体。
+"""``@body_template``：把含节点引用的 JSON 文本还原成请求体。
 
 这条路径此前**没有任何测试覆盖**——300 项测试全绿，而它实际是坏的：源码里写的是
 ``ctx.get(*parse_selector(...))``，而 ``ctx`` 是 ``RunContext``，没有 ``get``
@@ -7,7 +7,7 @@
 
 录音文件内容抽取的 ``/submit_analyze`` 与 ``/query_analyze`` 使用这条路径；
 画像回写直接绑定 JSON 对象，由 ``test_m2m_writeback.py`` 验证。
-这里按**引用位置**分别钉住两种 Dify 语义。
+这里按**引用位置**分别钉住两种引用语义。
 """
 
 from __future__ import annotations
