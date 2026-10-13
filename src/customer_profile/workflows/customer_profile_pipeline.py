@@ -88,35 +88,50 @@ OUTBOUND_EXTRACT = "pipeline_outbound_extract"
 CHANNEL_BUNDLE = "pipeline_channel_bundle"
 L0_RECORDS = "pipeline_l0_records"
 L4_TRIAGE = "pipeline_l4_triage"
-EVIDENCE_INPUT = "pipeline_evidence_input"
 
-# —— L1 取证层 / L2 投影层 / T5 兼容覆写
+# —— L1 取证层 / L2 投影层
 L1_INPUT = "pipeline_l1_input"
 L1_LLM = "pipeline_l1_llm"
 L1_LOCALIZE = "pipeline_l1_localize"
 L2_PROJECT = "pipeline_l2_project"
-NOTES_OVERWRITE = "pipeline_notes_overwrite"
+L2_FALLBACK = "pipeline_l2_fallback"
+L2_APPLY = "pipeline_l2_apply"
 
-# —— 取证与成文（复用既有工作流与提示词）
-EVIDENCE_LLM = "pipeline_evidence_llm"
-STANDARD_AGGREGATE = "pipeline_standard_aggregate"
-PROFILE = "pipeline_profile"
+# —— L3 成文段
 PRODUCTION = "pipeline_production"
 
 SHARED_CODE_MODULE = "customer_profile.workflows.shared_code"
-EVIDENCE_MODULE = "customer_profile.workflows.evidence_subagent"
 SLUG = "customer_profile_pipeline"
 SYSTEM_TEXT = "You are a helpful AI assistant."
 HISTORY_PATH = "/api/v1/remote/data/history/"
 LITERAL = "@literal:"
 
-# 复用既有工作流的提示词资源名（正文不改，只改喂进去的输入）。
-EVIDENCE_PROMPT_TEMPLATE = "evidence_subagent__1777366329758"
-# 复用既有子流程的 ID（取数层与成文层）
-EVIDENCE_WORKFLOW = "evidence_subagent"
-PROFILE_WORKFLOW = "profile_features_analysis"
-PRODUCTION_WORKFLOW = "customer_profile_production"
-AUDIO_EXTRACT_WORKFLOW = "audio_content_extract"
+L3_WORKFLOW = "customer_profile_l3"
+"""v2 的成文段：代码校验 + 1 次表达 + 代码装配（设计稿 §7）。
+
+替代 production 的 12 个 LLM 节点：那张图里 9 个 section 与 Notes **各自生成**，
+是本项目的主要成本项与「卡片与 Notes 不一致」的根源。"""
+AUDIO_EXTRACT_WORKFLOW = "audio_content_extract_pure"
+"""录音抽取子流程。
+
+**注意指向的是 v2 的纯识别变体，不是 ``audio_content_extract`` 原件。** 本管线只消费
+``auc_result``（逐字 ASR 数组），原件的「LLM 识别结果校对」与「LLM 内容有效性判断」
+两个节点照跑但产物一个字节不用（R1b 实测 2,559,841 + 856,156 token，全批 41.1% 成本里
+的一大块）。纯变体零 LLM 节点，交出的 ``auc_result`` 与原件逐字节相同。
+
+**为什么是变体而不是就地删节点**：原件被**基线臂**的 ``test_drive_audio`` /
+``outbound_call_audio`` 复用（``audio_flow`` 的两处调用点），就地删除会让基线臂图结构
+改变、``definition_hash`` 漂移，AB 可比性判据失效。
+"""
+
+MOMENTS_PURE = "moments_info_pure"
+"""朋友圈截图子流程：同样指向纯识别变体（关掉「多图片内容总结」）。"""
+
+TEST_DRIVE_PURE = "test_drive_audio_pure"
+"""试驾录音链路：纯识别变体（关掉图内的「录音文件分析」与其内部的两个 LLM 节点）。"""
+
+OUTBOUND_CALL_PURE = "outbound_call_audio_pure"
+"""外呼录音链路：纯识别变体。"""
 
 
 def template_name(node_id: str) -> str:
@@ -125,6 +140,9 @@ def template_name(node_id: str) -> str:
 
 L1_PROMPT_TEMPLATE = template_name(L1_LLM)
 """L1 取证提示词资源名（口径 B · 锚点定位，2026-10-10 定稿）。"""
+
+L2_FALLBACK_TEMPLATE = template_name(L2_FALLBACK)
+"""L2 兜底提示词资源名（受约束的裁决者，见 `端到端方案设计.md` §6.3）。"""
 
 
 # ====================================================================
@@ -722,7 +740,10 @@ def _claims_payload(claims_json) -> tuple[list[dict], bool]:
         except ValueError:
             return [], False
     if isinstance(data, dict):
-        data = data.get("claims")
+        # v2 起 L1 输出键是 ``fields``（字段级结论表）；v1 与既有批次产物是 ``claims``
+        # （断言账本）。两者条目形状同构，**都要认**——否则一切离线回放（R1b 的 13 案
+        # 产物、全部既有用例）都会在改键当天失效。
+        data = data.get("fields", data.get("claims"))
     if not isinstance(data, (list, tuple)):
         return [], False
     return [c for c in data if isinstance(c, dict)], True
@@ -820,6 +841,68 @@ def enum_key_guide() -> str:
     return "\n".join(lines)
 
 
+FIELD_SOURCE_NOTES: dict[str, str] = {
+    "planned_purchase_time": "从沟通记录里的时间表述推断（「这个月想定」「过完年再看」），"
+    "**不得**用手机号归属地、社媒截图、企业信息去猜。",
+    "follow_up_frequency": "从沟通记录本身推断（客户回复的快慢、主动催问的频率、"
+    "约定下次联系的口径）。",
+    "communication_rhythm": "从多轮沟通的整体形态归纳（是否当场答复、是否反复改口、"
+    "是否拖延不回），原文里不会有对应句子。",
+    "personality_and_preferences": "从客户在沟通中关心什么、怎么问、怎么砍价归纳，"
+    "原文里不会有对应句子。",
+    "emotion": "从客户在沟通中的语气与反应归纳，原文里不会有对应句子。",
+    "annual_income": "从职业、在职年限、现有车辆、消费与居住描述**综合推断**，"
+    "客户几乎不会直说。",
+    "age": "从工作年限、家庭阶段、说话内容推断区间；有明确年龄表述时优先用精确值。",
+    "knowledge_of_mengshi": "只看客户对我方品牌/车型的表述（提问深度、比价口径、"
+    "是否已了解配置），**不得**用其他品牌的信息判断。",
+    "electronic_ecosystem": "只看客户自述或截图中出现的手机品牌，"
+    "**不得**由职业、收入、年龄反推。",
+}
+"""契约描述里**没有写明**取证范围的字段，在此补一句来源方向。
+
+**这不是通道硬绑定矩阵。** 逐字段 × 逐通道的绑定矩阵方案经评估后搁置（设计文档
+「通道矩阵暂不落地、只作研究稿」）；这里只给**契约没给线索的字段**补一句该看哪里、
+不该看哪里，而不是替它决定看哪几路渠道。
+
+键必须是契约里的真字段名，由 :func:`field_inference_guide` 与用例共同把关。
+"""
+
+
+def field_inference_guide() -> str:
+    """渲染《目标字段清单》：全部字段的键、名称、类型与**契约原文口径**。
+
+    **为什么要有这一段**：v2 的 L1 要求「默认覆盖全部字段」，但原先的输入里只有
+    《合法取值清单》（枚举键），没有《字段清单》——模型不知道一共有哪些字段、每个字段
+    要什么、口径是什么，只能靠提示词正文里的几个例子猜。把契约自身的 ``description``
+    渲染进去，模型看到的口径与 :mod:`customer_profile.notes_contract` **逐字一致**，
+    也不会有第二处手抄的说明日后漂移。
+
+    与 :func:`enum_key_guide` 同法：**由契约快照生成，不手抄**。
+    """
+    lines = ["## 目标字段清单（默认全部覆盖，确实无关的可留空）", ""]
+    current = None
+    for entry in nc.RAW_CONFIGS:
+        category = entry.get("category") or ""
+        if category != current:
+            current = category
+            lines.append(f"### {category}")
+        key = entry["attribute_key"]
+        name = entry.get("attribute_name") or ""
+        field_type = entry.get("field_type") or "text"
+        description = (entry.get("description") or "").strip()
+        lines.append(f"- `{key}`（{name}，{field_type}）：{description}")
+        note = FIELD_SOURCE_NOTES.get(key)
+        if note:
+            lines.append(f"  - 取证范围：{note}")
+    return "\n".join(lines)
+
+
+def l1_guide() -> str:
+    """L1 输入的前置清单：先《字段清单》，再《合法取值清单》。"""
+    return field_inference_guide() + "\n\n" + enum_key_guide()
+
+
 def build_l1_input(records_json) -> dict:
     """L1 取证层的输入装配：把有内容的渠道排成分节文本。
 
@@ -828,7 +911,8 @@ def build_l1_input(records_json) -> dict:
 
     - **来源分级标注**：L1 要据此判 ``claim_type`` 与 ``confidence``，而分级由**代码按渠道
       定**，不由模型猜（``端到端方案.md`` §3.2 硬规则 1）；
-    - **记录编号**：供代码回定位原文，也是断言与出处的可追溯凭据。
+    - **记录编号**：供代码回定位原文，也是断言与出处的可追溯凭据；
+    - **《目标字段清单》**：42 个字段的键、口径与取证方向，见 :func:`field_inference_guide`。
 
     排序按来源档**从高到低**（人工/系统登记 → 一手交互 → 公开登记查询 → 社交自呈现 →
     第三方预测）：长上下文里靠后的内容召回更低，把登记事实与录音原文前置。
@@ -862,7 +946,7 @@ def build_l1_input(records_json) -> dict:
     # 枚举键清单置于**开头**：R1 实测把它放在末尾时，尾部这一串短 token（`Mr=先生 /
     # Ms=女士`）会诱导模型把 anchor 也写成同样短的裸串（R0 中位锚长 16 → R1 的 6），
     # 导致大量正确断言被长度门丢弃。改置开头，让**记录原文仍是最后读到的内容**。
-    guide = enum_key_guide()
+    guide = l1_guide()
     output = f"{guide}\n\n---\n\n{body}" if body else guide
     return {
         "output": output,
@@ -873,20 +957,29 @@ def build_l1_input(records_json) -> dict:
 
 
 def localize_claims(records_json, claims_json, min_anchor: int = 8) -> dict:
-    """代码定坐标：把 L1 的 ``anchor`` 回定位到原文，定位不到即**丢弃该断言**。
+    """代码定坐标：把 L1 的 ``anchor`` 回定位到原文。**定位不到只降级，不丢字段。**
 
-    「引文可回溯」由这一层强制：模型只指认「原文里哪一段」，切出来的是原文本身。
+    「引文可回溯」由这一层强制：模型只指认「原文里哪一段」，切出来的是原文本身；
+    定位成功时切出的 ``quote`` 必然是原文的连续切片，模型不可能自造引文。
 
-    丢弃口径：
+    **v2 的关键改动：定位失败的处置由「整条丢弃」改为「降级保留」。**
+    v1 口径是召回的最大漏斗（R1 实测因长度门丢掉 226 条断言，其中 163 条在原文里
+    **唯一可定位**）；v2 的口径是——事实指不出原文，不等于这个字段没有结论，只是它
+    **不够硬**：
 
-    - 渠道对不上记录层 → 丢弃；
-    - ``anchor`` 短于 ``min_anchor``**且在同一份记录里出现多次** → 丢弃。
-      长度不是目的，**能否唯一定位**才是：短锚只要在原文里唯一出现，切出来的仍是
-      确定的原文切片，没有引入歧义。R1 实测被长度门丢掉的 226 条里有 163 条属此类。
-    - 在原文里找不到 → 丢弃。
+    - 渠道对不上记录层 → 保留，清空 ``record_channel``（来源档随之落到最弱一档），
+      ``basis`` 降为 ``inferred_low``；
+    - ``anchor`` 短于 ``min_anchor`` 且在原文里出现多次（定位有歧义）→ 降级；
+    - ``anchor`` 在原文里找不到（抄错字）→ 降级；
+    - ``basis`` 本就是 ``inferred_*`` 却不给 ``basis_of_inference`` → 降为 ``inferred_low``
+      （推断没有任何依据的，只能算最低一档）。
 
-    被丢弃的断言收集在 ``dropped_detail`` 里，供 R0/R1 逐案核对——静默丢弃会让人误以为
-    模型没提取到，而实际是**提取到了但定位失败**，两者的处置完全不同。
+    **降级到 ``inferred_low`` 而不是 ``inferred_high``，是刻意的保守取值。**
+    「≥2 条独立来源同向」要看**全局**（同一字段有多条断言），单条断言在定坐标这一层
+    看不到全局；升格交给 L2 的兜底裁决（弱证据同向汇聚）——那才是看得见全局的地方。
+
+    降级与丢弃都留痕（``dropped_detail`` / ``downgraded_detail``）：静默处理会让人误以为
+    模型没提取到，而实际是**提取到了但不够硬**，两者的处置完全不同。
     """
     records = _records_of(records_json)
     claims, parse_ok = _claims_payload(claims_json)
@@ -902,46 +995,101 @@ def localize_claims(records_json, claims_json, min_anchor: int = 8) -> dict:
 
     kept: list[dict] = []
     dropped: list[dict] = []
+    downgraded: list[dict] = []
     for raw in claims:
+        entry = dict(raw)
         channel = str(raw.get("record_channel") or "").strip()
         content = by_name.get(channel) or by_id.get(channel)
         if content is None and channel:
             content = by_name.get(proj._match_channel(channel))
+        basis_now = str(raw.get("basis") or "").strip() or _basis_of(raw)
+
+        def _downgrade(reason: str, *, clear_channel: bool = False) -> None:
+            """把 ``basis`` 降为 ``inferred_low`` 并留痕，**字段本身保留**。"""
+            entry["basis"] = proj.INFERRED_LOW
+            if clear_channel:
+                entry["record_channel"] = ""
+            downgraded.append(
+                {
+                    "claim_id": raw.get("claim_id"),
+                    "attribute": raw.get("attribute"),
+                    "reason": reason,
+                    "anchor": str(raw.get("anchor") or "").strip(),
+                }
+            )
+
         if content is None:
-            dropped.append({"claim_id": raw.get("claim_id"), "attribute": raw.get("attribute"),
-                            "reason": "unknown_channel", "channel": channel})
-            continue
+            # 两种「取不到内容」要分开处置（v2.1 修复）：
+            # - **给了渠道名却找不到记录** → 渠道对不上，降级并清空渠道（v2 行为保留）；
+            # - **压根没给渠道** → 推断类本就允许留空（L1 模板明说），不降级、不动档位。
+            #   v2 把后者也当成「渠道对不上」，把 inferred_high 一并压成 inferred_low
+            #   （8 案实测 209 条，占全部降级的 92%），是三分类在字段级塌陷的根因。
+            if channel or basis_now == proj.FACT:
+                _downgrade("unknown_channel", clear_channel=True)
+        else:
+            anchor = str(raw.get("anchor") or "").strip()
+            located = _locate(content, anchor)
+            # 短锚不一律丢，改为**看唯一性**：长度从来只是「能不能唯一定位」的代理指标，
+            # R1 实测 226 条短锚里 189 条逐字存在于原文、其中 163 条**只出现一次**——
+            # 也就是说它们在原文里本来就唯一可定位，长度门杀的是正确断言。
+            ambiguous = len(anchor) < min_anchor and (
+                len(anchor) < MIN_SHORT_ANCHOR or _occurrences(content, anchor) != 1
+            )
+            if located is None:
+                _downgrade("anchor_not_found")
+            elif ambiguous:
+                _downgrade("anchor_too_short")
+            else:
+                start, end, quote = located
+                entry["quote"] = quote
+                entry["span"] = [start, end]
+                entry["record_channel"] = channel
 
-        anchor = str(raw.get("anchor") or "").strip()
-        located = _locate(content, anchor)
-        if located is None:
-            dropped.append({"claim_id": raw.get("claim_id"), "attribute": raw.get("attribute"),
-                            "reason": "anchor_not_found", "anchor": anchor})
-            continue
-        # 短锚不一律丢，改为**看唯一性**：长度从来只是「能不能唯一定位」的代理指标，
-        # R1 实测 226 条短锚里 189 条逐字存在于原文、其中 163 条**只出现一次**——
-        # 也就是说它们在原文里本来就唯一可定位，长度门杀的是正确断言。
-        if len(anchor) < min_anchor and (
-            len(anchor) < MIN_SHORT_ANCHOR or _occurrences(content, anchor) != 1
-        ):
-            dropped.append({"claim_id": raw.get("claim_id"), "attribute": raw.get("attribute"),
-                            "reason": "anchor_too_short", "anchor": anchor})
-            continue
-
-        start, end, quote = located
-        entry = dict(raw)
-        entry["record_channel"] = channel
-        entry["quote"] = quote
-        entry["span"] = [start, end]
+        # 推断类没有依据 → 只能算最低一档（「有据推断」的门槛在 L2，这里先如实降级）。
+        basis = str(entry.get("basis") or "").strip() or _basis_of(raw)
+        entry["basis"] = basis
+        if basis in (proj.INFERRED_HIGH, proj.INFERRED_LOW):
+            hints = raw.get("basis_of_inference") or ()
+            if isinstance(hints, str):
+                hints = [hints] if hints.strip() else []
+            hints = [str(h) for h in hints if str(h).strip()]
+            if not hints:
+                _downgrade("inferred_without_basis")
+                entry["basis_of_inference"] = []
+            else:
+                entry["basis_of_inference"] = hints
         kept.append(entry)
 
     return {
-        "claims_json": json.dumps({"claims": kept}, ensure_ascii=False, default=str),
+        "claims_json": json.dumps({"fields": kept}, ensure_ascii=False, default=str),
         "kept": len(kept),
         "dropped": len(dropped),
         "dropped_detail": json.dumps(dropped, ensure_ascii=False, default=str),
+        "downgraded": len(downgraded),
+        "downgraded_detail": json.dumps(downgraded, ensure_ascii=False, default=str),
         "parse_ok": parse_ok,
     }
+
+
+def _basis_of(raw: dict) -> str:
+    """从 v1 断言档位推出 v2 的 ``basis``（离线回放既有批次产物时用）。
+
+    ``fact`` → ``fact``（v1 的 fact 本来就要求锚点）；``observation`` → ``inferred_high``
+    （「多条记录反复出现、可归纳」本身就是多条同向）；``prediction`` → ``inferred_low``
+    （第三方统计判断，单独出现不构成事实）。
+
+    **来源档优先于自述档位**：渠道本身就在「第三方预测」档的，一律最低档，
+    不看它自称 ``claim_type`` 是什么——来源档是代码按渠道定的，比模型自述更硬。
+    """
+    channel = str(raw.get("record_channel") or "").strip()
+    if proj.CHANNEL_TIER.get(channel, proj.SOCIAL) == PREDICTION:
+        return proj.INFERRED_LOW
+    claim_type = str(raw.get("claim_type") or "").strip()
+    if claim_type == "prediction":
+        return proj.INFERRED_LOW
+    if claim_type == "observation":
+        return proj.INFERRED_HIGH
+    return proj.FACT
 
 
 def _projection_context(claims) -> dict:
@@ -961,6 +1109,17 @@ def _projection_context(claims) -> dict:
     return {"company_deregistered": deregistered, "has_old_car_evidence": old_car}
 
 
+def _registry_only_candidates(candidates: list[dict]) -> list[dict]:
+    """``thin`` 档的候选集收窄：只留**登记档能撑腰**的字段，与 :func:`_registry_only` 同口径。"""
+    label = proj.TIER_LABEL[proj.REGISTRY]
+    kept: list[dict] = []
+    for entry in candidates:
+        options = entry.get("options") or []
+        if any(label in str(option.get("tier") or "") for option in options):
+            kept.append(entry)
+    return kept
+
+
 def _registry_only(updates: list[dict]) -> list[dict]:
     """``thin`` 档的保守口径：只保留**登记档**坐实的字段。"""
     label = proj.TIER_LABEL[proj.REGISTRY]
@@ -972,6 +1131,24 @@ def _registry_only(updates: list[dict]) -> list[dict]:
     return kept
 
 
+def _blank_value(value) -> bool:
+    """判断一个取值是不是「空值占位」。
+
+    L1 提示词明令「``value`` 不得为空，要么给取值、要么整条不输出」；本函数是代码侧的
+    对账——把提示词的承诺变成**可数的 KPI**（v2.1 设计稿 §3 R2），而不是让一条
+    ``value=""`` 的占位结论白占一行，还把「L1 漏了这个字段」伪装成「这个字段确实没内容」。
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        # 「[]」「{}」「null」是模型把「空」写成字符串的常见形态；它们同样是占位，
+        # 不是取值——按字面量一起认掉，否则它们会伪装成一条有效结论混进账本。
+        return not value.strip() or value.strip() in ("[]", "{}", "null", "None")
+    if isinstance(value, (list, tuple, set, dict)):
+        return not value
+    return False
+
+
 def project_claims(claims_json, tier: str = "sufficient") -> dict:
     """L2 投影层（纯代码，0 token）：断言账本 → 规范事实 + Notes 更新项。
 
@@ -979,20 +1156,39 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
     ``empty`` 不产出任何断言（保守模板，``端到端方案.md`` §3.6）。
     """
     claims, _ = _claims_payload(claims_json)
-    ledger = [
-        proj.Claim(
-            attribute=str(raw.get("attribute") or "").strip(),
-            value=raw.get("value"),
-            channel=str(raw.get("record_channel") or "").strip(),
-            # 主体为空**不**回落成 customer：规则要求「主体说不清」的断言不得支撑身份字段，
-            # 默认成客户本人恰好会把该拦下的放行。
-            subject=str(raw.get("subject") or "").strip(),
-            claim_type=str(raw.get("claim_type") or "").strip() or "fact",
-            claim_id=str(raw.get("claim_id") or ""),
+    def _hints(raw: dict) -> tuple[str, ...]:
+        value = raw.get("basis_of_inference") or ()
+        if isinstance(value, str):
+            return (value,) if value.strip() else ()
+        return tuple(str(item) for item in value if str(item).strip())
+
+    ledger: list[proj.Claim] = []
+    empty_claim_names: list[str] = []
+    for raw in claims:
+        attribute = str(raw.get("attribute") or "").strip()
+        if not attribute:
+            continue
+        if _blank_value(raw.get("value")):
+            # 只丢「空值」这一条，**不**丢字段：字段名进计数，交给 R2 的覆盖 KPI 追。
+            empty_claim_names.append(attribute)
+            continue
+        ledger.append(
+            proj.Claim(
+                attribute=attribute,
+                value=raw.get("value"),
+                channel=str(raw.get("record_channel") or "").strip(),
+                # 主体为空**不**回落成 customer：规则要求「主体说不清」的断言不得支撑身份字段，
+                # 默认成客户本人恰好会把该拦下的放行。
+                subject=str(raw.get("subject") or "").strip(),
+                claim_type=str(raw.get("claim_type") or "").strip() or "fact",
+                claim_id=str(raw.get("claim_id") or ""),
+                # v2 的 ``basis`` 优先；缺失时从 v1 的 ``claim_type`` 推（离线回放既有批次产物）。
+                basis=str(raw.get("basis") or "").strip() or _basis_of(raw),
+                basis_of_inference=_hints(raw),
+                # L1 定位层切出的原文切片一路带到 Notes 出口（v2.1 可读性，设计稿 §1）。
+                quote=str(raw.get("quote") or "").strip(),
+            )
         )
-        for raw in claims
-        if str(raw.get("attribute") or "").strip()
-    ]
     result = proj.project(ledger, context=_projection_context(ledger))
 
     updates = result.notes_updates
@@ -1001,79 +1197,100 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
     elif tier != "sufficient":
         updates = _registry_only(updates)
 
+    # 候选集必须与 updates **同口径**：``thin`` 档刻意只留登记档坐实的字段，
+    # 若兜底仍按全量候选裁决，它就能把该档排除掉的非登记字段重新写回去——
+    # 那等于让兜底绕过了分诊层的保守约束。因此候选集也跟着 tier 收窄。
+    # ``covered`` 把「L1 已给结论的字段」排除在补全之外，其余契约字段成为缺字段候选（R2）。
+    candidates = proj.build_l2_candidates(ledger, result, covered={c.attribute for c in ledger})
+    if tier == "empty":
+        candidates = []
+    elif tier != "sufficient":
+        candidates = _registry_only_candidates(candidates)
+
     return {
         "facts_json": json.dumps(result.facts, ensure_ascii=False, default=str),
         "notes_updates_json": json.dumps(updates, ensure_ascii=False, default=str),
         "to_confirm_json": json.dumps(result.to_confirm, ensure_ascii=False, default=str),
         "rejected_json": json.dumps(result.rejected, ensure_ascii=False, default=str),
+        # 兜底节点的输入：**只有规则判不了的字段**会出现在这里（设计稿 §6.1
+        # 「凡是能写成规则的，不交给 LLM」）。
+        "candidates_json": json.dumps(candidates, ensure_ascii=False, default=str),
+        # 字段级置信档。L3 校验据此区分「写成确定值却没有依据」（要拦）与
+        # 「已明确降级为 inferred_low 的软值」（要放行）——两者在 facts 里长得一样。
+        "basis_json": json.dumps(result.basis, ensure_ascii=False, default=str),
         "notes_count": len(updates),
+        # R2 覆盖 KPI：L1 发了却没给出取值的字段名。空值占位不再静默通过——
+        # 计出来才知道「L1 漏了多少字段」，而不是把它伪装成「字段确实没内容」。
+        "empty_claims": len(empty_claim_names),
+        "empty_claim_names": json.dumps(sorted(set(empty_claim_names)), ensure_ascii=False),
         "tier": tier,
     }
 
 
-def overwrite_notes_updates(result1, notes_updates_json) -> dict:
-    """T5 兼容覆写（``落地计划书.md`` D4）：把 L2 的 Notes 写进 ``result1``。
+def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
+    """把 LLM 兜底的终判并入 Notes 更新项（纯代码）。
 
-    **阶段一/二不碰 production 内部**，但 L2 纠正过的 Notes 必须真的出现在产物里，
-    否则阶段二无从度量。因此在图尾覆写 ``analysis_result.basic_notes_updates``——
-    这是**临时手段**，阶段三（L3）落地后连同本节点一起删除。
+    兜底只做三件事（设计稿 §6.3）：弱证据同向汇聚、语义冲突判断、给出终判与理由。
+    本函数负责把**越界的终判挡在门外**（:func:`projection.apply_l2_verdict` 判），
+    再把通过的那些并进 ``notes_updates``。
 
-    解不动 ``result1`` 时原样返回并置 ``overwrite_applied=false``，不抛异常：
-    一次成功的运行里 notes 为空，与整案失败，是完全不同的两件事，前者要能被看见。
+    并入时**保持产物形状不变**：`basic_notes_updates` 的三键结构是下游契约，
+    兜底改的只是取值与置信度，不新增键。
     """
+    candidates = _claims_payload(candidates_json)[0]
+    verdict = proj.apply_l2_verdict(candidates, verdict_json)
     try:
-        updates = json.loads(notes_updates_json) if isinstance(notes_updates_json, str) else notes_updates_json
+        updates = json.loads(notes_updates_json) if isinstance(notes_updates_json, str) else list(
+            notes_updates_json or []
+        )
     except ValueError:
         updates = []
     if not isinstance(updates, list):
         updates = []
 
-    payload = result1
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except ValueError:
-            return {
-                "result1": result1,
-                "overwrite_applied": False,
-                "notes_count": 0,
-                "overwrite_reason": "result1 不是合法 JSON，保持原样",
-            }
-    if not isinstance(payload, dict):
-        return {
-            "result1": result1 if isinstance(result1, str) else json.dumps(payload, ensure_ascii=False, default=str),
-            "overwrite_applied": False,
-            "notes_count": 0,
-            "overwrite_reason": "result1 不是对象，保持原样",
-        }
+    by_key = {str(u.get("attribute_key")): u for u in updates if isinstance(u, dict)}
+    applied = 0
+    for item in verdict["accepted"]:
+        key = item["attribute_key"]
+        # 缺字段补全恒为软值（inferred_low），置信度必须低于「候选集内裁决」，
+        # 否则销售分不清「三条来源同向汇出来的」与「表里什么都没有、模型补的空」。
+        soft = bool(item.get("missing"))
+        confidence = 0.4 if soft else 0.8
+        lead = "按已有信息补充：%s" % (item.get("reason") or "据已有事实归纳") if soft else (
+            "兜底裁决：%s" % (item.get("reason") or "候选集内取值")
+        )
+        existing = by_key.get(key)
+        if existing is not None:
+            existing["attribute_value"] = item["attribute_value"]
+            detail = existing.setdefault("reasoning_detail", {})
+            detail["confidence"] = confidence
+            steps = detail.setdefault("steps", [])
+            steps.append(lead)
+        else:
+            updates.append(
+                {
+                    "attribute_key": key,
+                    "attribute_value": item["attribute_value"],
+                    "reasoning_detail": {
+                        "summary": (
+                            "由已有信息归纳补充（低置信，供核对）"
+                            if soft
+                            else "由 L2 兜底在候选集内裁决得到"
+                        ),
+                        "steps": [lead],
+                        "evidence": [],
+                        "confidence": confidence,
+                    },
+                }
+            )
+        applied += 1
 
-    analysis = payload.get("analysis_result")
-    if not isinstance(analysis, dict):
-        return {
-            "result1": json.dumps(payload, ensure_ascii=False, default=str),
-            "overwrite_applied": False,
-            "notes_count": 0,
-            "overwrite_reason": "result1 缺少 analysis_result，保持原样",
-        }
-
-    # **空产出不得覆写**：R1 实测 16761543238 的 L1 返回 `{"claims": []}`（一次合法但为空的
-    # 响应，重试机制不会触发），若照此覆写，production 本来填好的 8 个字段会被一个字段都不剩
-    # 地清空——「L2 认定这些字段无据」与「L1 这次什么都没抽到」是完全不同的两件事。
-    # 按 D4「正确性优先」的口径，产出为空时保持 production 原样并留痕。
-    if not updates:
-        return {
-            "result1": json.dumps(payload, ensure_ascii=False, default=str),
-            "overwrite_applied": False,
-            "notes_count": 0,
-            "overwrite_reason": "L2 产出为空，保持 production 原样（避免空响应清空既有字段）",
-        }
-
-    analysis["basic_notes_updates"] = updates
     return {
-        "result1": json.dumps(payload, ensure_ascii=False, default=str),
-        "overwrite_applied": True,
+        "notes_updates_json": json.dumps(updates, ensure_ascii=False, default=str),
         "notes_count": len(updates),
-        "overwrite_reason": "",
+        "applied": applied,
+        "out_of_bounds": verdict["out_of_bounds"],
+        "verdict_json": json.dumps(verdict["accepted"], ensure_ascii=False, default=str),
     }
 
 
@@ -1201,7 +1418,7 @@ WORKFLOW = WorkflowDef(
             },
         ),
         # ---------------------------------------------------------- 取数层（14 路）
-        _tool(MOMENTS, "朋友圈信息提取", "moments_info", "WeChatMomentsScreenshot"),
+        _tool(MOMENTS, "朋友圈信息提取", MOMENTS_PURE, "WeChatMomentsScreenshot"),
         _tool(
             WECHAT_SEARCH,
             "微信手机号搜索截图信息提取",
@@ -1209,11 +1426,11 @@ WORKFLOW = WorkflowDef(
             "WeChatPhoneSearchScreenshot",
         ),
         _tool(WECHAT_HOME, "微信主页信息提取", "wechat_homepage", "WeChatHomepageScreenshot"),
-        _tool(TEST_DRIVE, "试驾录音信息提取", "test_drive_audio", "TestDriveRecordingFile"),
+        _tool(TEST_DRIVE, "试驾录音信息提取", TEST_DRIVE_PURE, "TestDriveRecordingFile"),
         _tool(
             OUTBOUND_CALL,
             "外呼录音信息提取",
-            "outbound_call_audio",
+            OUTBOUND_CALL_PURE,
             "AIOutboundCallRecordingFile",
         ),
         _tool(ALIPAY, "支付宝个人页信息提取", "alipay_homepage", "AlipayPersonalPageScreenshot"),
@@ -1348,18 +1565,6 @@ WORKFLOW = WorkflowDef(
             outputs=("tier", "tier_reason", "usable_count"),
             function=f"customer_profile.workflows.{SLUG}:triage",
         ),
-        make_node(
-            EVIDENCE_INPUT,
-            "取证输入包",
-            "code",
-            after=(L0_RECORDS, L4_TRIAGE),
-            inputs={
-                "records_json": (L0_RECORDS, "records_json"),
-                "tier": (L4_TRIAGE, "tier"),
-            },
-            outputs=("output",),
-            function=f"customer_profile.workflows.{SLUG}:build_evidence_input",
-        ),
         # ---------------------------------------------------------- L1 取证层（1 次 LLM + 代码定坐标）
         make_node(
             L1_INPUT,
@@ -1391,7 +1596,15 @@ WORKFLOW = WorkflowDef(
                 "records_json": (L0_RECORDS, "records_json"),
                 "claims_json": (L1_LLM, "result"),
             },
-            outputs=("claims_json", "kept", "dropped", "dropped_detail", "parse_ok"),
+            outputs=(
+                "claims_json",
+                "kept",
+                "dropped",
+                "dropped_detail",
+                "downgraded",
+                "downgraded_detail",
+                "parse_ok",
+            ),
             function=f"customer_profile.workflows.{SLUG}:localize_claims",
         ),
         # ---------------------------------------------------------- L2 投影层（纯代码，0 token）
@@ -1409,100 +1622,88 @@ WORKFLOW = WorkflowDef(
                 "notes_updates_json",
                 "to_confirm_json",
                 "rejected_json",
+                "candidates_json",
+                "basis_json",
                 "notes_count",
                 "tier",
             ),
             function=f"customer_profile.workflows.{SLUG}:project_claims",
         ),
-        # ---------------------------------------------------------- 取证与成文（复用）
+        # ---------------------------------------------------------- L2 兜底（1 次受约束 LLM）
+        # 「凡是能写成规则的，不交给 LLM」（设计稿 §6.1）：输入只有规则判不了的字段，
+        # 输出受 schema 与代码双重校验（不得新增候选集外的值，§6.3）。
         make_node(
-            EVIDENCE_LLM,
-            "证据线索整理",
+            L2_FALLBACK,
+            "L2 兜底裁决",
             "llm",
-            after=(EVIDENCE_INPUT,),
-            inputs={"arg1": (EVIDENCE_INPUT, "output")},
+            after=(L2_PROJECT,),
+            inputs={
+                "arg1": (L2_PROJECT, "candidates_json"),
+                # 缺字段补全必须**看着事实表**做（v2.1 R2）：缺字段条目没有候选值，
+                # 不给事实表就是让它凭空编——那正是「受约束的裁决者」要避免的。
+                "arg2": (L2_PROJECT, "facts_json"),
+            },
             outputs=("result",),
-            template=EVIDENCE_PROMPT_TEMPLATE,
+            template=L2_FALLBACK_TEMPLATE,
             output="result",
+            expect_json=True,
             system_text=SYSTEM_TEXT,
         ),
         make_node(
-            STANDARD_AGGREGATE,
-            "客户标准信息数据聚合",
+            L2_APPLY,
+            "L2 终判并入",
             "code",
-            after=(WECHAT_SEARCH, MENGSHI_IT),
+            after=(L2_FALLBACK, L2_PROJECT),
             inputs={
-                "json_string_1": (WECHAT_SEARCH, "result"),
-                "json_string_2": (MENGSHI_IT, "IT_json_data"),
-            },
-            outputs=("merged_json_string",),
-            function=f"{EVIDENCE_MODULE}:aggregate_customer_standard_info",
-        ),
-        make_node(
-            PROFILE,
-            "人设特征判断",
-            "tool",
-            after=(EVIDENCE_LLM,),
-            inputs={
-                "evidence_items": (EVIDENCE_LLM, "result"),
-                "phone_number": (START, "phone_number"),
-            },
-            outputs=("profile_result", "hobby_result", "style_result"),
-            **{
-                "@workflow": PROFILE_WORKFLOW,
-                "@inputs": {
-                    "evidence_items": "evidence_items",
-                    "phone_number": "phone_number",
-                },
-            },
-        ),
-        make_node(
-            PRODUCTION,
-            "画像内容生成与回写",
-            "tool",
-            after=(PROFILE, STANDARD_AGGREGATE),
-            inputs={
-                "phone_number": (START, "phone_number"),
-                "batch_id": (START, "batch_id"),
-                "evidence_items": (EVIDENCE_LLM, "result"),
-                "original_cus_data": (STANDARD_AGGREGATE, "merged_json_string"),
-                "profile_analysis": (PROFILE, "profile_result"),
-                "hobby_analysis": (PROFILE, "hobby_result"),
-                "consumption_style_analysis": (PROFILE, "style_result"),
-            },
-            outputs=("result1",),
-            **{
-                "@workflow": PRODUCTION_WORKFLOW,
-                "@inputs": {
-                    "phone_number": "phone_number",
-                    "batch_id": "batch_id",
-                    "evidence_items": "evidence_items",
-                    "original_cus_data": "original_cus_data",
-                    "profile_analysis": "profile_analysis",
-                    "hobby_analysis": "hobby_analysis",
-                    "consumption_style_analysis": "consumption_style_analysis",
-                },
-            },
-        ),
-        # ---------------------------------------------------------- T5 兼容覆写（阶段三删除）
-        make_node(
-            NOTES_OVERWRITE,
-            "Notes 兼容覆写",
-            "code",
-            after=(PRODUCTION, L2_PROJECT),
-            inputs={
-                "result1": (PRODUCTION, "result1"),
+                "candidates_json": (L2_PROJECT, "candidates_json"),
+                "verdict_json": (L2_FALLBACK, "result"),
                 "notes_updates_json": (L2_PROJECT, "notes_updates_json"),
             },
-            outputs=("result1", "overwrite_applied", "notes_count", "overwrite_reason"),
-            function=f"customer_profile.workflows.{SLUG}:overwrite_notes_updates",
+            outputs=(
+                "notes_updates_json",
+                "notes_count",
+                "applied",
+                "out_of_bounds",
+                "verdict_json",
+            ),
+            function=f"customer_profile.workflows.{SLUG}:merge_l2_verdict",
+        ),
+        # ---------------------------------------------------------- 取证与成文（复用）
+        # ---------------------------------------------------------- L3 校验与表达（1 次 LLM）
+        # 替代 production：**同一份 facts** 既喂 Notes、又写 9 个 section（设计稿 §7.4）。
+        # 输入只有已定稿的事实，没有证据原文——表达层因此**无从新增事实**。
+        make_node(
+            PRODUCTION,
+            "L3 校验与表达",
+            "tool",
+            after=(L2_APPLY,),
+            inputs={
+                "phone": (START, "phone_number"),
+                "batch_id": (START, "batch_id"),
+                "facts_json": (L2_PROJECT, "facts_json"),
+                "basis_json": (L2_PROJECT, "basis_json"),
+                "notes_updates_json": (L2_APPLY, "notes_updates_json"),
+                "claims_json": (L1_LOCALIZE, "claims_json"),
+            },
+            outputs=("result1", "section_count", "new_fact_suspects", "suspects_json"),
+            **{
+                "@workflow": L3_WORKFLOW,
+                "@inputs": {
+                    "phone": "phone",
+                    "batch_id": "batch_id",
+                    "facts_json": "facts_json",
+                    "basis_json": "basis_json",
+                    "notes_updates_json": "notes_updates_json",
+                    "claims_json": "claims_json",
+                },
+            },
         ),
         make_node(
             END,
             "输出",
             "end",
-            after=(NOTES_OVERWRITE,),
-            inputs={"result1": (NOTES_OVERWRITE, "result1")},
+            after=(PRODUCTION,),
+            inputs={"result1": (PRODUCTION, "result1")},
             outputs=("result1",),
         ),
     ),
@@ -1529,9 +1730,8 @@ CODE_SPECS: dict[str, dict] = {
     CHANNEL_BUNDLE: {"main": "bundle_channels", "renames": {}},
     L0_RECORDS: {"main": "build_records", "renames": {}},
     L4_TRIAGE: {"main": "triage", "renames": {}},
-    EVIDENCE_INPUT: {"main": "build_evidence_input", "renames": {}},
     L1_INPUT: {"main": "build_l1_input", "renames": {}},
     L1_LOCALIZE: {"main": "localize_claims", "renames": {}},
     L2_PROJECT: {"main": "project_claims", "renames": {}},
-    NOTES_OVERWRITE: {"main": "overwrite_notes_updates", "renames": {}},
+    L2_APPLY: {"main": "merge_l2_verdict", "renames": {}},
 }

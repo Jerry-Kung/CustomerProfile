@@ -46,6 +46,22 @@ def record_for(records: list[dict], source_name: str) -> dict:
 
 # ---------------------------------------------------------------- 渠道表
 
+PURE_VARIANT_OF: dict[str, str] = {
+    "moments_info_pure": "moments_info",
+    "test_drive_audio_pure": "test_drive_audio",
+    "outbound_call_audio_pure": "outbound_call_audio",
+}
+"""v2 纯识别变体 → 它取代的原件。
+
+v2 的取数层改用**纯识别变体**（关掉取数侧那些「产物无人消费」的 LLM 节点），
+而取数臂仍用原件。变体在父图里占的是同一路渠道、同一个 `data_source`、同一批模板，
+只有子流程 ID 不同——因此比对前先把变体名折回原件名。
+
+**这条映射必须有**：它恰好是「防止两臂取数口径单边漂移」的机制本身。
+若日后有人只改了变体而没改原件（或反之），映射折回后仍然不等，这里照旧红。
+"""
+
+
 def _acquisition_tools(workflow) -> dict:
     """某图里「取数工具」的声明表：``{节点标题: (子流程 ID, data_source)}``。
 
@@ -57,7 +73,7 @@ def _acquisition_tools(workflow) -> dict:
         if node.node_type != "tool":
             continue
         child = node.config.get("@workflow")
-        if child == pipe.AUDIO_EXTRACT_WORKFLOW:
+        if child in (pipe.AUDIO_EXTRACT_WORKFLOW, "audio_content_extract"):
             continue
         data_source = next(
             (
@@ -67,7 +83,7 @@ def _acquisition_tools(workflow) -> dict:
             ),
             None,
         )
-        table[node.title] = (child, data_source)
+        table[node.title] = (PURE_VARIANT_OF.get(child, child), data_source)
     return table
 
 

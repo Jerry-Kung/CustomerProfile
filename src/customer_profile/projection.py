@@ -12,14 +12,26 @@
     notes_updates[] 42 字段投影结果，形状与基线 `basic_notes_updates` 同形
     to_confirm[]   无法坐实的字段：**空着比填错强**，交销售补充
 
-三条设计口径：
+三条设计口径（v2 起第 1、2 条的方向变了，见下）：
 
-1. **宁空勿错**。冲突无法按来源排序消解时，字段留白并转 ``to_confirm``，
-   绝不把两个值都写出去——那正是「Notes 里旧车车型有值、购买类型却仍是首购」的成因。
+1. **宁降勿丢**（v2）。规则判不了的，**降级保留**比丢弃强：值留在 ``facts`` 里，
+   置信档降为 ``inferred_low`` 并转 ``to_confirm``，交 LLM 兜底裁决或人工确认。
+   v1 的口径是「拒绝即丢弃」，实测是掉字段的主因之一（设计稿 §2.1）。
+   **唯一仍然留白的**是同档单值语义多值冲突（规则 c）——两个互斥的值都写出去，
+   正是「Notes 里旧车车型有值、购买类型却仍是首购」的成因。
 2. **来源分级是硬顺序**：人工/系统登记 > 一手交互 > 公开登记查询 > 社交自呈现 > 第三方预测。
-   ``prediction`` **不得单独支撑** ``基础身份`` 类字段（16 个），只能进卡片软性叙述。
+   预测或社交**不得单独支撑** ``基础身份`` 类字段（16 个）的**确定性**——
+   v2 起降为 ``inferred_low`` 仍写入，不再丢弃。
 3. **枚举只认契约**。合法键、单/多选、结构化枚举的 ``input_value`` 全部读
-   :mod:`customer_profile.notes_contract`，不在这里手抄一份。
+   :mod:`customer_profile.notes_contract`，不在这里手抄一份。归不到合法键的取值
+   **保留原值**并降级（规则 d），不再丢弃。
+
+三条来源硬规则（设计稿 §6.2，针对明确错误类型，均为强制）：
+
+1. 预测不得单独支撑身份类字段 → 降 ``inferred_low``，不写确定值；
+2. 态度/行为类字段（``emotion`` / ``knowledge_of_mengshi`` / ``pain_points``）须有一手依据，
+   社媒与预测最多作辅助 → 只有弱来源时降级；
+3. 社交自呈现不得单独支撑身份类字段 → 同 1，降级。
 """
 
 from __future__ import annotations
@@ -49,6 +61,18 @@ SOCIAL = "social"
 
 PREDICTION = "prediction"
 """第三方统计预测（极光打点）。"""
+
+FACT = "fact"
+"""三分类·事实：有原文锚点，或由登记系统直接给出。"""
+
+INFERRED_HIGH = "inferred_high"
+"""三分类·高置信推断：无单句锚点，但有 ≥2 条独立来源同向支撑。"""
+
+INFERRED_LOW = "inferred_low"
+"""三分类·低置信推断：仅 1 条弱事实、纯常识，或仅由第三方预测单独支撑。"""
+
+BASIS_ORDER: dict[str, int] = {FACT: 0, INFERRED_HIGH: 1, INFERRED_LOW: 2}
+"""三分类由强到弱。"""
 
 SOURCE_TIERS: tuple[str, ...] = (REGISTRY, FIRSTHAND, PUBLIC_RECORD, SOCIAL, PREDICTION)
 _TIER_RANK: dict[str, int] = {tier: i for i, tier in enumerate(SOURCE_TIERS)}
@@ -85,6 +109,21 @@ CHANNEL_TIER: dict[str, str] = {
 }
 """渠道 → 来源分级。渠道名与 :mod:`customer_profile.workflows.customer_profile_pipeline`
 的渠道表逐字一致（那里是取数口径，这里是消费口径，测试钉住两者同集合）。"""
+
+WEAK_TIERS: frozenset[str] = frozenset({SOCIAL, PREDICTION})
+"""**弱来源**两档：社交自呈现与第三方预测。
+
+这两档**不得单独支撑**身份字段的确定性（设计稿 §6.2 三条来源硬规则 1、3），
+也不得作为态度/行为类字段的唯一依据（硬规则 2）。v2 的处置是降级保留，不是丢弃。
+"""
+
+ATTITUDE_KEYS: frozenset[str] = frozenset({"emotion", "knowledge_of_mengshi", "pain_points"})
+"""态度/行为类字段：**须有一手依据**（登记或一手交互），社媒与预测最多作辅助。
+
+这三项是「客户怎么想」而非「客户是什么」。只有弱来源时结论仍写入但降为
+``inferred_low``——销售看得到线索，却不会把它当成客户已表态（设计稿 §6.2 硬规则 2）。
+"""
+
 
 IDENTITY_SUBJECT_EXEMPT: frozenset[str] = frozenset({"family_structure"})
 """身份字段里**不要求**主体为客户本人的例外。
@@ -160,10 +199,35 @@ class Claim:
     ``other`` / ``unknown``。"""
 
     claim_type: str = "fact"
-    """``fact`` / ``observation`` / ``prediction``。"""
+    """v1 口径的三分类：``fact`` / ``observation`` / ``prediction``。
+
+    v2 起由 :attr:`basis` 取代；本字段保留供离线回放既有批次（那批产物里只有它）。
+    """
 
     created_at: str = ""
     claim_id: str = ""
+
+    basis: str = "fact"
+    """v2 的三分类置信档：``fact`` / ``inferred_high`` / ``inferred_low``。
+
+    与 :attr:`claim_type` 的关系：``fact`` 对应 ``fact``；``observation`` 与
+    ``prediction`` 都对应 ``inferred_*``（它们本就是推断或统计判断，不是客户陈述）。
+    L2 的冲突消解按这一档排序：``fact`` > ``inferred_high`` > ``inferred_low``。
+    """
+
+    basis_of_inference: tuple[str, ...] = ()
+    """推断依据（``basis`` 为 ``inferred_*`` 时的必填项）。
+
+    ``fact`` 靠 ``anchor`` 回溯原文；推断类没有单句锚点，靠这一串「从哪几条推出来的」
+    交代来源。为空且非 ``fact`` 的断言的 ``basis`` 会被 L1 定位层降为 ``inferred_low``。
+    """
+
+    quote: str = ""
+    """L1 定位层切出的**原文切片**（原文里的连续一段）。
+
+    v2.1 起随断言一路带到 Notes 出口：``reasoning_detail.evidence`` 的首选内容就是它
+    （「证据锚点要精确到客户原始数据中的某段内容」）。离线回放既有批次时通常为空。
+    """
 
     @property
     def tier(self) -> str:
@@ -177,6 +241,28 @@ class Claim:
     def is_prediction(self) -> bool:
         return self.claim_type == "prediction" or self.tier == PREDICTION
 
+    @property
+    def is_social(self) -> bool:
+        return self.tier == SOCIAL
+
+    @property
+    def effective_basis(self) -> str:
+        """自述档位与来源档冲突时，**取更弱的那个**。
+
+        典型：一条渠道是「第三方画像数据」却自称 ``basis=fact``。自述档位是模型给的，
+        来源档是代码按渠道定的——来源档更硬，因此这类断言按 ``inferred_low`` 处理。
+        """
+        if self.is_prediction and self.basis == FACT:
+            return INFERRED_LOW
+        return self.basis or FACT
+
+    @property
+    def basis_rank(self) -> int:
+        """三分类的强弱序号（越小越强）。``fact`` 0、``inferred_high`` 1、
+        ``inferred_low`` 2，未知档按**最弱**处理——宁可低估也不要让一个叫不出名字的档
+        冒充事实。"""
+        return BASIS_ORDER.get(self.effective_basis, len(BASIS_ORDER))
+
 
 @dataclass(slots=True)
 class Projection:
@@ -187,12 +273,30 @@ class Projection:
     to_confirm: list[dict[str, Any]] = field(default_factory=list)
     rejected: list[dict[str, Any]] = field(default_factory=list)
 
+    basis: dict[str, str] = field(default_factory=dict)
+    """字段级置信档。缺省视为 ``fact``；被规则 b/d 降级的字段在此记 ``inferred_low``。
+
+    L2 的产物是**字段值**，而三分类是**断言**的属性。降级一条断言后这个信息若不落在
+    字段上就会丢，下游（L3 校验、表达层「无依据确定值率」）就无从判断哪些字段
+    是「已写入但不硬」。因此在此显式留存。
+    """
+
+    downgraded: list[dict[str, Any]] = field(default_factory=list)
+    """被**降级保留**的断言（v2 新增）。
+
+    与 :attr:`rejected` 的分工：``rejected`` 是**没写进 facts** 的；
+    ``downgraded`` 是**写进去了但置信档被拉低**的。两者都留痕——静默降级会让人
+    误以为模型很有把握，而静默丢弃会让人误以为模型没提取到。
+    """
+
     def asdict(self) -> dict[str, Any]:
         return {
             "facts": self.facts,
             "notes_updates": self.notes_updates,
             "to_confirm": self.to_confirm,
             "rejected": self.rejected,
+            "basis": self.basis,
+            "downgraded": self.downgraded,
         }
 
 
@@ -318,9 +422,17 @@ def normalize_level(value: Any) -> str | None:
 
 
 def _pick_best(group: Sequence[Claim]) -> tuple[Claim, list[Claim]]:
-    """按来源分级挑出最强的一条，返回 ``(最佳, 同档并列)``。"""
-    best_rank = min(claim.rank for claim in group)
-    same_tier = [claim for claim in group if claim.rank == best_rank]
+    """挑出最强的一条，返回 ``(最佳, 同档并列)``。
+
+    排序键是 ``(basis 强弱, 来源档强弱)``——**``basis`` 优先于来源档**（设计稿 §6.2
+    「冲突消解取『更强的一条』：``fact`` > ``inferred_high`` > ``inferred_low``」）。
+    一条来源档较低但标了 ``fact``（有原文锚点）的断言，强于一条来源档高却只是推断的断言：
+    前者能回溯到客户原话，后者不能。
+
+    「同档并列」按**同一个 (basis, 档位) 组合**取，冲突检测据此判定「是否同档多值」。
+    """
+    best_key = min((claim.basis_rank, claim.rank) for claim in group)
+    same_tier = [claim for claim in group if (claim.basis_rank, claim.rank) == best_key]
     same_tier.sort(key=lambda c: (c.created_at or ""), reverse=True)
     return same_tier[0], same_tier
 
@@ -387,30 +499,62 @@ def project(
 
     surviving: dict[str, list[Claim]] = {}
     for attribute, group in grouped.items():
-        if attribute in nc.IDENTITY_KEYS and all(c.is_prediction for c in group):
-            for claim in group:
-                result.rejected.append(
-                    {
-                        "attribute": attribute,
-                        "value": claim.value,
-                        "rule": "b_prediction_only",
-                        "reason": "身份字段仅由第三方预测支撑",
-                    }
-                )
+        weak_only = all(c.tier in WEAK_TIERS for c in group)
+        if attribute in nc.IDENTITY_KEYS and weak_only:
+            # v2：**不再丢弃**。弱来源撑不起身份字段的「确定性」，但客户大概率就是——
+            # 降为 inferred_low 仍写入，并转人工确认（设计稿 §6.2 规则 b 与三条来源硬规则）。
+            only_prediction = all(c.is_prediction for c in group)
+            rule = "b_prediction_only" if only_prediction else "b_social_only"
+            reason = (
+                "身份字段仅由第三方预测支撑"
+                if only_prediction
+                else "身份字段仅由社交自呈现支撑"
+            )
+            result.basis[attribute] = INFERRED_LOW
+            result.downgraded.append(
+                {
+                    "attribute": attribute,
+                    "value": [c.value for c in group],
+                    "rule": rule,
+                    "reason": reason,
+                    "action": "降为 inferred_low 写入（不丢字段）",
+                }
+            )
             result.to_confirm.append(
                 {
                     "attribute_key": attribute,
-                    "reason": "仅有第三方预测，不构成客户事实",
+                    "candidates": [c.value for c in group],
+                    "reason": reason + "，不构成客户事实",
                     "suggested_action": "向客户或销售确认后补充",
                 }
             )
-            continue
+            # 注意：**没有 continue** —— 该组继续进入 c/d/e，仍会被写入 facts。
+        if attribute in ATTITUDE_KEYS and all(c.tier in WEAK_TIERS for c in group):
+            # 硬规则 2：态度/行为类字段须有一手依据。只有弱来源时降级保留。
+            result.basis[attribute] = INFERRED_LOW
+            result.downgraded.append(
+                {
+                    "attribute": attribute,
+                    "value": [c.value for c in group],
+                    "rule": "b_attitude_weak_source",
+                    "reason": "态度类字段仅有社交/预测依据，无一手或登记来源",
+                    "action": "降为 inferred_low 写入（不丢字段）",
+                }
+            )
         surviving[attribute] = group
 
     # ---- c/d/e 冲突消解 + 枚举归一 + 单多值约束
     for attribute, group in surviving.items():
         best, same_tier = _pick_best(group)
         values = _diverse(claim.value for claim in same_tier)
+
+        # 字段级置信档 = **胜出那条断言的档**（v2.1 补：此前只有「被降级」的分支才写
+        # ``result.basis``，于是未被降级的字段在档案里**没有档位**——下游把「缺失」
+        # 默认当成 ``fact``（L3 校验会拦），探针则误报成「全是 inferred_low」，
+        # 两边都读错。档位必须在所有路径上都落定，而不是只在降级时落定）。
+        # 注意：不得覆盖 b 硬规则刚写下的 ``inferred_low``（弱来源撑不起身份/态度字段），
+        # 因此只在尚未落档时写入。
+        result.basis.setdefault(attribute, best.effective_basis)
 
         if (
             len(values) > 1
@@ -439,31 +583,52 @@ def project(
 
         if nc.is_enum(attribute):
             normalized: list[Any] = []
+            illegal: list[Any] = []
             pool = values if nc.is_multi_value(attribute) else [best.value]
             for raw in pool:
                 for item in split_multi(raw):
                     key = normalize_enum(attribute, item)
                     if key is None:
-                        result.rejected.append(
-                            {
-                                "attribute": attribute,
-                                "value": item,
-                                "rule": "d_enum",
-                                "reason": "非法枚举值，无法归一",
-                            }
-                        )
+                        illegal.append(item)
                         continue
                     normalized.append(key)
             normalized = _diverse(normalized)
             if not normalized:
+                # v2：一个都归不到合法键 → **保留原值** + 降为低置信 + 转人工确认，
+                # 不再丢弃（设计稿 §6.2 规则 d）。原值往往就是客户的原话，丢掉它等于
+                # 「因为格式对不上就把事实扔了」——R0 实测枚举归一失败是掉字段主因之一。
+                original = list(values) if nc.is_multi_value(attribute) else values[0]
+                result.facts[attribute] = original
+                result.basis[attribute] = INFERRED_LOW
+                result.downgraded.append(
+                    {
+                        "attribute": attribute,
+                        "value": illegal or list(values),
+                        "rule": "d_enum",
+                        "reason": "取值无法归一到契约枚举",
+                        "action": "保留原值 + 降为 inferred_low + 转人工确认",
+                    }
+                )
                 result.to_confirm.append(
                     {
                         "attribute_key": attribute,
+                        "candidates": illegal or list(values),
                         "reason": "取值无法归一到契约枚举",
-                        "suggested_action": "人工确认后补填",
+                        "suggested_action": "人工确认后补填合法枚举键",
                     }
                 )
                 continue
+            if illegal:
+                # 部分归一成功：可归一的照写，归不了的那几项留痕（不因一项不合法丢掉整字段）。
+                result.downgraded.append(
+                    {
+                        "attribute": attribute,
+                        "value": illegal,
+                        "rule": "d_enum_partial",
+                        "reason": "部分取值无法归一到契约枚举，该项未写入",
+                        "action": "保留可归一的部分",
+                    }
+                )
             result.facts[attribute] = normalized[0] if nc.is_single_value(attribute) else normalized
         else:
             result.facts[attribute] = values[0] if len(values) == 1 else values
@@ -619,13 +784,119 @@ def serialize_value(attribute: str, value: Any) -> str:
     return _as_text(value)
 
 
+def _confidence_for(result: Projection, key: str, sources: Sequence[Claim]) -> float:
+    """按字段级置信档给 ``reasoning_detail.confidence``。
+
+    被降级的字段给 0.5——这个数**不参与取舍**（取舍看 ``basis``），只供人工复核排序：
+    销售按它一眼能分出「模型很确定的」和「模型只是猜的」。
+    """
+    if result.basis.get(key) == INFERRED_LOW:
+        return 0.5
+    return 0.9 if sources and sources[0].tier == REGISTRY else 0.7
+
+
+_AUDIT_TOKENS = tuple(
+    sorted(
+        set(TIER_LABEL.values())
+        | {
+            "归属过滤", "来源分级", "枚举归一", "单多值约束", "契约校验",
+            "未知渠道", "按来源分级投影得到", "断言",
+        },
+        key=len,
+        reverse=True,
+    )
+)
+"""对客文案里**必须**剥除的内部用语：来源档代号与投影规则名（v2.1 硬约束，设计稿 §1）。"""
+
+
+def _plain_text(text: Any) -> str:
+    """把内部用语从对客文案里剥掉。
+
+    L1 用 ``basis_of_inference`` 写推断依据时常把来源档代号与置信度一并写进去
+    （实测「第三方预测性别为男（0.94）」）。这些是审计串，销售看不懂，**必须**在出口
+    剥除——提示词已要求模型别写，但出口的自净不能指望模型自觉。
+    """
+    out = str(text or "")
+    for token in _AUDIT_TOKENS:
+        out = out.replace(token, "")
+    # 「（0.94）」这类内部置信度一并去掉：它不面向销售，且会暴露证据分级的存在。
+    out = re.sub(r"[（(]\s*0?\.\d+\s*[)）]", "", out)
+    return re.sub(r"\s+", " ", out).strip(" ：:、,，")
+
+
+def _readable_evidence(sources: Sequence[Claim]) -> list[str]:
+    """证据串：**原文切片优先**，其次推断依据，最后才退到渠道名。
+
+    v2.1 硬约束（设计稿 §1）：证据锚点要精确到客户原始数据中的某段内容——录音里的
+    某段话、三方数据里的某个标签。v2 曾把「来源档（渠道名）」当证据、渠道名取不到时
+    还落成字面量「未知渠道」（8 案 128 条），那是审计串不是证据。这里**不留任何占位**：
+    三者都没有，就给空列表。
+    """
+    evidence: list[str] = []
+    for claim in sources:
+        if claim.quote:
+            text = f"{claim.channel}：{claim.quote}" if claim.channel else claim.quote
+            if text not in evidence:
+                evidence.append(text)
+            continue
+        for hint in claim.basis_of_inference:
+            text = _plain_text(hint)
+            if text and text not in evidence:
+                evidence.append(text)
+        if not claim.basis_of_inference and claim.channel:
+            text = _plain_text(claim.channel)
+            if text and text not in evidence:
+                evidence.append(text)
+    return evidence
+
+
+def _readable_steps(sources: Sequence[Claim]) -> list[str]:
+    """推理步骤：由原始依据推出结论的**推导链**，1–3 条中文短句。
+
+    不得出现投影规则名（归属过滤 / 来源分级 / 枚举归一）与来源档代号——那些是
+    内部审计串，销售看不懂（设计稿 §1）。
+    """
+    quoted = [(c.quote, c.channel) for c in sources if c.quote]
+    if quoted:
+        quote, channel = quoted[0]
+        steps = [f"原始依据：{quote}"]
+        if channel:
+            steps.append(f"来自{channel}")
+        return steps
+    hints: list[str] = []
+    for claim in sources:
+        for hint in claim.basis_of_inference:
+            text = _plain_text(hint)
+            if text and text not in hints:
+                hints.append(text)
+    if hints:
+        return ["推断依据：" + "；".join(hints[:4])]
+    channel = next((c.channel for c in sources if c.channel), "")
+    return [f"来自{channel}" if channel else "据现有记录归纳"]
+
+
+def _readable_summary(sources: Sequence[Claim]) -> str:
+    """一句话说清结论怎么来的（真人可读）。"""
+    quote = next((c.quote for c in sources if c.quote), "")
+    if quote:
+        return f"有原文依据：{quote}"
+    hint = next((_plain_text(h) for c in sources for h in c.basis_of_inference if _plain_text(h)), "")
+    if hint:
+        return f"由多条线索推断：{hint}"
+    return "由渠道记录归纳得出"
+
+
 def _to_notes_updates(
     result: Projection, grouped: Mapping[str, list[Claim]]
 ) -> list[dict[str, Any]]:
     """把 ``facts`` 投影成 42 字段形态的 Notes 更新项。
 
-    只输出**有事实支撑**的字段（缺失即留白，规则 g）。``reasoning_detail.evidence``
-    写「来源档（渠道）」，L3 阶段会替换为代码展开的原文切片——此刻不编造引文。
+    只输出**有事实支撑**的字段（缺失即留白，规则 g）。
+
+    ``reasoning_detail`` 面向**销售**，一律真人可读（v2.1 硬约束，设计稿 §1）：
+    ``evidence`` 首选 L1 定位层切出的原文切片（``quote``），其次是推断依据
+    （``basis_of_inference``），都不给才退到渠道名；``steps`` 写推导链。**不得**再出现
+    投影规则名（归属过滤 / 来源分级 / 枚举归一）或来源档代号，也不留「未知渠道」占位。
     """
     updates: list[dict[str, Any]] = []
     for key in nc.ALL_KEYS:
@@ -642,29 +913,171 @@ def _to_notes_updates(
         if not value:
             continue
 
-        sources = grouped.get(key) or []
-        evidence: list[str] = []
-        for claim in sorted(sources, key=lambda c: c.rank):
-            label = f"{TIER_LABEL[claim.tier]}（{claim.channel or '未知渠道'}）"
-            if label not in evidence:
-                evidence.append(label)
+        sources = sorted(grouped.get(key) or [], key=lambda c: c.rank)
         updates.append(
             {
                 "attribute_key": key,
                 "attribute_value": value,
                 "reasoning_detail": {
-                    "summary": f"由 {len(sources)} 条断言按来源分级投影得到",
-                    "steps": [
-                        f"归属过滤：剔除主体非客户本人的断言（保留 {len(sources)} 条）",
-                        f"来源分级：取最高档 {TIER_LABEL[sources[0].tier] if sources else '未知'}",
-                        "枚举归一 / 单多值约束：按 note-attributes 契约校验",
-                    ],
-                    "evidence": evidence,
-                    "confidence": 0.9 if sources and sources[0].tier == REGISTRY else 0.7,
+                    "summary": _readable_summary(sources),
+                    "steps": _readable_steps(sources),
+                    "evidence": _readable_evidence(sources),
+                    "confidence": _confidence_for(result, key, sources),
                 },
             }
         )
     return updates
+
+
+# ====================================================================
+# LLM 兜底：候选集与终判校验（设计稿 §6.3）
+# ====================================================================
+
+
+def build_l2_candidates(
+    claims: Sequence[Claim], result: Projection, covered: Iterable[str] = ()
+) -> list[dict[str, Any]]:
+    """整理「规则判不了」的部分，作为 LLM 兜底的输入。
+
+    **能写成规则的，不交给 LLM**（设计稿 §6.1）：只有进了 ``to_confirm`` 的字段才在这里出现，
+    且每条都带**带来源档与 basis 的候选值**——兜底只能在这个集合里裁决。
+
+    v2.1 增补：``covered`` 传入「L1 已给结论的字段」，其余契约字段作为**缺字段**候选
+    一并交给兜底（``missing=True``）。它们没有候选值，兜底只能基于已有 ``facts`` 归纳，
+    且产出恒为 ``inferred_low``（见 :func:`apply_l2_verdict`）——这是问题 2「没有任何一层
+    负责字段级补全」的落地，同时不松开「不得编造候选集外取值」的红线（缺字段本就没有
+    候选集，因此只能给软值）。
+    """
+    grouped = group_by_attribute(claims)
+    candidates: list[dict[str, Any]] = []
+    for entry in result.to_confirm:
+        attribute = str(entry.get("attribute_key") or "")
+        if not attribute:
+            continue
+        options: list[dict[str, Any]] = []
+        for claim in grouped.get(attribute) or []:
+            options.append(
+                {
+                    "value": claim.value,
+                    "channel": claim.channel,
+                    "tier": TIER_LABEL[claim.tier],
+                    "basis": claim.effective_basis,
+                }
+            )
+        candidates.append(
+            {
+                "attribute_key": attribute,
+                "current_value": result.facts.get(attribute),
+                "current_basis": result.basis.get(attribute, FACT),
+                "candidates": entry.get("candidates") or [],
+                "options": options,
+                "reason": entry.get("reason") or "",
+            }
+        )
+
+    seen = {c["attribute_key"] for c in candidates}
+    for key in nc.ALL_KEYS:
+        if key in seen or key in covered or key in result.facts:
+            continue
+        candidates.append(
+            {
+                "attribute_key": key,
+                "current_value": None,
+                "current_basis": FACT,
+                "candidates": [],
+                "options": [],
+                "missing": True,
+                "reason": "L1 未给出该字段结论，可按已有事实归纳补一个软值",
+            }
+        )
+    return candidates
+
+
+def apply_l2_verdict(
+    candidates: Sequence[Mapping[str, Any]], verdict_json: Any
+) -> dict[str, Any]:
+    """校验 LLM 兜底的终判，返回 ``{accepted, rejected, out_of_bounds}``。
+
+    **硬边界：不得新增候选集之外的字段值**（设计稿 §6.3）。终判给的值必须能在该字段的
+    候选集里找到出处——比对的形态是 ``serialize_value`` 之后的字符串，因为模型看到的
+    是候选值本身，而它回的可能已经是落库形态。
+
+    越界项一律拒收并留痕，**不修改 facts**：兜底是裁决者，不是作者。宁可字段停在
+    ``to_confirm``，也不能让一个凭空生成的取值进产物——那正是 production 那 11 路
+    自由生成的老毛病。
+    """
+    data = verdict_json
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except ValueError:
+            return {"accepted": [], "rejected": [], "out_of_bounds": 0, "parse_ok": False}
+    if isinstance(data, Mapping):
+        data = data.get("verdicts", data.get("fields", []))
+    if not isinstance(data, (list, tuple)):
+        return {"accepted": [], "rejected": [], "out_of_bounds": 0, "parse_ok": False}
+
+    allowed: dict[str, set[str]] = {}
+    missing: set[str] = set()
+    for candidate in candidates:
+        attribute = str(candidate.get("attribute_key") or "")
+        pool: list[Any] = list(candidate.get("candidates") or [])
+        pool += [option.get("value") for option in candidate.get("options") or []]
+        allowed[attribute] = {serialize_value(attribute, value) for value in pool}
+        if candidate.get("missing"):
+            missing.add(attribute)
+
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    out_of_bounds = 0
+    for item in data:
+        if not isinstance(item, Mapping):
+            continue
+        attribute = str(item.get("attribute_key") or "")
+        value = item.get("value", item.get("attribute_value"))
+        if not attribute or value is None:
+            continue
+        as_text = serialize_value(attribute, value)
+        if attribute in missing:
+            # 缺字段补全：本就没有候选集，因此**不判越界**，但恒为软值 inferred_low
+            # （兜底是「补一个可核对的猜测」，不是「给一个事实」）。
+            if not as_text.strip():
+                continue
+            accepted.append(
+                {
+                    "attribute_key": attribute,
+                    "attribute_value": as_text,
+                    "basis": INFERRED_LOW,
+                    "reason": str(item.get("reason") or "据已有事实归纳"),
+                    "missing": True,
+                }
+            )
+            continue
+        if as_text not in allowed.get(attribute, set()):
+            out_of_bounds += 1
+            rejected.append(
+                {
+                    "attribute": attribute,
+                    "value": value,
+                    "rule": "g_out_of_candidates",
+                    "reason": "兜底给出的取值不在候选集内，已拒收",
+                }
+            )
+            continue
+        accepted.append(
+            {
+                "attribute_key": attribute,
+                "attribute_value": as_text,
+                "basis": str(item.get("basis") or INFERRED_HIGH),
+                "reason": str(item.get("reason") or ""),
+            }
+        )
+    return {
+        "accepted": accepted,
+        "rejected": rejected,
+        "out_of_bounds": out_of_bounds,
+        "parse_ok": True,
+    }
 
 
 # ====================================================================

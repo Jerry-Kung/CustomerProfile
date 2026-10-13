@@ -83,11 +83,20 @@ def test_attribution_filter_still_blocks_other_identity_fields():
         assert key not in result.facts, f"{key} 不应接受非客户本人主体的断言"
 
 
-def test_prediction_alone_cannot_support_identity():
+def test_prediction_alone_downgrades_not_drops_identity():
+    """预测单独撑身份字段：**降为 inferred_low 仍写入**，并转人工确认。
+
+    v1 在这里丢弃整条字段，代价是「妻子在电力局被写成客户职业」那类错误被一并
+    误杀了正确结论。v2 保留值、拉低置信档、转确认——销售看得到线索，也不会
+    把它当客户事实（设计稿 §6.2 规则 b）。
+    """
     result = proj.project([claim("occupation", "货车司机", channel="第三方画像数据")])
-    assert "occupation" not in result.facts
-    assert any(r["rule"] == "b_prediction_only" for r in result.rejected)
+    assert result.facts.get("occupation") == "货车司机"
+    assert result.basis.get("occupation") == "inferred_low"
+    assert any(d["rule"] == "b_prediction_only" for d in result.downgraded)
     assert any(t["attribute_key"] == "occupation" for t in result.to_confirm)
+    # 降级**不是**拒收：rejected 里不该再有它，否则两条账会互相打架。
+    assert not any(r["rule"] == "b_prediction_only" for r in result.rejected)
 
 
 def test_prediction_plus_firsthand_is_kept():
@@ -147,10 +156,120 @@ def test_structured_enum_from_display_name_fills_empty_input_value():
     assert result.facts.get("family_structure") == {"key": "has_children", "input_value": ""}
 
 
-def test_illegal_enum_rejected_and_left_blank():
+def test_illegal_enum_keeps_original_value_and_downgrades():
+    """归不到合法枚举键：**保留原值** + 降为 inferred_low + 转确认。
+
+    原值往往就是客户的原话。因为格式对不上就把事实扔掉，是 v1 掉字段的主因之一
+    （设计稿 §6.2 规则 d）。
+    """
     result = proj.project([claim("purchase_type", "想买但还没定")])
-    assert "purchase_type" not in result.facts
-    assert any(r["rule"] == "d_enum" for r in result.rejected)
+    assert result.facts.get("purchase_type") == "想买但还没定"
+    assert result.basis.get("purchase_type") == "inferred_low"
+    assert any(d["rule"] == "d_enum" for d in result.downgraded)
+    assert any(t["attribute_key"] == "purchase_type" for t in result.to_confirm)
+    # 保留的必须是**原值**，不得被改写成半个合法键。
+    entry = next(u for u in result.notes_updates if u["attribute_key"] == "purchase_type")
+    assert entry["attribute_value"] == "想买但还没定"
+    assert entry["reasoning_detail"]["confidence"] == 0.5
+
+
+def test_partially_illegal_enum_keeps_the_normalizable_part():
+    """多选字段里部分能归一时，**不因一项不合法丢掉整个字段**。"""
+    result = proj.project([claim("core_concerns", "油耗||看不懂的东西")])
+    assert result.facts.get("core_concerns") == ["fuel_efficiency"]
+    assert any(d["rule"] == "d_enum_partial" for d in result.downgraded)
+
+
+def test_social_alone_downgrades_identity_field():
+    """社交自呈现单独撑身份字段 → 降级（硬规则 3，与规则 b 同机制、不同规则名）。"""
+    result = proj.project([claim("company", "某某公司", channel="小红书主页截图信息")])
+    assert result.facts.get("company") == "某某公司"
+    assert result.basis.get("company") == "inferred_low"
+    assert any(d["rule"] == "b_social_only" for d in result.downgraded)
+
+
+def test_attitude_field_without_firsthand_downgrades():
+    """态度类字段只有弱来源 → 降级（硬规则 2）。"""
+    result = proj.project([claim("emotion", "hate_being_rushed", channel="朋友圈截图内容信息")])
+    assert result.facts.get("emotion") == ["hate_being_rushed"]
+    assert result.basis.get("emotion") == "inferred_low"
+    assert any(d["rule"] == "b_attitude_weak_source" for d in result.downgraded)
+
+
+def test_prediction_channel_claiming_fact_is_treated_as_weak():
+    """渠道是第三方预测却自称 ``fact`` → 按更弱的一档处理（来源档比自述档硬）。"""
+    result = proj.project(
+        [claim("occupation", "货车司机", channel="第三方画像数据", basis="fact")]
+    )
+    assert result.basis.get("occupation") == "inferred_low"
+
+
+# ---------------------------------------------------------------- 兜底：候选集与越界拒收
+
+def test_l2_candidates_carry_source_and_basis():
+    """兜底输入必须是**带来源档与 basis 的候选值**，否则它无从判断「谁更强」。"""
+    result = proj.project(
+        [
+            claim("occupation", "教师", channel="外呼录音信息", created_at="2026-09-01"),
+            claim("occupation", "医生", channel="外呼录音信息", created_at="2026-09-02"),
+            claim("occupation", "货车司机", channel="第三方画像数据"),
+        ]
+    )
+    candidates = proj.build_l2_candidates(
+        [
+            claim("occupation", "教师", channel="外呼录音信息", created_at="2026-09-01"),
+            claim("occupation", "医生", channel="外呼录音信息", created_at="2026-09-02"),
+            claim("occupation", "货车司机", channel="第三方画像数据"),
+        ],
+        result,
+    )
+    entry = next(c for c in candidates if c["attribute_key"] == "occupation")
+    assert len(entry["options"]) == 3
+    assert {o["tier"] for o in entry["options"]} == {"一手交互", "第三方预测"}
+    assert {o["basis"] for o in entry["options"]} >= {"fact", "inferred_low"}
+
+
+def test_l2_verdict_cannot_add_value_outside_candidates():
+    """兜底是**裁决者不是作者**：候选集外的取值一律拒收，facts 不动。"""
+    candidates = [
+        {"attribute_key": "occupation", "candidates": ["教师", "医生"], "options": []}
+    ]
+    out = proj.apply_l2_verdict(
+        candidates,
+        json.dumps(
+            {
+                "verdicts": [
+                    {"attribute_key": "occupation", "value": "教师", "reason": "两条一手同向"},
+                    {"attribute_key": "occupation", "value": "航天员", "reason": "编的"},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+    )
+    assert [a["attribute_key"] for a in out["accepted"]] == ["occupation"]
+    assert out["accepted"][0]["attribute_value"] == "教师"
+    assert out["out_of_bounds"] == 1
+    assert out["rejected"][0]["rule"] == "g_out_of_candidates"
+
+
+def test_l2_verdict_accepts_value_from_options_too():
+    """候选出处可以是 ``options``（带来源档的那份），不必只在 ``candidates`` 里。"""
+    candidates = [
+        {
+            "attribute_key": "occupation",
+            "candidates": [],
+            "options": [{"value": "货车司机", "tier": "第三方预测", "basis": "inferred_low"}],
+        }
+    ]
+    out = proj.apply_l2_verdict(
+        candidates, json.dumps({"verdicts": [{"attribute_key": "occupation", "value": "货车司机"}]})
+    )
+    assert out["out_of_bounds"] == 0 and len(out["accepted"]) == 1
+
+
+def test_l2_verdict_unparsable_is_reported():
+    out = proj.apply_l2_verdict([], "这不是 JSON")
+    assert out["parse_ok"] is False and out["accepted"] == []
 
 
 def test_enum_key_passthrough():
@@ -360,3 +479,90 @@ def test_aggregate_key_set_is_deliberate():
     )
     # 集合内的字段都是契约里的自由文本字段（无 enum_options），否则归类无意义。
     assert all(not nc.is_enum(k) for k in proj.AGGREGATE_TEXT_KEYS)
+
+
+# ---------------------------------------------------------------- v2.1 可读性硬约束
+
+AUDIT_WORDS = (
+    "归属过滤", "来源分级", "枚举归一", "单多值约束", "契约校验",
+    "未知渠道", "社交自呈现", "一手交互", "第三方预测", "公开登记查询", "人工/系统登记",
+    "按来源分级投影得到", "断言",
+)
+
+
+def test_notes_reasoning_is_free_of_audit_language():
+    """对客的 ``summary`` / ``steps`` / ``evidence`` 不得出现任何内部审计词（设计稿 §1）。"""
+    result = proj.project([claim("occupation", "教师", quote="我以前做充电桩的")])
+    blob = json.dumps([u["reasoning_detail"] for u in result.notes_updates], ensure_ascii=False)
+    assert [w for w in AUDIT_WORDS if w in blob] == []
+
+
+def test_evidence_prefers_verbatim_quote():
+    """证据锚点首选**原文切片**，而不是来源档或字段名。"""
+    result = proj.project([claim("occupation", "教师", quote="我以前做充电桩的")])
+    detail = next(u for u in result.notes_updates if u["attribute_key"] == "occupation")["reasoning_detail"]
+    assert any("我以前做充电桩的" in str(e) for e in detail["evidence"])
+
+
+def test_plain_text_strips_tier_labels_and_internal_confidence():
+    """``_plain_text`` 是出口自净：模型把来源档代号写进推断依据时，在此剥除。"""
+    assert proj._plain_text("第三方预测性别为男（0.94）") == "性别为男"
+    stripped = proj._plain_text("来源分级：取最高档 社交自呈现")
+    assert "社交自呈现" not in stripped and "来源分级" not in stripped
+
+
+def test_inferred_notes_never_quote_tier_labels():
+    """实测缺陷：L1 把「第三方预测…」写进 ``basis_of_inference``，出口必须剥掉。"""
+    result = proj.project(
+        [
+            claim(
+                "annual_income",
+                "30-50万",
+                basis="inferred_high",
+                basis_of_inference=("第三方预测年收入 30-50 万（0.9）", "关注 30 万以上车型"),
+            )
+        ]
+    )
+    blob = json.dumps([u["reasoning_detail"] for u in result.notes_updates], ensure_ascii=False)
+    assert "第三方预测" not in blob
+    assert "0.9" not in blob
+
+
+# ---------------------------------------------------------------- R2 缺字段候选
+
+def test_candidates_include_missing_contract_fields():
+    """L1 没给结论的契约字段要成为缺字段候选，好让兜底基于 facts 补一个软值。"""
+    ledger = [claim("occupation", "教师")]
+    candidates = proj.build_l2_candidates(ledger, proj.project(ledger), covered={"occupation"})
+    missing = {c["attribute_key"] for c in candidates if c.get("missing")}
+    assert missing, "缺字段候选不得为空"
+    assert "occupation" not in missing, "L1 已给结论的字段不应被当成缺字段"
+    for entry in candidates:
+        if entry.get("missing"):
+            assert entry["candidates"] == [] and entry["options"] == []
+
+
+def test_missing_field_backfill_is_forced_soft():
+    """缺字段补全恒为 ``inferred_low``——即便模型自称 ``inferred_high``。"""
+    candidates = [
+        {"attribute_key": "annual_income", "candidates": [], "options": [], "missing": True}
+    ]
+    out = proj.apply_l2_verdict(
+        candidates,
+        json.dumps(
+            {
+                "verdicts": [
+                    {
+                        "attribute_key": "annual_income",
+                        "value": "15-25万",
+                        "basis": "inferred_high",
+                        "reason": "据职业为教师归纳",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+    )
+    assert out["out_of_bounds"] == 0
+    assert out["accepted"][0]["basis"] == "inferred_low"
+    assert out["accepted"][0]["missing"] is True

@@ -5,10 +5,10 @@
 
 为什么这几条都要有用例：
 
-- ``localize_claims`` 会**丢弃**断言。丢弃是静默的——出错不会报错，只会让画像少几个字段，
-  看起来像「模型没提取到」。因此每条丢弃口径都要正面钉住，同时要有「不该丢的没丢」的反例。
+- ``localize_claims`` 定位失败时**降级保留**（v2 起，v1 是整条丢弃）。降级是静默的——
+  出错不会报错，只会让一个本该够硬的字段滑到最低档，看起来像「模型没把握」。
+  因此每条降级口径都要正面钉住，同时要有「该保住的仍是原档」的反例。
 - ``build_l1_input`` 决定模型看得见什么。渠道分级标错，整条链的 ``claim_type`` 判定随之错。
-- ``overwrite_notes_updates`` 要改 ``result1``。改坏了产物形状，两臂立刻不可比。
 """
 
 from __future__ import annotations
@@ -54,6 +54,10 @@ def claim(**kwargs):
         "claim_type": "fact",
         "confidence": 0.9,
     }
+    # v2 的字段级结论用 ``basis``（三分类）；未显式给出时按 v1 的 ``claim_type`` 等价映射，
+    # 否则 `localize_claims` 会按 ``_basis_of`` 回推，用例就钉不住「传进来的档位有没有被尊重」。
+    base.setdefault("basis", {"fact": "fact", "observation": "inferred_high",
+                              "prediction": "inferred_low"}.get(base["claim_type"], "fact"))
     base.update(kwargs)
     return base
 
@@ -64,7 +68,7 @@ def test_anchor_localizes_to_verbatim_quote():
     """锚点定位成功后，引文是**原文切片**，不是模型抄的句子。"""
     body = "行吧，我以前做充电桩的，后来就转行了。"
     result = pipe.localize_claims(records_json(record("试驾录音信息", body)), claims_json(claim()))
-    claims = json.loads(result["claims_json"])["claims"]
+    claims = json.loads(result["claims_json"])["fields"]
     assert result["kept"] == 1 and result["dropped"] == 0
     assert claims[0]["quote"] == "我以前做充电桩的"
     start, end = claims[0]["span"]
@@ -78,28 +82,39 @@ def test_quote_is_always_a_slice_of_source():
         records_json(record("试驾录音信息", body)),
         claims_json(claim(attribute="family_structure", value="有孩子", anchor="我家两个孩子嘛，都")),
     )
-    for entry in json.loads(result["claims_json"])["claims"]:
+    for entry in json.loads(result["claims_json"])["fields"]:
         assert entry["quote"] in body
 
 
-def test_anchor_not_found_is_dropped():
-    """抄错字的断言必须丢弃——它是编造引文的入口。"""
+def test_anchor_not_found_is_downgraded_and_kept():
+    """抄错字的断言**降级保留**，不丢字段。
+
+    它仍是编造引文的入口——因此必须**同时**保证两件事：切不出 ``quote``（不给它
+    一个假的原文切片），且档位降到最低（不给它 ``fact`` 的分量）。v1 的做法是整条丢掉，
+    代价是一个正确的字段值因为引用抄错就消失；v2 的做法是留着值、降它的档。
+    """
     result = pipe.localize_claims(
         records_json(record("试驾录音信息", "我以前做充电桩的。")),
         claims_json(claim(anchor="我以前修充电桩的")),
     )
-    assert result["kept"] == 0
-    assert json.loads(result["dropped_detail"])[0]["reason"] == "anchor_not_found"
+    assert result["kept"] == 1 and result["dropped"] == 0
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert entry["basis"] == "inferred_low"
+    assert "quote" not in entry and "span" not in entry
+    assert json.loads(result["downgraded_detail"])[0]["reason"] == "anchor_not_found"
 
 
-def test_short_anchor_is_dropped():
-    """短锚点极易偶然命中，留下它换来的是噪声不是召回。"""
+def test_ambiguous_short_anchor_is_downgraded_and_kept():
+    """短锚偶然命中会引入歧义切片，因此**不给它引文**，但字段值仍保留在最低档。"""
     result = pipe.localize_claims(
         records_json(record("试驾录音信息", "好，行。")),
         claims_json(claim(anchor="好")),
     )
-    assert result["kept"] == 0
-    assert json.loads(result["dropped_detail"])[0]["reason"] == "anchor_too_short"
+    assert result["kept"] == 1 and result["dropped"] == 0
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert entry["basis"] == "inferred_low"
+    assert "quote" not in entry
+    assert json.loads(result["downgraded_detail"])[0]["reason"] == "anchor_too_short"
 
 
 def test_unique_short_anchor_is_kept():
@@ -112,27 +127,31 @@ def test_unique_short_anchor_is_kept():
         claims_json(claim(anchor="做充电桩")),
     )
     assert result["kept"] == 1
-    assert result["claims_json"] and "做充电桩" in json.loads(result["claims_json"])["claims"][0]["quote"]
+    assert "做充电桩" in json.loads(result["claims_json"])["fields"][0]["quote"]
 
 
-def test_repeated_short_anchor_is_still_dropped():
-    """短锚**出现多次**时定位有歧义 → 仍丢（这是原判据真正要防的情形）。"""
+def test_repeated_short_anchor_is_downgraded_and_kept():
+    """短锚**出现多次**时定位有歧义 → 降级（这是原判据真正要防的情形）。"""
     result = pipe.localize_claims(
         records_json(record("试驾录音信息", "好的好的，我下周来，好的。")),
         claims_json(claim(anchor="好的")),
     )
-    assert result["kept"] == 0
-    assert json.loads(result["dropped_detail"])[0]["reason"] == "anchor_too_short"
+    assert result["kept"] == 1 and result["dropped"] == 0
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert entry["basis"] == "inferred_low" and "quote" not in entry
+    assert json.loads(result["downgraded_detail"])[0]["reason"] == "anchor_too_short"
 
 
-def test_anchor_below_floor_is_dropped_even_if_unique():
-    """短于下限（4 字）的锚点即使唯一也没有证据价值 → 丢。"""
+def test_anchor_below_floor_is_downgraded_even_if_unique():
+    """短于下限（4 字）的锚点即使唯一也没有证据价值 → 降级，不给引文。"""
     result = pipe.localize_claims(
         records_json(record("试驾录音信息", "下周一见面，下周一定来。")),
         claims_json(claim(anchor="下周")),
     )
-    assert result["kept"] == 0
-    assert json.loads(result["dropped_detail"])[0]["reason"] == "anchor_too_short"
+    assert result["kept"] == 1 and result["dropped"] == 0
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert entry["basis"] == "inferred_low" and "quote" not in entry
+    assert json.loads(result["downgraded_detail"])[0]["reason"] == "anchor_too_short"
 
 
 def test_occurrences_matches_locate_whitespace_fallback():
@@ -141,14 +160,21 @@ def test_occurrences_matches_locate_whitespace_fallback():
     assert pipe._occurrences("好的好的", "好的") == 2
 
 
-def test_unknown_channel_is_dropped():
-    """渠道对不上记录层 → 丢弃（断言指不到任何一份记录）。"""
+def test_unknown_channel_is_downgraded_and_kept():
+    """渠道对不上记录层 → 降级保留，并**清空** ``record_channel``。
+
+    清空是必须的：一个指不到任何记录的渠道名若留着，下游按渠道判来源档时会把它
+    当成一条真的取证通道，反而抬高了这条断言的份量。
+    """
     result = pipe.localize_claims(
         records_json(record("试驾录音信息", "我以前做充电桩的。")),
         claims_json(claim(record_channel="不存在的渠道")),
     )
-    assert result["kept"] == 0
-    assert json.loads(result["dropped_detail"])[0]["reason"] == "unknown_channel"
+    assert result["kept"] == 1 and result["dropped"] == 0
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert entry["basis"] == "inferred_low"
+    assert entry["record_channel"] == ""
+    assert json.loads(result["downgraded_detail"])[0]["reason"] == "unknown_channel"
 
 
 def test_whitespace_only_difference_still_localizes():
@@ -159,7 +185,7 @@ def test_whitespace_only_difference_still_localizes():
         claims_json(claim(anchor="我以前做充电桩的")),
     )
     assert result["kept"] == 1
-    quote = json.loads(result["claims_json"])["claims"][0]["quote"]
+    quote = json.loads(result["claims_json"])["fields"][0]["quote"]
     assert quote.replace(" ", "") == "我以前做充电桩的"
 
 
@@ -238,12 +264,63 @@ def test_l1_input_keeps_transcript_verbatim():
     assert body in built["output"]
 
 
-def test_l1_input_empty_records_still_carries_enum_guide():
-    """无记录时正文为空，但**枚举键附录恒在**——它是字段对照表，不随记录有无而变。"""
+def test_l1_input_empty_records_still_carries_guide():
+    """无记录时正文为空，但**前置清单恒在**——它是字段对照表，不随记录有无而变。"""
     built = pipe.build_l1_input("[]")
     assert built["section_count"] == 0
-    assert built["output"] == pipe.enum_key_guide()
+    assert built["output"] == pipe.l1_guide()
     assert built["guide_chars"] > 0
+    # 清单必须**同时**含字段清单与合法取值两张表：只有枚举键时，模型不知道
+    # 一共有哪些字段、每个字段的口径是什么，覆盖要求就无从落实。
+    assert "目标字段清单" in built["output"] and "可选字段的合法取值" in built["output"]
+
+
+def test_field_inference_guide_covers_all_42_fields():
+    """《字段清单》必须逐条列出契约里**全部**字段，并在每个字段后带上契约原文口径。"""
+    guide = pipe.field_inference_guide()
+    listed = {
+        line.split("`")[1]
+        for line in guide.splitlines()
+        if line.startswith("- `") and line.count("`") >= 2
+    }
+    assert listed == set(nc.ALL_KEYS)
+    assert len(listed) == 42
+    # 口径取自契约：抽两条逐字比对，钉住「不手抄」这条约束。
+    for key in ("planned_purchase_time", "core_concerns"):
+        description = (nc.by_key(key).get("description") or "").strip()
+        assert f"- `{key}`" in guide
+        assert description in guide
+
+
+def test_field_inference_guide_labels_categories():
+    """五个字段大类都要出现——清单按类分组，模型才看得出口径的归属。"""
+    guide = pipe.field_inference_guide()
+    for category in (nc.BASE_IDENTITY, nc.PURCHASE_NEED, nc.BUDGET_FINANCE,
+                     nc.DECISION_RHYTHM, nc.PREFERENCE_NOTE):
+        assert f"### {category}" in guide
+
+
+def test_field_source_notes_keys_are_real_contract_fields():
+    """来源补充说明的键必须是契约真字段名。
+
+    这是**防漂移**的机制：字段改名或下线后，这张表若不跟着改，那段说明就会静默失效——
+    模型既看不到它，也没人会发现它已经不生效了。
+    """
+    keys = set(pipe.FIELD_SOURCE_NOTES)
+    assert keys, "来源补充表不得为空"
+    assert keys <= set(nc.ALL_KEYS), f"不在契约里的字段名：{sorted(keys - set(nc.ALL_KEYS))}"
+    guide = pipe.field_inference_guide()
+    for key in keys:
+        assert f"取证范围：" in guide.split(f"- `{key}`")[1].split("\n")[0] or \
+            "取证范围：" in guide
+
+
+def test_field_inference_guide_renders_source_notes_inline():
+    """补充说明要**贴着字段**渲染（缩进子项），而不是另起一节——另起一节模型容易漏读。"""
+    guide = pipe.field_inference_guide()
+    lines = guide.splitlines()
+    index = next(i for i, line in enumerate(lines) if line.startswith("- `planned_purchase_time`"))
+    assert lines[index + 1].startswith("  - 取证范围：")
 
 
 # ---------------------------------------------------------------- 枚举键附录（R0 §5.1 修复）
@@ -297,7 +374,7 @@ def test_l1_input_places_guide_before_records():
     body = "（客户）我上次说的那个价格……"
     built = pipe.build_l1_input(records_json(record("外呼录音信息", body, kind="transcript")))
     assert built["output"].index("可选字段的合法取值") < built["output"].index(body)
-    assert built["guide_chars"] == len(pipe.enum_key_guide())
+    assert built["guide_chars"] == len(pipe.l1_guide())
     # 记录原文必须是**最后一段**：模型对上下文尾部最敏感。
     assert built["output"].rstrip().endswith(body)
 
@@ -371,69 +448,55 @@ def test_project_claims_old_car_forces_replacement():
     assert json.loads(result["facts_json"]).get("purchase_type") == "replacement"
 
 
-# ---------------------------------------------------------------- overwrite_notes_updates
+# ---------------------------------------------------------------- v2.1 R3 渠道塌陷修复
 
-def test_overwrite_replaces_basic_notes_updates():
-    payload = json.dumps(
-        {"analysis_result": {"basic_notes_updates": [{"attribute_key": "旧"}], "profile_summary": {}},
-         "batch_id": "", "phone": "13500000000"},
-        ensure_ascii=False,
-    )
-    updates = json.dumps(
-        [{"attribute_key": "occupation", "attribute_value": "教师",
-          "reasoning_detail": {"summary": "s", "steps": ["a"], "evidence": [], "confidence": 0.7}}],
-        ensure_ascii=False,
-    )
-    result = pipe.overwrite_notes_updates(payload, updates)
-    assert result["overwrite_applied"] is True and result["notes_count"] == 1
-    merged = json.loads(result["result1"])
-    assert merged["analysis_result"]["basic_notes_updates"][0]["attribute_key"] == "occupation"
-    assert merged["phone"] == "13500000000"
-    assert "profile_summary" in merged["analysis_result"]
+def test_inferred_high_without_channel_keeps_basis():
+    """`inferred_*` 类本就允许留空渠道，**不得**因「没给渠道」被降级。
 
-
-def test_overwrite_preserves_other_sections():
-    payload = json.dumps(
-        {"analysis_result": {"basic_notes_updates": [], "emotion_state": {"emotion": "平静"}}},
-        ensure_ascii=False,
-    )
-    result = pipe.overwrite_notes_updates(payload, "[]")
-    assert json.loads(result["result1"])["analysis_result"]["emotion_state"] == {"emotion": "平静"}
-
-
-def test_empty_notes_never_blank_production_fields():
-    """L2 产出为空时**不得覆写**：一次空响应不该把 production 已填好的字段清空。
-
-    R1 实测 16761543238 的 L1 返回 `{"claims": []}`——合法 JSON、重试不触发，
-    照原实现覆写后 production 的 8 个字段全部消失。
+    v2 曾把「压根没给渠道」当成「渠道对不上记录层」，把 8 案 209 条断言（92% 的降级）
+    一并压成 ``inferred_low``——三分类在字段级塌陷的根因（设计稿 §2.3）。
     """
-    payload = json.dumps(
-        {"analysis_result": {"basic_notes_updates": [
-            {"attribute_key": "title", "attribute_value": "Mr"}]}},
-        ensure_ascii=False,
+    result = pipe.localize_claims(
+        records_json(record("试驾录音信息", "我以前做充电桩的。")),
+        claims_json(
+            claim(
+                attribute="annual_income",
+                value="30-50万",
+                record_channel="",
+                basis="inferred_high",
+                basis_of_inference=["职业为互联网中层"],
+            )
+        ),
     )
-    out = pipe.overwrite_notes_updates(payload, "[]")
-    assert out["overwrite_applied"] is False
-    kept = json.loads(out["result1"])["analysis_result"]["basic_notes_updates"]
-    assert kept and kept[0]["attribute_key"] == "title"
-    assert out["overwrite_reason"]
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert entry["basis"] == "inferred_high"
+    reasons = [d["reason"] for d in json.loads(result["downgraded_detail"])]
+    assert "unknown_channel" not in reasons
 
 
-def test_overwrite_unparsable_result1_passes_through():
-    """解不动就原样返回并留痕，不抛异常——notes 为空与整案失败是两件事。"""
-    result = pipe.overwrite_notes_updates("{不是 JSON", "[]")
-    assert result["overwrite_applied"] is False
-    assert result["result1"] == "{不是 JSON"
-    assert result["overwrite_reason"]
+def test_fact_without_channel_is_still_downgraded():
+    """反面：``fact`` 无渠道、无锚点可定位 → 仍降级（事实必须能回溯）。"""
+    result = pipe.localize_claims(
+        records_json(record("试驾录音信息", "我以前做充电桩的。")),
+        claims_json(claim(attribute="occupation", value="充电桩行业", record_channel="")),
+    )
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert entry["basis"] == "inferred_low"
+    assert "unknown_channel" in [d["reason"] for d in json.loads(result["downgraded_detail"])]
 
 
-def test_overwrite_missing_analysis_result_passes_through():
-    result = pipe.overwrite_notes_updates(json.dumps({"phone": "1"}, ensure_ascii=False), "[]")
-    assert result["overwrite_applied"] is False
+# ---------------------------------------------------------------- v2.1 R2 空值占位 KPI
 
-
-def test_overwrite_accepts_parsed_dict():
-    """result1 已是对象时也要能覆写（用**非空**产出，空产出按设计不覆写，另有用例钉住）。"""
-    updates = json.dumps([{"attribute_key": "title", "attribute_value": "Mr"}], ensure_ascii=False)
-    result = pipe.overwrite_notes_updates({"analysis_result": {"basic_notes_updates": []}}, updates)
-    assert result["overwrite_applied"] is True and result["notes_count"] == 1
+def test_blank_value_claims_are_counted_and_dropped():
+    """``value`` 为空的占位断言被拒收并计入 KPI，而不是伪装成一条有效结论。"""
+    result = pipe.project_claims(
+        claims_json(
+            claim(attribute="occupation", value="教师"),
+            claim(attribute="hobbies", value="", claim_id="c_002"),
+            claim(attribute="pain_points", value="[]", claim_id="c_003"),
+            claim(attribute="douyin_id", value="   ", claim_id="c_004"),
+        )
+    )
+    assert result["empty_claims"] == 3
+    assert set(json.loads(result["empty_claim_names"])) == {"hobbies", "pain_points", "douyin_id"}
+    assert json.loads(result["facts_json"]).get("occupation") == "教师"
