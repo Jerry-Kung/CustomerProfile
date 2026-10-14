@@ -101,6 +101,13 @@ docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml 
   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
+构建成功后，启动时沿用已经生成的镜像，避免再次使用默认构建参数：
+
+```bash
+docker compose -p "$CP_BACKEND_PROJECT" -f docker-compose.yml up -d --no-build --no-deps --force-recreate worker commercial-worker
+docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml up -d --no-build --force-recreate profile-runner-worker
+```
+
 该方式直接指定镜像地址，不需要修改服务器全局 Docker 配置或重启 Docker。基础镜像平台仍为原有 ARM64，沿用原服务器的架构适配方式。
 
 ## 发布前保留回滚版本
