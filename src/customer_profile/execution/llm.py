@@ -122,6 +122,135 @@ def parse_json_output(text: str) -> Any:
     return json.loads(candidate)
 
 
+def _bracket_scan(candidate: str) -> tuple[list[str], bool]:
+    """走查一遍字符串，返回 ``(未闭合的括号栈, 是否停在未闭合字符串里)``。
+
+    跳过字符串字面量内部的括号（含转义），因此只统计**结构性**括号。
+    """
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for char in candidate:
+        if escaped:
+            escaped = False
+            continue
+        if in_string:
+            if char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]" and stack:
+            stack.pop()
+    return stack, in_string
+
+
+def close_open_brackets(text: str) -> str:
+    """按未闭合的括号栈补齐结尾，得到一个语法完整的候选。
+
+    针对实测的失败形态：模型写完了全部内容，却在**结尾漏掉几个闭合括号**
+    （v2.1 的 ``13435844484`` 三次尝试都少两个 ``}``，输出长度与报错位置相等，
+    证明不是被截断，是配平缺失）。补的是**结构**，不是内容——内容仍全部来自模型输出。
+    """
+    candidate = strip_code_fence(text)
+    stack, in_string = _bracket_scan(candidate)
+    repaired = candidate + ('"' if in_string else "")
+    repaired += "".join("}" if opener == "{" else "]" for opener in reversed(stack))
+    return repaired
+
+
+def _truncate_to_last_complete(candidate: str) -> str | None:
+    """截到最后一个「括号栈回到空」的位置，返回该前缀；没有则 ``None``。"""
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    last_complete: int | None = None
+    for index, char in enumerate(candidate):
+        if escaped:
+            escaped = False
+            continue
+        if in_string:
+            if char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            if not stack:
+                break
+            opener = stack.pop()
+            if (opener == "{" and char != "}") or (opener == "[" and char != "]"):
+                break
+            if not stack:
+                last_complete = index + 1
+    if last_complete is None:
+        return None
+    return candidate[:last_complete]
+
+
+def salvage_json_output(text: str) -> tuple[Any | None, str | None]:
+    """尽力抢救一个语法不完整的 JSON 输出，返回 ``(对象, 失败原因)``。
+
+    三级策略，逐级放宽：
+
+    1. **补括号**：按未闭合栈补齐结尾（治「内容写完、结尾漏括号」）；
+    2. **截断**：截到最后一个完整的顶层对象（治「尾部多写了半句话」）；
+    3. **补括号后再截断**：前两者都不成时的兜底。
+
+    抢救成功返回对象、原因为 ``None``；全失败返回 ``None`` 与最后一条错误。
+    调用方拿到对象后应**留痕**，让人知道这份产物是抢救出来的、不是完好解析的。
+    """
+    candidate = strip_code_fence(text)
+    if not candidate:
+        return None, "JSON 输出为空"
+
+    last_error: str | None = None
+    try:
+        return json.loads(close_open_brackets(candidate)), None
+    except ValueError as exc:
+        last_error = f"close_open_brackets: {exc}"
+
+    truncated = _truncate_to_last_complete(candidate)
+    if truncated:
+        try:
+            return json.loads(truncated), None
+        except ValueError as exc:
+            last_error = f"truncate: {exc}"
+        try:
+            return json.loads(close_open_brackets(truncated)), None
+        except ValueError as exc:
+            last_error = f"truncate+close: {exc}"
+
+    return None, last_error or "无法抢救"
+
+
+def parse_jsonl_output(text: str) -> tuple[list[Any], list[dict[str, Any]]]:
+    """解析 JSONL（每行一个 JSON 值），返回 ``(成功解析的列表, 坏行明细)``。
+
+    **坏行只丢那一行，不丢整段**——这正是它比单个大 JSON 更抗崩的地方（v3 任务书 §P1）。
+    空行跳过；代码块围栏按行剥除；非 JSON 的说明行记为坏行（留痕不静默）。
+    """
+    records: list[Any] = []
+    dropped: list[dict[str, Any]] = []
+    for line_no, raw_line in enumerate(text.splitlines(), start=1):
+        line = strip_code_fence(raw_line)
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except ValueError as exc:
+            dropped.append({"line": line_no, "error": str(exc), "text": raw_line[:200]})
+    return records, dropped
+
+
 # ---------------------------------------------------------------- 调用
 
 MAX_ATTEMPTS = 3
@@ -292,6 +421,7 @@ class LlmClient:
         images: Sequence[str] | None = None,
         detail: str | None = None,
         expect_json: bool = False,
+        expect_jsonl: bool = False,
         node_ref: Any = None,
         max_attempts: int = MAX_ATTEMPTS,
     ) -> str | dict[str, Any]:
@@ -299,6 +429,14 @@ class LlmClient:
 
         ``expect_json=True`` 时返回解析后的对象，否则返回文本。判定「是否需要 JSON」
         依据**下游消费方语义**，由调用点显式声明（§6.4.2 的结论）。
+
+        ``expect_jsonl=True`` 时按**逐行 JSON** 解析，返回
+        ``{"records": [...], "dropped_lines": [...]}``：一行坏了只丢那一行，不丢整段
+        （v3 任务书 P1）。它与 ``expect_json`` 互斥，调用点择一。
+
+        **JSON 解析失败先抢救**（v3 P1）：实测失败形态是「内容写完、结尾漏两个括号」，
+        不是被截断。因此严格解析失败时先 :func:`salvage_json_output` 补括号/截断；
+        抢救得到对象即算成功（否则一次结尾手误就让整案归零）。抢救不到才按原逻辑重试。
 
         每次尝试都写入 ``node_ref`` 指向的尝试记录，失败时抛 :class:`LlmCallError`
         并把全部尝试带出。
@@ -313,10 +451,21 @@ class LlmClient:
 
             if attempt.succeeded:
                 text = attempt.response_text or ""
+                if expect_jsonl:
+                    records, dropped = parse_jsonl_output(text)
+                    if records or not dropped:
+                        return {"records": records, "dropped_lines": dropped}
+                    attempt.anomaly = f"invalid_jsonl: {len(dropped)} 行无法解析"
+                    if attempt_no >= max_attempts:
+                        break
+                    continue
                 if expect_json:
                     try:
                         return parse_json_output(text)
                     except ValueError as exc:
+                        salvaged, _reason = salvage_json_output(text)
+                        if salvaged is not None:
+                            return salvaged
                         # 记下判为异常的原因。尝试本身已在进入循环时写入过记录，
                         # 这里不再重复写一行——否则同一次尝试会占两行，让「尝试次数」
                         # 这类统计失真。

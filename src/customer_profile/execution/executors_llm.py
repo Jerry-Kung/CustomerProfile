@@ -97,6 +97,12 @@ async def execute_llm(
     image_detail = node.config.get("image_detail")
 
     expect_json = bool(node.config.get("expect_json", False))
+    output_format = str(node.config.get("output_format") or "").strip().lower()
+    if not output_format:
+        output_format = "json" if expect_json else "text"
+    if output_format in ("json", "jsonl"):
+        expect_json = output_format == "json"
+    expect_jsonl = output_format == "jsonl"
     output_field = node.config.get("output", "text")
 
     node_ref = _NodeRef(ctx, node)
@@ -106,8 +112,25 @@ async def execute_llm(
         images=images,
         detail=image_detail,
         expect_json=expect_json,
+        expect_jsonl=expect_jsonl,
         node_ref=node_ref,
     )
+
+    if expect_jsonl:
+        # ``jsonl``：一行一个 JSON 值。``records`` 是成功解析的列表，``dropped_lines``
+        # 是坏行明细——**坏行只丢那一行**，不整段作废（v3 任务书 P1）。
+        # ``text`` 与 ``parsed_json`` 按 json 分支同口径给出，供既有消费方沿用。
+        payload = raw if isinstance(raw, dict) else {"records": [], "dropped_lines": []}
+        records = payload.get("records") or []
+        return ExecutionOutcome(
+            outputs={
+                output_field: json.dumps(records, ensure_ascii=False),
+                "records": records,
+                "dropped_lines": payload.get("dropped_lines") or [],
+                "parsed_json": records,
+            },
+            meta={"expect_jsonl": True},
+        )
 
     if expect_json:
         # ``text`` 必须是**字符串**，不是解析后的对象。

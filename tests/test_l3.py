@@ -271,8 +271,9 @@ def test_expression_node_binds_only_facts_and_assets():
     assert sources <= asset_ids | {l3.VALIDATE}, f"混入了资产与事实之外的来源：{sources - asset_ids - {l3.VALIDATE}}"
     assert l3.VALIDATE in sources, "必须吃到已定稿事实"
     assert len(sources & asset_ids) >= 4, "业务资产要真的接进去，否则表达层无从选词"
-    # 结构保证本身：原始证据的入口（L1 取证层）不得出现在这里
-    assert pipe.L1_LLM not in sources and pipe.L1_INPUT not in sources
+    # 结构保证本身：原始证据的入口（L1 三层）不得出现在这里
+    assert pipe.L1_INPUT not in sources and pipe.L1_FACTS not in sources
+    assert pipe.L1_PERSONA not in sources and pipe.L1_FIELDS not in sources
 
 
 def test_inferred_low_constant_matches_projection():
@@ -314,10 +315,10 @@ def test_pipeline_no_longer_carries_the_old_evidence_path():
         assert gone not in ids
 
 
-def test_pipeline_llm_nodes_are_exactly_l1_and_l2_fallback():
-    """管线只剩两次 LLM 调用：L1 取证与 L2 兜底。成文段已交给 L3（那是一次子流程调用）。"""
+def test_pipeline_llm_nodes_are_l1_three_layers_and_l2_fallback():
+    """管线里 L1 是三层（事实 / 人设 / 分析投影）加 L2 兜底；成文段交给 L3 子流程。"""
     llm = sorted(n.node_id for n in pipe.WORKFLOW.nodes if n.node_type == "llm")
-    assert llm == [pipe.L1_LLM, pipe.L2_FALLBACK]
+    assert llm == [pipe.L1_FACTS, pipe.L1_FIELDS, pipe.L1_PERSONA, pipe.L2_FALLBACK]
 
 
 def test_pipeline_end_reads_result1_from_l3():

@@ -71,6 +71,13 @@ INFERRED_HIGH = "inferred_high"
 INFERRED_LOW = "inferred_low"
 """三分类·低置信推断：仅 1 条弱事实、纯常识，或仅由第三方预测单独支撑。"""
 
+ANCHOR_VERBATIM = "verbatim"
+"""坐标形态·锚定：值能在原文里字面定位，``quote`` 就是切出的原文（v3 接口一）。"""
+
+ANCHOR_NORMALIZED = "normalized"
+"""坐标形态·当归：值经 ASR 纠错 / 归一产生，原文里无字面匹配，``source_quote`` 记原文
+（v3 接口一，如「安安I60」→「埃安」）。"""
+
 BASIS_ORDER: dict[str, int] = {FACT: 0, INFERRED_HIGH: 1, INFERRED_LOW: 2}
 """三分类由强到弱。"""
 
@@ -90,6 +97,10 @@ CHANNEL_TIER: dict[str, str] = {
     "销售人员人工确认的客户Notes信息": REGISTRY,
     "客户留存在我方销售数据系统中的信息记录": REGISTRY,
     "销售人员对当前客户历史画像数据的反馈记录": REGISTRY,
+    # —— 确定性注入（v3.1 改造四）：值由代码按入参 / 登记事实定，不经模型归纳。
+    #     记人工/系统登记档，否则身份字段会因「非登记来源」被降为 inferred_low。
+    "客户留资手机号": REGISTRY,
+    "试驾与置换记录": REGISTRY,
     # —— 一手交互
     "试驾录音信息": FIRSTHAND,
     "外呼录音信息": FIRSTHAND,
@@ -131,6 +142,43 @@ IDENTITY_SUBJECT_EXEMPT: frozenset[str] = frozenset({"family_structure"})
 婚否、有无孩子这类事实，其合理来源本就可能是配偶或家人（`端到端方案.md` §3.4 a：
 「``subject != customer`` 的断言不得写入身份字段；**可写入家庭结构**、可进入卡片叙述」）。
 因此归属过滤对这一项放行，其余 15 个身份字段一律要求主体是客户本人。"""
+
+NAME_SOURCE_WHITELIST: frozenset[str] = frozenset({REGISTRY, FIRSTHAND})
+"""``customer_name`` 的**来源白名单**（v3 接口二）。
+
+姓名只认一手自述（「我姓陈」）与登记姓名。营业执照主体名、微信昵称、店铺名**一律不进**
+——v2.1 实测 ``customer_name`` 落成「…新泽水果店」（营业执照主体名），那是企业名不是人名。
+白名单之外的来源（``公开登记查询`` / ``社交自呈现`` / ``第三方预测``）**整条拒收**，
+不是降级：一个错误的人名比没有人名更糟。
+"""
+
+GENDER_WEAK_TIERS: frozenset[str] = frozenset({FIRSTHAND, SOCIAL, PREDICTION})
+"""``title``（性别/称呼）里**只能算弱证据**的来源档（v3 接口二）。
+
+优先级：登记称呼 > 一手自述 > 头像性别标签 > 录音性别标签（用户口径）。
+一手交互整体入弱档，是因为录音里的性别标签**天生不可靠**、且说话人未必是客户本人；
+非登记来源的性别一律降为 ``inferred_low``（``_confidence_for`` 随之给 0.5，满足「≤0.6」）。
+"""
+
+SALESPERSON_MARKERS: tuple[str, ...] = (
+    "销售顾问",
+    "顾问自称",
+    "非客户",
+    "我方人员",
+    "我方销售",
+    "销售员",
+)
+"""**销售顾问指向词**（v3.1 改造二）：客户字段里出现的这些词说明该值说的大概率
+
+不是客户本人，而是我方销售顾问。
+
+只收**精指向**词，不收泛职业词：``销售`` 单独出现可能是客户自己的职业
+（「我是做销售的」），``顾问`` 单独出现可能是客户的职业（咨询顾问）。命中即**整条拒收**
+（不是降级）——把顾问的信息当客户信息写出去，比这个字段空着更糟，与
+:data:`NAME_SOURCE_WHITELIST` 同口径。
+
+实测命中：``13435844484`` 的 ``customer_name`` 取值为「郑小姐（顾问自称，非客户姓名）」。
+"""
 
 AGGREGATE_TEXT_KEYS: frozenset[str] = frozenset(
     {
@@ -222,11 +270,40 @@ class Claim:
     交代来源。为空且非 ``fact`` 的断言的 ``basis`` 会被 L1 定位层降为 ``inferred_low``。
     """
 
+    reasoning_steps: tuple[str, ...] = ()
+    """**推导链**：由依据推到取值的思维路径，1–4 条短句（v3.1 改造一）。
+
+    与 :attr:`basis_of_inference` 的分工是本字段存在的全部理由：
+    ``basis_of_inference`` 是**论据**（原文里有什么），本字段是**论证**（怎么从论据
+    落到这个取值）。v3 把两者混在一起渲染，导致 ``steps`` 与 ``evidence`` 从同一份原料
+    分流、两栏字面雷同（实测 234 字段中 122 个完全同集，占 52%）。
+
+    L1 的事实层对 ``inferred_high`` 条目、分析投影层对**每条**结论给出本字段；离线回放
+    的旧产物没有它，届时由 :func:`_readable_steps` 退到一句非复述的说明。
+    """
+
     quote: str = ""
     """L1 定位层切出的**原文切片**（原文里的连续一段）。
 
     v2.1 起随断言一路带到 Notes 出口：``reasoning_detail.evidence`` 的首选内容就是它
     （「证据锚点要精确到客户原始数据中的某段内容」）。离线回放既有批次时通常为空。
+    """
+
+    anchor_kind: str = ""
+    """这条断言的来源坐标形态（v3 接口一）：
+
+    - ``verbatim``：值能在原文里**字面定位**，``quote`` 就是切出来的原文（模型不许誊抄）；
+    - ``normalized``：值经 ASR 纠错 / 品牌归一产生，原文里**无字面匹配**（安安 → 埃安），
+      此时 ``source_quote`` 记原文、理由记在 ``basis_of_inference``。
+
+    空的按 ``verbatim`` 处理（离线回放的旧产物没有这个字段）。
+    """
+
+    source_quote: str = ""
+    """当归型事实（``anchor_kind=normalized``）对应的**原文原样串**。
+
+    值不是原文给的（是模型改过的），但改动前的原文必须留下——否则销售点开这条
+    分不清「客户说的」与「模型改的」（v3 接口一）。``verbatim`` 时为空。
     """
 
     @property
@@ -490,6 +567,27 @@ def project(
                 }
             )
             continue
+        # ---- a2 值形态门（v3.1 改造二）：取值或锚点明写「销售顾问 / 我方人员」的，
+        #      不得进客户字段。归属过滤只看 `subject`（模型自报，默认 customer），
+        #      这一门看**取值本身说了什么**，两者是与关系。
+        #      实测 `13435844484` 的姓名取值为「郑小姐（顾问自称，非客户姓名）」，
+        #      subject 仍是 customer，只靠归属过滤拦不住。
+        #      **豁免登记档**：人工/系统登记的取值是销售本人确认过的，客户职业确实可能
+        #      就是销售顾问（「我是做销售的」），据此拒收会误杀真实事实。
+        if (
+            claim.attribute in nc.IDENTITY_KEYS
+            and claim.tier != REGISTRY
+            and _salesperson_marked(claim)
+        ):
+            result.rejected.append(
+                {
+                    "attribute": claim.attribute,
+                    "value": claim.value,
+                    "rule": "a_salesperson_value",
+                    "reason": "取值/锚点指向我方销售顾问，不是客户本人信息",
+                }
+            )
+            continue
         kept.append(claim)
 
     # ---- b 来源分级：预测不得**单独**支撑身份字段
@@ -499,6 +597,50 @@ def project(
 
     surviving: dict[str, list[Claim]] = {}
     for attribute, group in grouped.items():
+        # ---- v3 接口二：身份字段来源白名单（在来源分级之前）
+        # ``customer_name``：只认一手自述与登记姓名。营业执照主体名 / 昵称 / 店铺名
+        # （公开登记查询 / 社交自呈现 / 预测档）**整条拒收**——错的人名比没有人名更糟。
+        # v2.1 实测 ``customer_name`` 落成「…新泽水果店」（营业执照主体名）。
+        if attribute == "customer_name":
+            allowed = [c for c in group if c.tier in NAME_SOURCE_WHITELIST]
+            if not allowed:
+                result.rejected.append(
+                    {
+                        "attribute": attribute,
+                        "value": [c.value for c in group],
+                        "rule": "name_source_whitelist",
+                        "reason": "姓名仅认一手自述或登记姓名，不采信企业/社交/预测来源",
+                    }
+                )
+                result.to_confirm.append(
+                    {
+                        "attribute_key": attribute,
+                        "candidates": [c.value for c in group],
+                        "reason": "姓名来源不属于白名单（一手自述 / 登记）",
+                        "suggested_action": "向客户或销售确认后补充",
+                    }
+                )
+                continue
+            # **只让白名单来源参与后续裁决**：否则一条社交档却自称 ``fact`` 的断言会在
+            # ``_pick_best`` 里压过一手来源（排序先看 ``basis`` 再看来源档），
+            # 白名单就成了摆设。过滤而非放行，是把白名单真正做成硬约束。
+            group = allowed
+
+        # ``title``（性别 / 称呼）：登记称呼 > 一手自述 > 头像性别标签 > 录音性别标签。
+        # 非登记来源（含一手交互）一律降为 inferred_low —— 录音性别标签天生不可靠、
+        # 说话人未必是客户本人；头像标签同属账号自呈现（接口二）。
+        if attribute == "title" and all(c.tier in GENDER_WEAK_TIERS for c in group):
+            result.basis[attribute] = INFERRED_LOW
+            result.downgraded.append(
+                {
+                    "attribute": attribute,
+                    "value": [c.value for c in group],
+                    "rule": "title_weak_source",
+                    "reason": "性别/称呼仅有非登记来源（录音/头像标签），不作确定值",
+                    "action": "降为 inferred_low 写入（不丢字段）",
+                }
+            )
+
         weak_only = all(c.tier in WEAK_TIERS for c in group)
         if attribute in nc.IDENTITY_KEYS and weak_only:
             # v2：**不再丢弃**。弱来源撑不起身份字段的「确定性」，但客户大概率就是——
@@ -819,18 +961,65 @@ def _plain_text(text: Any) -> str:
     out = str(text or "")
     for token in _AUDIT_TOKENS:
         out = out.replace(token, "")
-    # 「（0.94）」这类内部置信度一并去掉：它不面向销售，且会暴露证据分级的存在。
+    # 「置信度0.9377」「（0.94）」这类内部置信度一并去掉：它不面向销售，
+    # 且会暴露证据分级的存在（v2.1 实测 ``title`` 的证据里残留「置信度0.9377」）。
+    out = re.sub(r"置信度\s*0?\.\d+", "", out)
     out = re.sub(r"[（(]\s*0?\.\d+\s*[)）]", "", out)
     return re.sub(r"\s+", " ", out).strip(" ：:、,，")
 
 
-def _readable_evidence(sources: Sequence[Claim]) -> list[str]:
-    """证据串：**原文切片优先**，其次推断依据，最后才退到渠道名。
+_CONCLUSION_MARKER = re.compile(r"(推断|推测|判断)[为成是]")
+"""判据：一段文字里的**结论型从句**起点。
 
-    v2.1 硬约束（设计稿 §1）：证据锚点要精确到客户原始数据中的某段内容——录音里的
-    某段话、三方数据里的某个标签。v2 曾把「来源档（渠道名）」当证据、渠道名取不到时
-    还落成字面量「未知渠道」（8 案 128 条），那是审计串不是证据。这里**不留任何占位**：
-    三者都没有，就给空列表。
+``evidence`` 必须指向客户原始数据的一段内容，不得把「…，推断为实用型」这类**结论**
+当成依据写进去（v2.1 实测：11 条证据位自指）。结论从句可能在字符串**任意位置**
+（实测形态是「客户主动询问…，关注实际购车成本，推断为实用型」），因此不能只判开头。
+"""
+
+
+def _strip_conclusion(text: str) -> str:
+    """裁掉从结论型标志词起的整段从句，返回其前的**事实部分**。
+
+    「客户主动询问车型优惠价格及置换补贴，关注实际购车成本，推断为实用型」
+    → 「客户主动询问车型优惠价格及置换补贴，关注实际购车成本」。
+    若整段都是结论（标志词在开头），返回空串——调用方据此丢弃该条依据。
+    """
+    cleaned = _plain_text(text)
+    matched = _CONCLUSION_MARKER.search(cleaned)
+    if not matched:
+        return cleaned
+    head = cleaned[: matched.start()].rstrip("，,。;；、 ")
+    return head
+
+
+def _is_conclusion(text: str) -> bool:
+    """整段皆为结论（无任何事实部分）时为真。"""
+    return not _strip_conclusion(text)
+
+
+def _salesperson_marked(claim: Claim) -> bool:
+    """取值、引文或当归原文里出现销售顾问指向词（v3.1 改造二）。
+
+    同时看三处：``value``（取值本身）、``quote``（原文切片）、``source_quote``（当归前原文）。
+    **不看** ``basis_of_inference``——那是推断依据，本就常提到「销售说…」，把它算进来会
+    误杀大量正确的推断（实测 ``title`` 的依据多为「销售以『大哥』称呼对方」）。
+    """
+    parts = (_as_text(claim.value), claim.quote or "", claim.source_quote or "")
+    text = " ".join(parts)
+    return any(marker in text for marker in SALESPERSON_MARKERS)
+
+
+def _readable_evidence(sources: Sequence[Claim]) -> list[str]:
+    """证据串：**原文切片优先**，其次当归型事实的原文，再次推断依据，最后才退到渠道名。
+
+    v2.1 硬约束（设计稿 §1）：证据锚点要精确到客户原始数据中的某段内容。v3 接口一
+    在此基础上再分两类：
+
+    - ``verbatim``：``quote`` 是切出的原文，直接呈现；
+    - ``normalized``：值经纠错/归一（安安 → 埃安），呈「原文『安安I60』」（标明是原文，
+      值本身是字段取值）——销售一眼能分清「客户说的」与「模型改的」。
+
+    结论型依据（``_is_conclusion``）一律剔除，不留任何占位符。
     """
     evidence: list[str] = []
     for claim in sources:
@@ -839,8 +1028,13 @@ def _readable_evidence(sources: Sequence[Claim]) -> list[str]:
             if text not in evidence:
                 evidence.append(text)
             continue
+        if claim.source_quote:
+            text = f"原文「{claim.source_quote}」（经纠错归一）"
+            if text not in evidence:
+                evidence.append(text)
+            continue
         for hint in claim.basis_of_inference:
-            text = _plain_text(hint)
+            text = _strip_conclusion(hint)
             if text and text not in evidence:
                 evidence.append(text)
         if not claim.basis_of_inference and claim.channel:
@@ -851,26 +1045,37 @@ def _readable_evidence(sources: Sequence[Claim]) -> list[str]:
 
 
 def _readable_steps(sources: Sequence[Claim]) -> list[str]:
-    """推理步骤：由原始依据推出结论的**推导链**，1–3 条中文短句。
+    """推理步骤：由依据推到结论的**思维路径**（v3.1 改造一，1–4 条中文短句）。
+
+    **与 :func:`_readable_evidence` 的分工**：``evidence`` 落**原材料**（客户原话、
+    当归前原文），本函数落**论证**（怎么从材料推到取值）。v3 的病灶正是两者从同一份
+    原料分流渲染——``steps`` 有锚点时吐「原始依据：<锚点>」、无锚点时吐「推断依据：<依据>」，
+    两栏字面雷同（实测 234 字段中 122 个完全同集，占 52%）。
+
+    取料顺序：L1 显式产出的 ``reasoning_steps`` > 一句**非复述**的来源说明。缺
+    ``reasoning_steps`` 时**不再抄锚点原文**——抄锚点正与 ``evidence`` 撞车。
 
     不得出现投影规则名（归属过滤 / 来源分级 / 枚举归一）与来源档代号——那些是
     内部审计串，销售看不懂（设计稿 §1）。
     """
-    quoted = [(c.quote, c.channel) for c in sources if c.quote]
-    if quoted:
-        quote, channel = quoted[0]
-        steps = [f"原始依据：{quote}"]
-        if channel:
-            steps.append(f"来自{channel}")
-        return steps
-    hints: list[str] = []
     for claim in sources:
-        for hint in claim.basis_of_inference:
-            text = _plain_text(hint)
-            if text and text not in hints:
-                hints.append(text)
-    if hints:
-        return ["推断依据：" + "；".join(hints[:4])]
+        if not claim.reasoning_steps:
+            continue
+        lines: list[str] = []
+        for step in claim.reasoning_steps:
+            text = _plain_text(step)
+            if text and text not in lines:
+                lines.append(text)
+        if lines:
+            return lines[:4]
+
+    # —— 退路：一句**不复述材料**的说明。旧的「原始依据：<锚点>」正是雷同的来源。
+    if any(claim.quote for claim in sources):
+        return ["由客户原话直接得出该结论"]
+    if any(claim.source_quote for claim in sources):
+        return ["经语义纠错归一并核对后得出该结论"]
+    if any(claim.basis_of_inference for claim in sources):
+        return ["综合上述线索归纳得出该结论"]
     channel = next((c.channel for c in sources if c.channel), "")
     return [f"来自{channel}" if channel else "据现有记录归纳"]
 
@@ -880,7 +1085,7 @@ def _readable_summary(sources: Sequence[Claim]) -> str:
     quote = next((c.quote for c in sources if c.quote), "")
     if quote:
         return f"有原文依据：{quote}"
-    hint = next((_plain_text(h) for c in sources for h in c.basis_of_inference if _plain_text(h)), "")
+    hint = next((_strip_conclusion(h) for c in sources for h in c.basis_of_inference if _strip_conclusion(h)), "")
     if hint:
         return f"由多条线索推断：{hint}"
     return "由渠道记录归纳得出"

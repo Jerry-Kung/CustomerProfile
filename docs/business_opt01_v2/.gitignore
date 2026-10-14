@@ -4,3 +4,9 @@
 ab对照/data/
 
 # 例外：脚本、源文件与 README 不含客户数据，正常入库。
+画像管线AB对照-v2.1.html
+ab对照-v21/data/
+画像管线AB对照-v3.html
+ab对照-v3/data/
+画像管线AB对照-v3-fix.html
+ab对照-v3-fix/data/

@@ -500,3 +500,234 @@ def test_blank_value_claims_are_counted_and_dropped():
     assert result["empty_claims"] == 3
     assert set(json.loads(result["empty_claim_names"])) == {"hobbies", "pain_points", "douyin_id"}
     assert json.loads(result["facts_json"]).get("occupation") == "教师"
+
+
+# ---------------------------------------------------------------- v3 接口一：坐标形态透传
+
+def test_localize_carries_normalized_anchor_kind():
+    """当归型事实（ASR 纠错/归一）：``anchor_kind`` 与 ``source_quote`` 一路透传到出口。"""
+    result = pipe.localize_claims(
+        records_json(
+            record(
+                "外呼录音信息",
+                "我开的是安安I60",
+                kind="transcript",
+                source_class="primary_interaction",
+            )
+        ),
+        claims_json(
+            {
+                "attribute": "intended_model",
+                "value": "埃安",
+                "record_channel": "外呼录音信息",
+                "basis": "fact",
+                "anchor": "我开的是安安I60",
+                "anchor_kind": "normalized",
+                "source_quote": "安安I60",
+            }
+        ),
+    )
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert entry["anchor_kind"] == "normalized"
+    assert entry["source_quote"] == "安安I60"
+
+
+def test_localize_defaults_to_verbatim():
+    """未声明当归型时，坐标形态按锚定型处理。"""
+    result = pipe.localize_claims(
+        records_json(
+            record(
+                "外呼录音信息",
+                "我现在开的是一九年的君威",
+                kind="transcript",
+                source_class="primary_interaction",
+            )
+        ),
+        claims_json(
+            {
+                "attribute": "old_car_model",
+                "value": "2019款别克君威",
+                "record_channel": "外呼录音信息",
+                "basis": "fact",
+                "anchor": "我现在开的是一九年的君威",
+            }
+        ),
+    )
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert entry["anchor_kind"] == "verbatim"
+
+
+# ---------------------------------------------------------------- v3 P4 L2 审查核验层
+
+def note(key, value, *, evidence=None, channel=""):
+    return {
+        "attribute_key": key,
+        "attribute_value": value,
+        "record_channel": channel,
+        "reasoning_detail": {"summary": "", "steps": [], "evidence": evidence or [], "confidence": 0.7},
+    }
+
+
+def test_review_removes_placeholder_values():
+    """「未提供」这类占位 Notes 直接去除——看着有值、点进去没内容的，等于没填。"""
+    result = pipe.review_notes(
+        json.dumps([note("hobbies", "未提供"), note("occupation", "教师")], ensure_ascii=False),
+        "{}",
+        "{}",
+    )
+    assert result["placeholder_removed"] == 1
+    kept = json.loads(result["notes_updates_json"])
+    assert [n["attribute_key"] for n in kept] == ["occupation"]
+
+
+def test_review_flags_illegal_enum_not_downgraded():
+    """枚举取值不在契约内且未降级 → 记 issue。"""
+    result = pipe.review_notes(
+        json.dumps([note("family_structure", "说不清")], ensure_ascii=False),
+        "{}",
+        "{}",
+    )
+    assert result["enum_illegal"] == 1
+
+
+def test_review_allows_illegal_enum_when_downgraded():
+    """已降为 ``inferred_low`` 的非法枚举值放行（P3 规则 d 保留的客户原话）。"""
+    result = pipe.review_notes(
+        json.dumps([note("family_structure", "说不清")], ensure_ascii=False),
+        "{}",
+        json.dumps({"family_structure": "inferred_low"}, ensure_ascii=False),
+    )
+    assert result["enum_illegal"] == 0
+
+
+def test_review_flags_unbacked_fact():
+    """``fact`` 却既无证据又无渠道 → 记 issue（编造的确定性）。"""
+    result = pipe.review_notes(
+        json.dumps([note("occupation", "教师")], ensure_ascii=False),
+        json.dumps({"occupation": "教师"}, ensure_ascii=False),
+        json.dumps({"occupation": "fact"}, ensure_ascii=False),
+    )
+    assert result["unbacked_fact"] == 1
+
+
+def test_review_flags_evidence_self_reference():
+    """证据位出现「推断为…」结论型措辞 → 记 issue。"""
+    result = pipe.review_notes(
+        json.dumps([note("age", "40-49岁", evidence=["推断为40-49岁"])], ensure_ascii=False),
+        "{}",
+        "{}",
+    )
+    assert result["issue_count"] >= 1
+    assert any(i["rule"] == "evidence_self_reference" for i in json.loads(result["issue_json"]))
+
+
+def test_review_keeps_clean_notes():
+    """干净的 Notes 原样保留，不改动取值。"""
+    result = pipe.review_notes(
+        json.dumps([note("old_car_model", "2019款别克君威",
+                         evidence=["外呼录音信息：我现在开的是一九年的君威"])], ensure_ascii=False),
+        "{}",
+        "{}",
+    )
+    assert result["issue_count"] == 0
+    assert json.loads(result["notes_updates_json"])[0]["attribute_value"] == "2019款别克君威"
+
+
+# ------------------------------------------- v3.1 改造三：锚点相关性门
+
+def test_greeting_anchor_is_not_evidence():
+    """寒暄语锚点（「喂，你好」）零信息量，不得进证据位（实测 13530559591 的 title）。
+
+    它在原文里逐字存在且唯一，v3 的「能定位」判据因此放行——本门补的是「有没有信息」。
+    """
+    result = pipe.localize_claims(
+        records_json(record("外呼录音信息", "（销售）喂，你好，我这边是猛士的。", kind="transcript")),
+        claims_json(claim(attribute="title", value="Mr", record_channel="外呼录音信息",
+                          anchor="喂，你好")),
+    )
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert "quote" not in entry
+    reasons = [d["reason"] for d in json.loads(result["downgraded_detail"])]
+    assert "noisy_anchor" in reasons
+
+
+def test_json_fragment_anchor_is_not_evidence():
+    """OCR 的 JSON 残片不作证据（实测 13435844484 的 title / phone_number 证据）。"""
+    result = pipe.localize_claims(
+        records_json(record("微信手机号搜索界面信息", '{"nickname":"小林","gender": "男性"}', kind="ocr")),
+        claims_json(claim(attribute="title", value="Mr", record_channel="微信手机号搜索界面信息",
+                          anchor='gender": "男性')),
+    )
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert "quote" not in entry
+    assert "noisy_anchor" in [d["reason"] for d in json.loads(result["downgraded_detail"])]
+
+
+def test_value_signal_must_appear_in_anchor():
+    """声明的 ``value_signal`` 不在锚点里 → 锚点与取值不相关，收回引文（v3.1 改造三）。"""
+    result = pipe.localize_claims(
+        records_json(record("外呼录音信息", "（客户）我平时开货车跑长途。", kind="transcript")),
+        claims_json(claim(attribute="title", value="Mr", record_channel="外呼录音信息",
+                          anchor="我平时开货车跑长途", value_signal="女士")),
+    )
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert "quote" not in entry
+    assert "signal_mismatch" in [d["reason"] for d in json.loads(result["downgraded_detail"])]
+
+
+def test_value_signal_matching_anchor_keeps_quote():
+    """反面：``value_signal`` 确实是锚点子串时正常保留引文。"""
+    result = pipe.localize_claims(
+        records_json(record("外呼录音信息", "（销售）先生，您上次看的那台车。", kind="transcript")),
+        claims_json(claim(attribute="title", value="Mr", record_channel="外呼录音信息",
+                          anchor="先生，您上次看的那台车", value_signal="先生")),
+    )
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert "先生" in entry["quote"]
+
+
+def test_normal_quote_is_not_flagged_noisy():
+    """普通长引文里夹一句寒暄不算噪音——本门只拦短锚。"""
+    body = "你好，我上次来看的是那台黑色的，价格能再谈谈吗。"
+    result = pipe.localize_claims(
+        records_json(record("外呼录音信息", body, kind="transcript")),
+        claims_json(claim(attribute="old_car_model", value="别克",
+                          record_channel="外呼录音信息", anchor=body)),
+    )
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert "quote" in entry
+
+
+# ------------------------------------------- v3.1 改造一：推导链透传到出口
+
+def test_reasoning_chain_reaches_notes_steps():
+    """L1 给的 ``reasoning_chain`` 须一路传到 Notes 的 ``steps``（与 ``evidence`` 分料）。"""
+    result = pipe.project_claims(
+        claims_json(
+            claim(
+                attribute="annual_income",
+                value="10-20万",
+                record_channel="",
+                anchor="",
+                basis="inferred_high",
+                basis_of_inference=["预算 9.5 万且贷款购车"],
+                reasoning_chain=["预算 9.5 万且需贷款", "支付能力偏紧", "收入取中低档"],
+            )
+        )
+    )
+    note = next(
+        n for n in json.loads(result["notes_updates_json"]) if n["attribute_key"] == "annual_income"
+    )
+    assert note["reasoning_detail"]["steps"] == ["预算 9.5 万且需贷款", "支付能力偏紧", "收入取中低档"]
+    # 依据与推导链分料：evidence 是论据，steps 是论证，两者不得同集。
+    assert set(note["reasoning_detail"]["steps"]) != set(note["reasoning_detail"]["evidence"])
+
+
+def test_steps_do_not_restate_quote_when_no_chain():
+    """旧产物没有 ``reasoning_chain`` 时，``steps`` **不得**再抄锚点原文（雷同的来源）。"""
+    result = pipe.project_claims(
+        claims_json(claim(attribute="occupation", value="教师", quote="我以前做充电桩的"))
+    )
+    note = next(n for n in json.loads(result["notes_updates_json"]) if n["attribute_key"] == "occupation")
+    steps = note["reasoning_detail"]["steps"]
+    assert all("我以前做充电桩的" not in s for s in steps), steps

@@ -566,3 +566,208 @@ def test_missing_field_backfill_is_forced_soft():
     assert out["out_of_bounds"] == 0
     assert out["accepted"][0]["basis"] == "inferred_low"
     assert out["accepted"][0]["missing"] is True
+
+
+# ---------------------------------------------------------------- v3 接口一：坐标形态
+
+def test_normalized_fact_evidence_shows_source_quote():
+    """当归型事实（ASR 纠错/归一）的证据须呈现**原文**，让人分清「客户说的」与「模型改的」。"""
+    detail = proj._readable_evidence(
+        [
+            proj.Claim(
+                attribute="intended_model",
+                value="埃安",
+                channel="试驾录音信息",
+                anchor_kind=proj.ANCHOR_NORMALIZED,
+                source_quote="安安I60",
+            )
+        ]
+    )
+    joined = " ".join(detail)
+    assert "安安I60" in joined, f"当归型事实的证据须含原文，实际 {detail}"
+    assert "埃安" not in joined or "安安" in joined
+
+
+def test_verbatim_fact_uses_quote_not_source_quote():
+    """锚定型事实优先用 ``quote``（原文切片）。"""
+    detail = proj._readable_evidence(
+        [
+            proj.Claim(
+                attribute="old_car_model",
+                value="2019款别克君威",
+                channel="外呼录音信息",
+                quote="我现在开的是一九年的君威",
+                anchor_kind=proj.ANCHOR_VERBATIM,
+            )
+        ]
+    )
+    assert any("我现在开的是一九年的君威" in d for d in detail)
+
+
+# ---------------------------------------------------------------- v3 接口一：结论型依据剔除
+
+def test_conclusion_only_hint_is_stripped_from_evidence():
+    """证据位不得出现结论型自指；中段的「，推断为…」从句要被裁掉，保留其前的事实部分。"""
+    detail = proj._readable_evidence(
+        [
+            proj.Claim(
+                attribute="personality_and_preferences",
+                value="实用型",
+                channel="",
+                basis=proj.INFERRED_HIGH,
+                basis_of_inference=(
+                    "客户主动询问车型优惠价格及置换补贴，关注实际购车成本，推断为实用型",
+                ),
+            )
+        ]
+    )
+    joined = " ".join(detail)
+    assert "推断为" not in joined, f"结论型从句须剔除，实际 {detail}"
+    assert "关注实际购车成本" in joined, f"事实部分须保留，实际 {detail}"
+
+
+def test_pure_conclusion_hint_is_dropped_entirely():
+    """整段皆为结论的依据（「推断为40-49岁」）应整条丢弃，不留占位。"""
+    assert proj._strip_conclusion("推断为40-49岁") == ""
+    detail = proj._readable_evidence(
+        [
+            proj.Claim(
+                attribute="age",
+                value="40-49岁",
+                channel="",
+                basis=proj.INFERRED_HIGH,
+                basis_of_inference=("推断为40-49岁",),
+            )
+        ]
+    )
+    assert not any("推断" in d for d in detail)
+
+
+def test_confidence_token_is_stripped_from_plain_text():
+    """内部置信度串（「置信度0.9377」）不得出现在对客文案里。"""
+    assert "0.9377" not in proj._plain_text("性别为男，置信度0.9377")
+    assert "0.94" not in proj._plain_text("预测性别为男（0.94）")
+
+
+# ---------------------------------------------------------------- v3 接口二：身份字段来源白名单
+
+def test_customer_name_from_social_source_is_rejected():
+    """社交自呈现的昵称/账号名不得写成客户姓名。"""
+    result = proj.project(
+        [claim("customer_name", "清CN欢", channel="微信手机号搜索界面信息")]
+    )
+    assert "customer_name" not in result.facts
+    assert any(r["rule"] == "name_source_whitelist" for r in result.rejected)
+
+
+def test_customer_name_from_business_registry_is_rejected():
+    """营业执照主体名不得写成客户姓名（v2.1 实测「…新泽水果店」）。"""
+    result = proj.project(
+        [claim("customer_name", "汕头市潮南区井都新泽水果店", channel="关联企业信息")]
+    )
+    assert "customer_name" not in result.facts
+    assert any(r["rule"] == "name_source_whitelist" for r in result.rejected)
+
+
+def test_customer_name_from_firsthand_is_kept():
+    """一手自述的姓名应保留。"""
+    result = proj.project(
+        [claim("customer_name", "陈", channel="试驾录音信息")]
+    )
+    assert result.facts.get("customer_name") == "陈"
+
+
+def test_customer_name_whitelist_filters_before_picking():
+    """白名单来源与社交来源并存时，只让白名单那一条参与裁决。"""
+    result = proj.project(
+        [
+            claim("customer_name", "陈", channel="试驾录音信息", basis="fact"),
+            claim("customer_name", "清CN欢", channel="微信手机号搜索界面信息", basis="fact"),
+        ]
+    )
+    assert result.facts.get("customer_name") == "陈"
+
+
+def test_title_from_recording_is_downgraded_not_fact():
+    """性别/称呼来自录音或头像标签时只能降为 ``inferred_low``，不得当成确定值。"""
+    result = proj.project([claim("title", "Mr", channel="试驾录音信息")])
+    assert result.facts.get("title") == "Mr"
+    assert result.basis.get("title") == proj.INFERRED_LOW
+
+
+def test_title_from_registry_is_kept():
+    """登记称呼不受该降级影响。"""
+    result = proj.project([claim("title", "Ms", channel="销售人员人工确认的客户Notes信息")])
+    assert result.basis.get("title") != proj.INFERRED_LOW
+
+
+# ------------------------------------------- a2 值形态门（v3.1 改造二）
+
+def test_salesperson_value_rejected_from_customer_name():
+    """取值明写「顾问自称」的姓名不得进客户姓名位（v3.1 实测 13435844484）。
+
+    该条断言的 ``subject`` 被模型写成 ``customer``，归属过滤拦不住——只有值形态门
+    看取值本身说了什么，才能拦下它。
+    """
+    result = proj.project(
+        [
+            claim(
+                "customer_name",
+                "郑小姐（顾问自称，非客户姓名）",
+                channel="外呼录音信息",
+                subject="customer",
+            )
+        ]
+    )
+    assert "customer_name" not in result.facts
+    assert any(r["rule"] == "a_salesperson_value" for r in result.rejected)
+
+
+def test_salesperson_occupation_rejected():
+    """「销售顾问」这一职业归属我方人员，不得写成客户的职业。"""
+    result = proj.project([claim("occupation", "汽车销售顾问", channel="试驾录音信息")])
+    assert "occupation" not in result.facts
+    assert any(r["rule"] == "a_salesperson_value" for r in result.rejected)
+
+
+def test_salesperson_gate_ignores_basis_of_inference():
+    """值形态门只看取值与锚点，**不看**推断依据。
+
+    推断依据里出现「销售以『大哥』称呼对方」是**正常**的（说话人是谁本就常靠销售的话
+    判断），把它算进词表会误杀大量正确的推断。
+    """
+    result = proj.project(
+        [
+            claim(
+                "title",
+                "Mr",
+                channel="试驾录音信息",
+                basis="inferred_low",
+                basis_of_inference=("销售以『大哥』称呼对方",),
+            )
+        ]
+    )
+    assert result.facts.get("title") == "Mr"
+
+
+def test_salesperson_gate_exempts_registry():
+    """豁免登记档：人工确认的客户职业确实可能就叫「销售顾问」。"""
+    result = proj.project(
+        [claim("occupation", "销售顾问", channel="销售人员人工确认的客户Notes信息")]
+    )
+    assert result.facts.get("occupation") == "销售顾问"
+
+
+def test_salesperson_gate_does_not_touch_non_identity_field():
+    """值形态门只对身份字段生效，非身份字段不受影响。"""
+    result = proj.project(
+        [claim("special_requirements", "希望销售顾问上门交车", channel="外呼录音信息")]
+    )
+    assert result.facts.get("special_requirements") == "希望销售顾问上门交车"
+
+
+def test_customer_own_occupation_survives():
+    """客户自己说「我是做销售的」不得被误杀——词表只收精指向词。"""
+    result = proj.project([claim("occupation", "做销售的", channel="试驾录音信息")])
+    assert result.facts.get("occupation") == "做销售的"
+
