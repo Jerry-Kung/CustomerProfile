@@ -101,6 +101,13 @@ docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml 
   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
+启动 Runner 前，用一次性容器验证配置的画像服务地址；输出应为 `200`，且不会领取画像任务：
+
+```bash
+docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml run --rm --no-deps --pull never profile-runner-worker \
+  python -c 'import os, urllib.request; url = os.environ["PROFILE_RUNNER_BASE_URL_PRODUCTION"].rstrip("/") + "/health"; print(urllib.request.urlopen(url, timeout=10).status)'
+```
+
 构建成功后，启动时沿用已经生成的镜像，避免再次使用默认构建参数：
 
 ```bash
