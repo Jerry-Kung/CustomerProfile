@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
+from urllib.parse import urlsplit
+from src.domain.task.profile_routing import ProfileRoutingPolicy
 
 _DOTENV_LOADED = False
 
@@ -68,6 +70,15 @@ class QingTianConfig:
     user_id: str
     poll_interval_ms: int
     poll_timeout_ms: int
+
+
+@dataclass(frozen=True)
+class ProfileRunnerConfig:
+    base_url_test: str = ""
+    base_url_production: str = ""
+    request_timeout_ms: int = 15000
+    poll_interval_ms: int = 2000
+    poll_timeout_ms: int = 2400000
 
 
 @dataclass(frozen=True)
@@ -166,13 +177,15 @@ class AppConfig:
     task_queue_max_waiting: int = 500
     commercial_queue: CommercialQueueConfig = field(default_factory=CommercialQueueConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
+    runner: ProfileRunnerConfig = field(default_factory=ProfileRunnerConfig)
+    profile_routing: ProfileRoutingPolicy = field(default_factory=ProfileRoutingPolicy)
 
 
 def _default_task_upload_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "data" / "task-uploads"
 
 
-_SUPPORTED_PLATFORMS = ("dify", "qingtian")
+_SUPPORTED_PLATFORMS = ("dify", "qingtian", "runner")
 
 
 def load_config() -> AppConfig:
@@ -195,6 +208,13 @@ def load_config() -> AppConfig:
     worker_role = _worker_role()
     commercial_queue_config = _commercial_queue_config()
     retry_config = _retry_config()
+    work_envs = _worker_work_envs(workflow_platform=workflow_platform)
+    runner_config = _runner_config(workflow_platform=workflow_platform, work_envs=work_envs)
+    if workflow_platform == "runner":
+        if _require_env("WORKFLOW_TARGET_ID") in {"local-default", "commercial-default"}:
+            raise ValueError("runner requires an independent WORKFLOW_TARGET_ID")
+        if worker_role != "local":
+            raise ValueError("runner requires WORKER_ROLE=local")
 
     legacy_dify_api_key = os.getenv("DIFY_API_KEY", "").strip()
     dify_api_key_test = os.getenv("DIFY_API_KEY_TEST", "").strip() or legacy_dify_api_key
@@ -257,8 +277,8 @@ def load_config() -> AppConfig:
             target_id=_worker_target_id(worker_role),
             target_revision=_worker_target_revision(),
             target_mode=_worker_target_mode(),
-            task_types=_worker_task_types(),
-            work_envs=_worker_work_envs(),
+            task_types=_worker_task_types(workflow_platform=workflow_platform),
+            work_envs=work_envs,
             target_failure_threshold=_worker_target_failure_threshold(),
             target_cooldown_seconds=_worker_target_cooldown_seconds(),
         ),
@@ -277,6 +297,8 @@ def load_config() -> AppConfig:
         task_queue_max_waiting=_task_queue_max_waiting(),
         commercial_queue=commercial_queue_config,
         retry=retry_config,
+        runner=runner_config,
+        profile_routing=_profile_routing_config(),
     )
 
 
@@ -342,16 +364,19 @@ def _csv_values(key: str, default: str) -> tuple[str, ...]:
     return values
 
 
-def _worker_task_types() -> tuple[str, ...]:
-    values = _csv_values("WORKER_TASK_TYPES", "customer_profile,invitation_strategy")
+def _worker_task_types(*, workflow_platform: str = "dify") -> tuple[str, ...]:
+    default = "customer_profile" if workflow_platform == "runner" else "customer_profile,invitation_strategy"
+    values = _csv_values("WORKER_TASK_TYPES", default)
     unsupported = sorted(set(values) - {"customer_profile", "invitation_strategy"})
     if unsupported:
         raise ValueError(f"WORKER_TASK_TYPES contains unsupported values: {', '.join(unsupported)}")
+    if workflow_platform == "runner" and "invitation_strategy" in values:
+        raise ValueError("runner does not support WORKER_TASK_TYPES=invitation_strategy")
     return values
 
 
-def _worker_work_envs() -> tuple[str, ...]:
-    values = _csv_values("WORKER_WORK_ENVS", "test,production")
+def _worker_work_envs(*, workflow_platform: str = "dify") -> tuple[str, ...]:
+    values = _csv_values("WORKER_WORK_ENVS", "test" if workflow_platform == "runner" else "test,production")
     unsupported = sorted(set(values) - {"test", "production"})
     if unsupported:
         raise ValueError(f"WORKER_WORK_ENVS contains unsupported values: {', '.join(unsupported)}")
@@ -431,3 +456,42 @@ def _migration_db_wait_max_tries() -> int:
     if n < 1:
         raise ValueError("MIGRATION_DB_WAIT_MAX_TRIES must be >= 1")
     return n
+
+
+def _validated_url(key: str, *, required: bool) -> str:
+    value = (_require_env(key) if required else _env_str(key)).rstrip("/")
+    if value:
+        parsed = urlsplit(value)
+        if (parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password
+                or parsed.query or parsed.fragment):
+            raise ValueError(f"{key} must be an HTTP(S) base URL without credentials, query or fragment")
+    return value
+
+
+def _profile_routing_config() -> ProfileRoutingPolicy:
+    mode = _env_str("PROFILE_ROUTING_MODE", "parallel").lower()
+    if mode not in {"parallel", "weighted"}:
+        raise ValueError("PROFILE_ROUTING_MODE must be parallel or weighted")
+    return ProfileRoutingPolicy(
+        enabled=mode == "weighted",
+        runner_percent=_env_int("PROFILE_RUNNER_TRAFFIC_PERCENT", 80),
+        spillover_seconds=_env_int("PROFILE_ROUTING_SPILLOVER_SECONDS", 300),
+        work_envs=_csv_values("PROFILE_ROUTING_WORK_ENVS", "production"),
+    )
+
+
+def _positive_env_int(key: str, default: int) -> int:
+    value = _env_int(key, default)
+    if value < 1:
+        raise ValueError(f"{key} must be >= 1")
+    return value
+
+
+def _runner_config(*, workflow_platform: str, work_envs: tuple[str, ...]) -> ProfileRunnerConfig:
+    return ProfileRunnerConfig(
+        base_url_test=_validated_url("PROFILE_RUNNER_BASE_URL_TEST", required=workflow_platform == "runner" and "test" in work_envs),
+        base_url_production=_validated_url("PROFILE_RUNNER_BASE_URL_PRODUCTION", required=workflow_platform == "runner" and "production" in work_envs),
+        request_timeout_ms=_positive_env_int("PROFILE_RUNNER_REQUEST_TIMEOUT_MS", 15000),
+        poll_interval_ms=_positive_env_int("PROFILE_RUNNER_POLL_INTERVAL_MS", 2000),
+        poll_timeout_ms=_positive_env_int("PROFILE_RUNNER_POLL_TIMEOUT_MS", 2400000),
+    )

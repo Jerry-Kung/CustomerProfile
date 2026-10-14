@@ -25,6 +25,11 @@ config:
   API_PORT: "18008"
   TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
   WORKFLOW_PLATFORM: qingtian
+  # Enable weighted only after every profile worker uses the updated image.
+  PROFILE_ROUTING_MODE: parallel
+  PROFILE_RUNNER_TRAFFIC_PERCENT: "80"
+  PROFILE_ROUTING_SPILLOVER_SECONDS: "300"
+  PROFILE_ROUTING_WORK_ENVS: production
   QINGTIAN_BASE_URL: https://qingtian.dfmc.com.cn/api/proxy/api/v1
   QINGTIAN_USER_ID: REPLACE_WITH_QINGTIAN_USER_ID
   QINGTIAN_POLL_INTERVAL_MS: "2000"

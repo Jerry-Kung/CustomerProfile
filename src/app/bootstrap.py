@@ -16,6 +16,7 @@ from src.infrastructure.db.client import MySQLClient
 from src.infrastructure.db.task_repository import MySQLTaskRepository
 from src.infrastructure.dify.client import DifyClient
 from src.infrastructure.qingtian.client import QingTianClient
+from src.infrastructure.runner.client import RunnerClient
 from src.infrastructure.storage.task_upload_store import TaskUploadStore
 from src.infrastructure.workflow.output_parser import WorkflowOutputParser
 from src.infrastructure.workflow.protocol import WorkflowClient
@@ -35,6 +36,7 @@ def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskServi
         db_client,
         queue_max_waiting=config.task_queue_max_waiting,
         default_retry_policy_version=config.retry.policy_version,
+        profile_routing=config.profile_routing,
         logger=get_logger("task_repository"),
     )
     _warn_if_task_type_column_missing(logger, db_client, repository)
@@ -68,11 +70,12 @@ def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskServi
             )
         ),
         retry_config=config.retry,
+        profile_routing=config.profile_routing,
         # Old pre-005 claims have no lease. Recover them only after the
         # configured QingTian poll timeout plus one recovery-scan interval.
         legacy_processing_timeout_seconds=max(
             1,
-            (config.qingtian.poll_timeout_ms + 999) // 1000
+            (_workflow_poll_timeout_ms(config) + 999) // 1000
             + config.retry.recovery_interval_seconds,
         ),
     )
@@ -80,11 +83,22 @@ def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskServi
 
 
 def _build_workflow_client(config: AppConfig, logger: logging.Logger) -> WorkflowClient:
+    if config.workflow_platform == "runner":
+        logger.info("workflow_client_selected platform=runner 说明=使用独立画像生成服务")
+        return RunnerClient(config=config.runner)
     if config.workflow_platform == "qingtian":
         logger.info("workflow_client_selected platform=qingtian")
         return QingTianClient(config=config.qingtian)
     logger.info("workflow_client_selected platform=dify")
     return DifyClient(config=config.dify)
+
+
+def _workflow_poll_timeout_ms(config: AppConfig) -> int:
+    if config.workflow_platform == "runner":
+        return config.runner.poll_timeout_ms
+    if config.workflow_platform == "qingtian":
+        return config.qingtian.poll_timeout_ms
+    return config.dify.poll_timeout_ms
 
 
 def _warn_if_task_type_column_missing(logger, db_client, repository) -> None:

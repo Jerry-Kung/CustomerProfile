@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import random
 import threading
+import re
 import time
 
 from src.config.observability import elapsed_ms, log_context, mask_phone, safe_text
@@ -16,12 +17,11 @@ from src.domain.task.retry_policy import (
     next_execution_pool,
 )
 from src.domain.task.service import TaskService
-from src.infrastructure.qingtian.errors import (
-    QingTianRequestFailed,
-    QingTianTimeout,
-    QingTianWorkflowTerminated,
-)
+from src.domain.task.profile_routing import ProfileRoutingPolicy, profile_bucket
 from src.infrastructure.workflow.errors import (
+    ResumableWorkflowRequestFailed,
+    ResumableWorkflowTimeout,
+    WorkflowTerminated,
     WorkflowError,
     WorkflowOutputInvalidJson,
     WorkflowOutputSchemaMismatch,
@@ -66,6 +66,7 @@ class WorkerExecutor:
         commercial_queue_gate: CommercialQueueGate | None = None,
         retry_config: RetryConfig | None = None,
         legacy_processing_timeout_seconds: int = 2400,
+        profile_routing: ProfileRoutingPolicy | None = None,
     ):
         if worker_role not in {"local", "commercial"}:
             raise ValueError("worker_role must be local or commercial")
@@ -92,6 +93,7 @@ class WorkerExecutor:
         )
         self._commercial_queue_gate = commercial_queue_gate
         self._retry_config = retry_config or RetryConfig()
+        self._profile_routing = profile_routing or ProfileRoutingPolicy()
         self._legacy_processing_timeout_seconds = legacy_processing_timeout_seconds
         self._retry_recovery_lock = threading.Lock()
         self._last_retry_recovery_monotonic = 0.0
@@ -99,19 +101,19 @@ class WorkerExecutor:
 
     def operational_snapshot(self) -> dict[str, object]:
         snapshot_fn = getattr(self._task_service.repository, "get_queue_stats", None)
-        snapshot = dict(snapshot_fn()) if callable(snapshot_fn) else {}
+        snapshot = dict(snapshot_fn(task_types=self._worker_task_types, work_envs=self._worker_work_envs)) if callable(snapshot_fn) else {}
         snapshot.update(self._target_circuit.snapshot())
         return snapshot
 
     def request_shutdown(self) -> None:
-        """Stop claiming new work and interrupt QingTian polling between requests."""
+        """Stop claiming new work and interrupt workflow polling between requests."""
         self._shutdown_event.set()
 
     def execute_once(self) -> str:
         if self._shutdown_event.is_set():
             return "idle"
         execute_start = time.perf_counter()
-        retry_enabled = self._supports_qingtian_retry()
+        retry_enabled = self._supports_resumable_workflow()
         self._maybe_recover_expired_retry_leases(enabled=retry_enabled)
         allow_unbound_work = (
             self._worker_target_mode == "active"
@@ -135,6 +137,8 @@ class WorkerExecutor:
                 allow_unbound_retries=allow_unbound_retries,
                 task_types=self._worker_task_types,
                 work_envs=self._worker_work_envs,
+                require_profile_identity=self._platform_name == "runner",
+                allow_weighted_new_tasks=allow_unbound_work and self._profile_routing.enabled,
             )
         except Exception:
             self._logger.exception(
@@ -173,7 +177,7 @@ class WorkerExecutor:
             retry_policy_version=claimed.retry_policy_version,
         ):
             if retry_enabled and claimed.claim_token:
-                return self._execute_retryable_qingtian(
+                return self._execute_resumable_workflow(
                     claimed=claimed,
                     execute_start=execute_start,
                     claim_start=claim_start,
@@ -256,15 +260,33 @@ class WorkerExecutor:
                 self._safe_mark_failed(task_id, f"{_WORKER_UNEXPECTED_ERROR_CODE}: {detail}")
                 return "failed"
 
-    def _supports_qingtian_retry(self) -> bool:
+    def _supports_resumable_workflow(self) -> bool:
         if (
-            self._platform_name != "qingtian"
+            self._platform_name not in {"qingtian", "runner"}
         ):
             return False
         return all(
             callable(getattr(self._workflow_client, method, None))
             for method in ("submit_workflow", "poll_workflow")
         )
+
+    def _retry_error_code(self, suffix: str) -> str:
+        prefix = self._platform_name.upper()
+        return f"{prefix}_{suffix}"
+
+    def _poll_claimed_workflow(self, claimed: TaskRecord, run_id: str, heartbeat):
+        kwargs = dict(
+            workflow_run_id=run_id,
+            work_env=claimed.work_env,
+            task_type=claimed.task_type,
+            on_poll=heartbeat,
+        )
+        if self._platform_name == "runner":
+            kwargs.update(
+                customer_phonenumber=claimed.customer_phonenumber,
+                batch_id=claimed.batch_id,
+            )
+        return self._workflow_client.poll_workflow(**kwargs)
 
     def _maybe_recover_expired_retry_leases(self, *, enabled: bool) -> None:
         if not enabled:
@@ -275,29 +297,30 @@ class WorkerExecutor:
                 return
             self._last_retry_recovery_monotonic = now
         try:
-            self._task_service.recover_expired_retry_leases(limit=100)
-            self._task_service.requeue_stale_processing(
-                timeout_seconds=self._legacy_processing_timeout_seconds,
-                limit=100,
-            )
+            if self._platform_name == "runner":
+                self._task_service.recover_expired_retry_leases(
+                    limit=100, workflow_target_id=self._workflow_target_id,
+                    workflow_target_revision=self._workflow_target_revision,
+                )
+            else:
+                self._task_service.recover_expired_retry_leases(limit=100)
+                self._task_service.requeue_stale_processing(
+                    timeout_seconds=self._legacy_processing_timeout_seconds,
+                    limit=100,
+                )
         except Exception:
             # A recovery scan is best effort.  Claiming is still safe because
             # the DB transaction and fencing token protect each active task.
             self._logger.exception("worker_retry_lease_recovery_failed")
 
-    def _execute_retryable_qingtian(
+    def _execute_resumable_workflow(
         self,
         *,
         claimed: TaskRecord,
         execute_start: float,
         claim_start: float,
     ) -> str:
-        """Run the repo-only QingTian recovery flow.
-
-        The only remote protocol used here is the existing submit response's
-        ``runId`` and the existing query endpoint.  No workflow input or
-        QingTian-side behaviour is changed.
-        """
+        """Persist a remote run id before polling, and recover it with the same target."""
         if claimed.id is None or not claimed.claim_token:
             self._logger.error("worker_retry_task_missing_claim_identity task_id=%s", claimed.id)
             return "error"
@@ -358,12 +381,7 @@ class WorkerExecutor:
                     attempt_no=attempt_no,
                 ):
                     return "failed"
-                output_raw = self._workflow_client.poll_workflow(
-                    workflow_run_id=workflow_run_id,
-                    work_env=claimed.work_env,
-                    task_type=claimed.task_type,
-                    on_poll=heartbeat,
-                )
+                output_raw = self._poll_claimed_workflow(claimed, workflow_run_id, heartbeat)
             else:
                 limits = attempt_limits(
                     policy_version=claimed.retry_policy_version,
@@ -389,9 +407,9 @@ class WorkerExecutor:
                         generation=generation,
                         claim_token=claim_token,
                         attempt_no=None,
-                        error_code="QINGTIAN_RETRY_EXHAUSTED",
+                        error_code=self._retry_error_code("RETRY_EXHAUSTED"),
                         error_stage="submit",
-                        error_message="maximum QingTian workflow attempts exhausted",
+                        error_message="maximum workflow attempts exhausted",
                     )
                 if claimed.execution_pool == "local":
                     local_attempt_count += 1
@@ -418,19 +436,14 @@ class WorkerExecutor:
                     # resubmit it until a durable id exists.  Lease recovery
                     # will surface this as QINGTIAN_SUBMIT_UNKNOWN.
                     self._logger.error(
-                        "worker_qingtian_run_id_persist_rejected task_id=%s generation=%s attempt_no=%s",
+                        "worker_workflow_run_id_persist_rejected task_id=%s generation=%s attempt_no=%s",
                         task_id,
                         generation,
                         attempt_no,
                     )
                     return "error"
                 workflow_run_id = submitted_run_id
-                output_raw = self._workflow_client.poll_workflow(
-                    workflow_run_id=workflow_run_id,
-                    work_env=claimed.work_env,
-                    task_type=claimed.task_type,
-                    on_poll=heartbeat,
-                )
+                output_raw = self._poll_claimed_workflow(claimed, workflow_run_id, heartbeat)
             parsed = self._output_parser.parse(output_raw)
         except _WorkerShutdownRequested:
             return self._release_retry_claim_for_shutdown(
@@ -445,7 +458,7 @@ class WorkerExecutor:
                 generation,
             )
             return "error"
-        except QingTianWorkflowTerminated as exc:
+        except WorkflowTerminated as exc:
             self._record_target_success()
             return self._retry_new_run_or_fail(
                 claimed=claimed,
@@ -473,7 +486,7 @@ class WorkerExecutor:
                 local_attempt_count=local_attempt_count,
                 commercial_attempt_count=commercial_attempt_count,
             )
-        except QingTianTimeout as exc:
+        except ResumableWorkflowTimeout as exc:
             if exc.stage == "submit":
                 self._record_target_failure(exc)
             if workflow_run_id:
@@ -495,11 +508,16 @@ class WorkerExecutor:
                 generation=generation,
                 claim_token=claim_token,
                 attempt_no=attempt_no,
-                error_code="QINGTIAN_SUBMIT_UNKNOWN",
+                error_code=self._retry_error_code("SUBMIT_UNKNOWN"),
                 error_stage="submit",
                 error_message=str(exc),
             )
-        except QingTianRequestFailed as exc:
+        except ResumableWorkflowRequestFailed as exc:
+            if exc.stage == "reconcile":
+                return self._finish_retry_failure(
+                    task_id=task_id, generation=generation, claim_token=claim_token, attempt_no=attempt_no,
+                    error_code=self._retry_error_code("REQUIRES_RECONCILIATION"), error_stage="reconcile", error_message=str(exc),
+                )
             # A definite submit-side 4xx such as malformed workflow input is
             # task-specific, not evidence that the target itself is unhealthy.
             # Authentication/rate-limit rejections are marked retryable by the
@@ -559,7 +577,7 @@ class WorkerExecutor:
                 generation=generation,
                 claim_token=claim_token,
                 attempt_no=attempt_no,
-                error_code="QINGTIAN_SUBMIT_UNKNOWN",
+                error_code=self._retry_error_code("SUBMIT_UNKNOWN"),
                 error_stage="submit",
                 error_message=str(exc),
             )
@@ -717,7 +735,7 @@ class WorkerExecutor:
                 generation=generation,
                 claim_token=claim_token,
                 attempt_no=attempt_no,
-                error_code=("QINGTIAN_RETRY_EXHAUSTED" if attempt_no is not None else error_code),
+                error_code=(self._retry_error_code("RETRY_EXHAUSTED") if attempt_no is not None else error_code),
                 error_stage=error_stage,
                 error_message=error_message,
             )
@@ -762,12 +780,12 @@ class WorkerExecutor:
                     generation=generation,
                     claim_token=claim_token,
                     attempt_no=attempt_no,
-                    error_code="QINGTIAN_RUN_STALLED",
+                    error_code=self._retry_error_code("RUN_STALLED"),
                     error_stage="poll",
                     error_message=(
-                        "QINGTIAN_RUN_STALLED: workflow run reached the maximum "
+                        f"{self._retry_error_code('RUN_STALLED')}: workflow run reached the maximum "
                         f"of {self._retry_config.max_poll_recoveries} recovery polls; "
-                        "no new QingTian workflow run was created"
+                        "no new workflow run was created"
                     ),
                 )
             if self._mark_stalled_if_run_lifetime_exceeded(
@@ -878,6 +896,15 @@ class WorkerExecutor:
         return "failed" if failed else "error"
 
     def _route_reason(self, claimed: TaskRecord) -> str:
+        if (self._profile_routing.enabled and not claimed.attempt_count
+                and claimed.task_type == "customer_profile"
+                and claimed.work_env in self._profile_routing.work_envs
+                and re.fullmatch(r"1[3-9][0-9]{9}", claimed.customer_phonenumber)
+                and claimed.batch_id and 1 <= len(claimed.batch_id) <= 50):
+            runner = self._platform_name == "runner"
+            preferred_runner = profile_bucket(claimed.customer_phonenumber, claimed.batch_id,
+                                               claimed.work_env) < self._profile_routing.runner_percent
+            return ("profile_weighted_" if runner == preferred_runner else "profile_spillover_") + ("runner" if runner else "legacy")
         if claimed.retry_policy_version == SINGLE_TARGET_V1:
             return "single_target_retry" if claimed.attempt_count else "single_target"
         if claimed.retry_policy_version != LOCAL_FIRST_V1:

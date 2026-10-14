@@ -16,7 +16,12 @@ class TaskRepository(Protocol):
     ) -> TaskRecord:
         ...
 
-    def claim_next_queued(self) -> TaskRecord | None:
+    def claim_next_queued(
+        self,
+        *,
+        task_types: tuple[str, ...] | None = None,
+        work_envs: tuple[str, ...] | None = None,
+    ) -> TaskRecord | None:
         ...
 
     def claim_next_eligible(
@@ -30,11 +35,14 @@ class TaskRepository(Protocol):
         allow_unbound_retries: bool,
         task_types: tuple[str, ...],
         work_envs: tuple[str, ...],
+        require_profile_identity: bool = False,
+        allow_weighted_new_tasks: bool = False,
     ) -> TaskRecord | None:
         ...
 
     def count_queued(self, *, task_type: str | None = None) -> int:
         ...
+
 
     def list_by_prefix(
         self,
@@ -78,6 +86,7 @@ class TaskRepository(Protocol):
         route_reason: str,
     ) -> int | None:
         ...
+
 
     def persist_workflow_run(
         self,
@@ -155,7 +164,8 @@ class TaskRepository(Protocol):
     ) -> bool:
         ...
 
-    def recover_expired_retry_leases(self, *, limit: int) -> tuple[int, int]:
+    def recover_expired_retry_leases(self, *, limit: int, workflow_target_id: str | None = None,
+                                    workflow_target_revision: str | None = None) -> tuple[int, int]:
         ...
 
     def requeue_stale_processing(self, *, timeout_seconds: int, limit: int) -> int:

@@ -59,6 +59,8 @@ class TaskService:
         allow_unbound_retries: bool = True,
         task_types: tuple[str, ...] = ("customer_profile", "invitation_strategy"),
         work_envs: tuple[str, ...] = ("test", "production"),
+        require_profile_identity: bool = False,
+        allow_weighted_new_tasks: bool = False,
     ) -> TaskRecord | None:
         claim_eligible = getattr(self.repository, "claim_next_eligible", None)
         if retry_enabled and lease_seconds is not None and callable(claim_eligible):
@@ -71,9 +73,18 @@ class TaskService:
                 allow_unbound_retries=allow_unbound_retries,
                 task_types=task_types,
                 work_envs=work_envs,
+                **({"require_profile_identity": True} if require_profile_identity else {}),
+                **({"allow_weighted_new_tasks": True} if allow_weighted_new_tasks else {}),
             )
         else:
-            record = self.repository.claim_next_queued()
+            # A non-resumable target cannot drain bound work or claim outside
+            # its declared task/environment capabilities.
+            if not allow_new_tasks:
+                return None
+            record = self.repository.claim_next_queued(
+                task_types=task_types,
+                work_envs=work_envs,
+            )
         if record:
             with log_context(
                 task_id=record.id,
@@ -88,11 +99,15 @@ class TaskService:
                 )
         return record
 
-    def recover_expired_retry_leases(self, *, limit: int = 100) -> tuple[int, int]:
+    def recover_expired_retry_leases(self, *, limit: int = 100, workflow_target_id: str | None = None,
+                                    workflow_target_revision: str | None = None) -> tuple[int, int]:
         recover = getattr(self.repository, "recover_expired_retry_leases", None)
         if not callable(recover):
             return 0, 0
-        recoverable, unknown = recover(limit=limit)
+        kwargs = {"limit": limit}
+        if workflow_target_id is not None or workflow_target_revision is not None:
+            kwargs.update(workflow_target_id=workflow_target_id, workflow_target_revision=workflow_target_revision)
+        recoverable, unknown = recover(**kwargs)
         if recoverable or unknown:
             self.logger.warning(
                 "task_retry_lease_recovered recoverable_tasks=%s unknown_submissions_failed=%s limit=%s",
@@ -101,6 +116,7 @@ class TaskService:
                 limit,
             )
         return recoverable, unknown
+
 
     def list_tasks(
         self,

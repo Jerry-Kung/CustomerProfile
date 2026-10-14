@@ -355,3 +355,8 @@ API_E2E_BASE_URL=http://127.0.0.1:8000 ./scripts/api_e2e_curl.sh
 - **API 启动报缺环境变量**：检查 `.env` 是否与启动命令在同一工作目录，或已 `export` / `set` 全部必填项。
 - **Worker 不消费**：确认 MySQL 连通、任务状态为 `queued`、Worker 进程在跑。
 - **容器内访问本机文件路径**：提交任务里的 `wechat_*_image` 若为本地路径，须是 **Worker 容器内可读路径**；演示环境建议使用 URL 或与 Worker 挂载相同卷。
+
+
+## 新增画像 Runner Worker
+
+将部分画像任务分流到独立生成服务时，参见 [Runner 接入与部署](profile-runner-integration.md)。复用现有 001–006 表结构与重试机制，无新增数据库迁移。

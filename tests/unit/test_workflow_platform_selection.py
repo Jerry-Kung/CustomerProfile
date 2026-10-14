@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from src.app.bootstrap import _build_workflow_client
+from dataclasses import replace
+
+from src.app.bootstrap import _build_workflow_client, _workflow_poll_timeout_ms
 from src.config.settings import AppConfig, DifyConfig, MigrationConfig, MySQLConfig, QingTianConfig, TosConfig, UploadConfig, WorkerConfig
 from src.infrastructure.dify.client import DifyClient
 from src.infrastructure.qingtian.client import QingTianClient
+from src.infrastructure.runner.client import RunnerClient
+from src.config.settings import ProfileRunnerConfig
+from src.config.logging_utils import redact_config
 
 import logging
 from pathlib import Path
@@ -58,3 +63,12 @@ def test_dify_platform_returns_dify_client():
 def test_qingtian_platform_returns_qingtian_client():
     client = _build_workflow_client(_config("qingtian"), logging.getLogger("test"))
     assert isinstance(client, QingTianClient)
+
+
+def test_runner_platform_returns_runner_client_and_uses_its_recovery_window():
+    config = replace(_config("runner"), runner=ProfileRunnerConfig(base_url_production="http://runner", poll_timeout_ms=100000))
+    client = _build_workflow_client(config, logging.getLogger("test"))
+    assert isinstance(client, RunnerClient)
+    assert _workflow_poll_timeout_ms(config) == 100000
+    assert _workflow_poll_timeout_ms(_config("qingtian")) == 2400000
+    assert _workflow_poll_timeout_ms(_config("dify")) == 2400000

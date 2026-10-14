@@ -40,8 +40,21 @@ class InMemoryTaskRepository:
         self._rows[key] = existing
         return existing
 
-    def claim_next_queued(self) -> TaskRecord | None:
-        queued = [v for v in self._rows.values() if v.status == "queued"]
+    def claim_next_queued(
+        self,
+        *,
+        task_types: tuple[str, ...] | None = None,
+        work_envs: tuple[str, ...] | None = None,
+    ) -> TaskRecord | None:
+        queued = [
+            v for v in self._rows.values()
+            if v.status == "queued"
+            and (task_types is None or v.task_type in task_types)
+            and (work_envs is None or v.work_env in work_envs)
+            and v.workflow_run_id is None
+            and v.workflow_target_id is None
+            and v.workflow_target_revision is None
+        ]
         if not queued:
             return None
         queued.sort(key=lambda x: x.id or 0)
@@ -187,3 +200,54 @@ def test_list_tasks_filters_by_task_type():
     )
     assert total_inv == 1
     assert items_inv[0].task_type == "invitation_strategy"
+
+
+def test_legacy_claim_respects_task_type_and_environment_scope():
+    repo = InMemoryTaskRepository()
+    service = TaskService(repository=repo, logger=_logger("test_claim_scope"))
+    profile = service.submit_task("13800138000", work_env="production")
+    test_invite = service.submit_task(
+        "13900139000", task_type="invitation_strategy", work_env="test"
+    )
+    production_invite = service.submit_task(
+        "13700137000", task_type="invitation_strategy", work_env="production"
+    )
+    claimed = service.claim_next_task(
+        task_types=("invitation_strategy",), work_envs=("production",)
+    )
+    assert claimed is production_invite
+    assert profile.status == test_invite.status == "queued"
+
+
+def test_legacy_claim_does_not_steal_bound_workflow():
+    repo = InMemoryTaskRepository()
+    service = TaskService(repository=repo, logger=_logger("test_claim_bound"))
+    bound = service.submit_task("13800138000")
+    bound.workflow_run_id = "runner-run"
+    bound.workflow_target_id = "profile-runner"
+    fresh = service.submit_task("13900139000", task_type="invitation_strategy")
+    assert service.claim_next_task() is fresh
+    assert bound.status == "queued"
+
+
+def test_legacy_draining_claim_does_not_call_repository():
+    from unittest.mock import Mock
+
+    repository = Mock()
+    service = TaskService(repository=repository, logger=_logger("test_claim_draining"))
+    assert service.claim_next_task(allow_new_tasks=False) is None
+    repository.claim_next_queued.assert_not_called()
+
+
+def test_legacy_claim_forwards_scope_without_retry_support():
+    from unittest.mock import Mock
+
+    repository = Mock()
+    repository.claim_next_queued.return_value = None
+    service = TaskService(repository=repository, logger=_logger("test_claim_forward"))
+    service.claim_next_task(
+        task_types=("invitation_strategy",), work_envs=("production",)
+    )
+    repository.claim_next_queued.assert_called_once_with(
+        task_types=("invitation_strategy",), work_envs=("production",)
+    )

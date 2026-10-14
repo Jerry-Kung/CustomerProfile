@@ -15,6 +15,7 @@ from src.infrastructure.workflow.errors import (
     WorkflowRequestFailed,
     WorkflowTimeout,
 )
+from src.infrastructure.runner.errors import RunnerRequestFailed, RunnerTimeout, RunnerWorkflowTerminated
 from src.infrastructure.workflow.output_parser import WorkflowOutputParser
 from src.worker.executor import WorkerExecutor
 from src.worker.routing import CommercialQueueGate, CommercialQueueThreshold
@@ -53,13 +54,13 @@ class _Repo:
             task_type=task_type,
         )
 
-    def claim_next_queued(self) -> TaskRecord | None:
+    def claim_next_queued(self, **_filters) -> TaskRecord | None:
         self.claim_calls += 1
         item = self.claimed
         self.claimed = None
         return item
 
-    def get_queue_stats(self) -> dict[str, object]:
+    def get_queue_stats(self, **_scope) -> dict[str, object]:
         self.queue_stats_calls += 1
         return {
             "queue_depth": self.queue_depth,
@@ -145,10 +146,11 @@ class _RetryRepo:
         self.claimed = None
         return item
 
-    def claim_next_queued(self):
+    def claim_next_queued(self, **_filters):
         return None
 
-    def recover_expired_retry_leases(self, *, limit: int):
+    def recover_expired_retry_leases(self, *, limit: int, **scope):
+        self.recovery_scope = scope
         self.recoveries += 1
         return 0, 0
 
@@ -181,6 +183,7 @@ class _RetryRepo:
     def mark_failed_claimed(self, **kwargs):
         self.final_failures.append(kwargs)
         return True
+
 
     def mark_stalled_if_run_lifetime_exceeded(self, **kwargs):
         self.stalled_lifetime_checks.append(kwargs)
@@ -807,7 +810,7 @@ def test_qingtian_durable_retry_is_supported_by_the_commercial_worker():
         retry_config=_retry_config(),
     )
 
-    assert executor._supports_qingtian_retry() is True
+    assert executor._supports_resumable_workflow() is True
     assert executor.execute_once() == "succeeded"
     assert repo.claim_args == [
         {
@@ -1042,3 +1045,115 @@ def test_open_target_circuit_blocks_unbound_claims_but_recovers_owned_run():
     assert executor.execute_once() == "succeeded"
     assert repo.claim_args[0]["allow_new_tasks"] is False
     assert repo.claim_args[0]["allow_unbound_retries"] is False
+
+
+def _runner_executor(*, run_id=None, attempts=0):
+    task = _retry_task(
+        workflow_run_id=run_id,
+        attempt_count=attempts,
+        workflow_target_id="profile-runner-production",
+        retry_policy_version="single_target_v1",
+    )
+    task.work_env = "production"
+    task.batch_id = "business-batch"
+    repo = _RetryRepo(task)
+    workflow = _RecoverableWorkflow(output='{"profile_summary":{"name":"测试客户"}}')
+    executor = WorkerExecutor(
+        task_service=TaskService(repository=repo, logger=_logger()),
+        workflow_client=workflow,
+        output_parser=_parser(),
+        logger=_logger(),
+        platform_name="runner",
+        workflow_target_id="profile-runner-production",
+        worker_task_types=("customer_profile",),
+        worker_work_envs=("production",),
+        retry_config=_retry_config(),
+    )
+    return repo, workflow, executor
+
+
+def test_runner_persists_id_before_poll_and_checks_business_identity():
+    repo, workflow, executor = _runner_executor()
+    def assert_run_is_durable():
+        assert repo.persisted_runs[0]["workflow_run_id"] == "run-new"
+    workflow.before_poll_callback = assert_run_is_durable
+    assert executor.execute_once() == "succeeded"
+    assert workflow.poll_calls[0]["customer_phonenumber"] == "13800138000"
+    assert workflow.poll_calls[0]["batch_id"] == "business-batch"
+    assert repo.claim_args[0]["task_types"] == ("customer_profile",)
+    assert repo.claim_args[0]["work_envs"] == ("production",)
+    assert repo.succeeded_claimed[0]["output"] == {"profile_summary": {"name": "测试客户"}}
+
+
+def test_runner_recovery_polls_same_id_without_new_submission():
+    repo, workflow, executor = _runner_executor(run_id="runner-existing", attempts=1)
+    workflow.poll_error = RunnerTimeout("temporary poll outage", stage="poll")
+    assert executor.execute_once() == "retrying"
+    assert not workflow.submit_calls
+    assert repo.scheduled[0]["retain_workflow_run"] is True
+    assert repo.scheduled[0]["error_code"] == "RUNNER_TIMEOUT"
+    assert workflow.poll_calls[0]["workflow_run_id"] == "runner-existing"
+
+
+def test_runner_submit_timeout_is_unknown_and_never_blindly_retried():
+    repo, workflow, executor = _runner_executor()
+    workflow.submit_error = RunnerTimeout("response lost", stage="submit")
+    assert executor.execute_once() == "failed"
+    assert not repo.scheduled
+    assert not workflow.poll_calls
+    assert repo.final_failures[0]["error_code"] == "RUNNER_SUBMIT_UNKNOWN"
+
+
+def test_runner_definite_queue_rejection_retries_with_retry_after():
+    repo, workflow, executor = _runner_executor()
+    workflow.submit_error = RunnerRequestFailed(
+        "queue full", stage="submit", status_code=429, retryable=True, retry_after_seconds=99
+    )
+    assert executor.execute_once() == "retrying"
+    assert repo.scheduled[0]["retain_workflow_run"] is False
+    assert repo.scheduled[0]["delay_seconds"] >= 99
+    assert not repo.final_failures
+
+
+def test_runner_final_known_failure_uses_existing_retry_budget():
+    repo, workflow, executor = _runner_executor(run_id="runner-existing", attempts=3)
+    workflow.poll_error = RunnerWorkflowTerminated("model failed", terminal_status="failed")
+    assert executor.execute_once() == "failed"
+    assert not repo.scheduled
+    assert repo.final_failures[0]["error_code"] == "RUNNER_RETRY_EXHAUSTED"
+    assert repo.final_failures[0]["error_stage"] == "workflow"
+
+
+def test_runner_recovers_only_its_target_and_never_requeues_legacy_processing():
+    repo, _, executor = _runner_executor()
+    executor.execute_once()
+    assert repo.recovery_scope == {
+        'workflow_target_id': 'profile-runner-production', 'workflow_target_revision': 'v1',
+    }
+    assert repo.legacy_recoveries == []
+    assert repo.claim_args[0]['require_profile_identity'] is True
+
+
+def test_runner_definite_failure_keeps_existing_throughput_routing():
+    repo, workflow, executor = _runner_executor(run_id='runner-existing', attempts=1)
+    repo.claimed.retry_policy_version = 'throughput_first_v1'
+    workflow.poll_error = RunnerWorkflowTerminated('failed', terminal_status='failed')
+    assert executor.execute_once() == 'retrying'
+    assert repo.scheduled[0]['next_execution_pool'] == 'any'
+    assert repo.scheduled[0]['retain_workflow_run'] is False
+
+
+def test_runner_definite_failure_keeps_existing_local_first_commercial_fallback():
+    repo, workflow, executor = _runner_executor(run_id='runner-existing', attempts=2)
+    repo.claimed.retry_policy_version = 'local_first_v1'
+    workflow.poll_error = RunnerWorkflowTerminated('failed', terminal_status='failed')
+    assert executor.execute_once() == 'retrying'
+    assert repo.scheduled[0]['next_execution_pool'] == 'commercial'
+
+
+def test_runner_uncertain_side_effects_are_not_rerouted():
+    repo, workflow, executor = _runner_executor(run_id="existing-run", attempts=1)
+    workflow.poll_error = RunnerRequestFailed("reconcile", stage="reconcile")
+    assert executor.execute_once() == "failed"
+    assert repo.final_failures[0]["error_code"] == "RUNNER_REQUIRES_RECONCILIATION"
+    assert not workflow.submit_calls and not repo.scheduled

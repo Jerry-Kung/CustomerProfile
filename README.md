@@ -27,3 +27,6 @@ docker compose up -d --build
 ```
 
 默认将本机 **18008** 端口映射到 API（可用环境变量 `HOST_API_PORT` 修改，见部署文档）。
+
+
+将部分画像任务分流到独立生成服务，参见 [Runner 接入与部署](docs/profile-runner-integration.md)。新增 Runner Worker 与旧 Worker 使用原队列和重试机制，支持可配置的 80/20 首次分配；邀约继续使用原工作流。

@@ -34,6 +34,8 @@ def _load_with_env(monkeypatch: pytest.MonkeyPatch, extra: dict[str, str] | None
             or key.startswith("WORKFLOW_")
             or key.startswith("RETRY_")
             or key.startswith("COMMERCIAL_")
+            or key.startswith("PROFILE_RUNNER_")
+            or key.startswith("PROFILE_ROUTING_")
             or key in {"APP_ENV", "LOG_LEVEL", "WORKFLOW_PLATFORM"}
         ):
             monkeypatch.delenv(key, raising=False)
@@ -43,6 +45,76 @@ def _load_with_env(monkeypatch: pytest.MonkeyPatch, extra: dict[str, str] | None
         for key, value in extra.items():
             monkeypatch.setenv(key, value)
     return load_config()
+
+
+def _runner_env(**overrides):
+    env = {"WORKFLOW_PLATFORM": "runner", "WORKFLOW_TARGET_ID": "runner-profile-prod-v1",
+           "WORKER_WORK_ENVS": "production", "PROFILE_RUNNER_BASE_URL_PRODUCTION": "http://runner:18000"}
+    env.update(overrides)
+    return env
+
+
+def test_runner_configuration_requires_only_selected_environment(monkeypatch):
+    config = _load_with_env(monkeypatch, _runner_env())
+    assert config.worker.task_types == ("customer_profile",)
+    assert config.worker.work_envs == ("production",)
+    assert config.runner.base_url_test == ""
+    assert config.runner.base_url_production == "http://runner:18000"
+    assert config.runner.request_timeout_ms == 15000
+    assert config.runner.poll_interval_ms == 2000
+    assert config.runner.poll_timeout_ms == 2400000
+    assert config.retry.policy_version == "throughput_first_v1"
+
+
+def test_profile_weighted_defaults_and_explicit_override(monkeypatch):
+    config = _load_with_env(monkeypatch, {"PROFILE_ROUTING_MODE": "weighted"})
+    assert config.profile_routing.enabled
+    assert config.profile_routing.runner_percent == 80
+    assert config.profile_routing.spillover_seconds == 300
+    assert config.profile_routing.work_envs == ("production",)
+    config = _load_with_env(monkeypatch, {"PROFILE_ROUTING_MODE": "weighted", "PROFILE_RUNNER_TRAFFIC_PERCENT": "90"})
+    assert config.profile_routing.runner_percent == 90
+
+
+@pytest.mark.parametrize("extra", [
+    {"PROFILE_ROUTING_MODE": "random"}, {"PROFILE_RUNNER_TRAFFIC_PERCENT": "101"},
+    {"PROFILE_RUNNER_TRAFFIC_PERCENT": "-1"}, {"PROFILE_ROUTING_SPILLOVER_SECONDS": "0"},
+    {"PROFILE_ROUTING_WORK_ENVS": "invalid"},
+])
+def test_profile_routing_invalid_configuration_is_rejected(monkeypatch, extra):
+    with pytest.raises(ValueError):
+        _load_with_env(monkeypatch, extra)
+
+
+def test_runner_default_environment_is_test_and_never_falls_back_to_production(monkeypatch):
+    with pytest.raises(ValueError, match="PROFILE_RUNNER_BASE_URL_TEST"):
+        _load_with_env(monkeypatch, {"WORKFLOW_PLATFORM": "runner", "WORKFLOW_TARGET_ID": "runner-v1",
+                                     "PROFILE_RUNNER_BASE_URL_PRODUCTION": "http://runner"})
+
+
+@pytest.mark.parametrize("overrides, error", [
+    ({"WORKFLOW_TARGET_ID": ""}, "WORKFLOW_TARGET_ID"),
+    ({"WORKFLOW_TARGET_ID": "local-default"}, "independent WORKFLOW_TARGET_ID"),
+    ({"WORKFLOW_TARGET_ID": "commercial-default"}, "independent WORKFLOW_TARGET_ID"),
+    ({"WORKER_TASK_TYPES": "customer_profile,invitation_strategy"}, "invitation_strategy"),
+    ({"WORKER_ROLE": "commercial"}, "WORKER_ROLE"),
+    ({"PROFILE_RUNNER_BASE_URL_PRODUCTION": "http://user:password@runner"}, "base URL"),
+    ({"PROFILE_RUNNER_BASE_URL_PRODUCTION": "http://runner/?key=value"}, "base URL"),
+    ({"PROFILE_RUNNER_REQUEST_TIMEOUT_MS": "0"}, "PROFILE_RUNNER_REQUEST_TIMEOUT_MS"),
+    ({"PROFILE_RUNNER_POLL_INTERVAL_MS": "-1"}, "PROFILE_RUNNER_POLL_INTERVAL_MS"),
+    ({"PROFILE_RUNNER_POLL_TIMEOUT_MS": "0"}, "PROFILE_RUNNER_POLL_TIMEOUT_MS"),
+])
+def test_runner_invalid_configuration_is_rejected(monkeypatch, overrides, error):
+    with pytest.raises(ValueError, match=error):
+        _load_with_env(monkeypatch, _runner_env(**overrides))
+
+
+@pytest.mark.parametrize("policy", ["throughput_first_v1", "local_first_v1", "single_target_v1"])
+def test_runner_accepts_existing_retry_policy(monkeypatch, policy):
+    config = _load_with_env(monkeypatch, _runner_env(RETRY_POLICY_VERSION=policy))
+    assert config.retry.policy_version == policy
+
+
 
 
 def test_load_config_success_defaults(monkeypatch: pytest.MonkeyPatch):

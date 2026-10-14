@@ -11,6 +11,7 @@ from src.config.observability import elapsed_ms, mask_phone
 from src.domain.task.errors import TaskQueueFullError
 from src.domain.task.models import TaskRecord
 from src.domain.task.retry_policy import retry_policy_for_task
+from src.domain.task.profile_routing import ProfileRoutingPolicy
 from src.infrastructure.db.client import MySQLClient
 
 _QUEUE_ADMIT_LOCK_NAME = "cp_task_queue_admit"
@@ -30,11 +31,13 @@ class MySQLTaskRepository:
         queue_max_waiting: int = 500,
         default_retry_policy_version: str = "throughput_first_v1",
         logger: logging.Logger | None = None,
+        profile_routing: ProfileRoutingPolicy | None = None,
     ):
         self._db_client = db_client
         self._queue_max_waiting = queue_max_waiting
         self._default_retry_policy_version = default_retry_policy_version
         self._logger = logger or logging.getLogger(__name__)
+        self._profile_routing = profile_routing or ProfileRoutingPolicy()
         self._has_work_env_column_cache: bool | None = None
         self._has_batch_id_column_cache: bool | None = None
         self._has_task_type_column_cache: bool | None = None
@@ -226,18 +229,29 @@ class MySQLTaskRepository:
         )
         cursor.execute(sql, tuple(params))
 
-    def claim_next_queued(self) -> TaskRecord | None:
+    def claim_next_queued(
+        self,
+        *,
+        task_types: tuple[str, ...] | None = None,
+        work_envs: tuple[str, ...] | None = None,
+    ) -> TaskRecord | None:
         start = time.perf_counter()
         conn = self._db_client.connect()
         try:
             has_work_env = self._has_work_env_column(conn)
             has_batch_id = self._has_batch_id_column(conn)
             has_task_type = self._has_task_type_column(conn)
+            select_sql, select_params = _select_next_queued_sql(
+                has_work_env,
+                has_batch_id,
+                has_task_type,
+                task_types=task_types,
+                work_envs=work_envs,
+                profile_routing=self._profile_routing,
+            )
             cursor = conn.cursor(dictionary=True)
             cursor.execute("START TRANSACTION")
-            cursor.execute(
-                _select_next_queued_sql(has_work_env, has_batch_id, has_task_type)
-            )
+            cursor.execute(select_sql, select_params)
             row = cursor.fetchone()
             if row is None:
                 conn.commit()
@@ -247,6 +261,9 @@ class MySQLTaskRepository:
                 UPDATE customer_profile_tasks
                 SET status = 'processing', updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s AND status = 'queued'
+                  AND workflow_run_id IS NULL
+                  AND workflow_target_id IS NULL
+                  AND workflow_target_revision IS NULL
                 """,
                 (row["id"],),
             )
@@ -300,12 +317,13 @@ class MySQLTaskRepository:
         allow_unbound_retries: bool,
         task_types: tuple[str, ...],
         work_envs: tuple[str, ...],
+        require_profile_identity: bool = False,
+        allow_weighted_new_tasks: bool = False,
     ) -> TaskRecord | None:
         """Claim either a new task or a due retry using a fenced worker lease.
 
-        This path is used only by the opt-in QingTian retry executor.  The
-        legacy ``claim_next_queued`` method remains intentionally unchanged for
-        Dify and for deployments where retries are disabled.
+        Non-resumable clients use ``claim_next_queued`` for scoped, unbound
+        queued tasks; only this path resumes leased or bound work.
         """
         start = time.perf_counter()
         conn = self._db_client.connect()
@@ -326,6 +344,9 @@ class MySQLTaskRepository:
                 allow_unbound_retries=allow_unbound_retries,
                 task_types=task_types,
                 work_envs=work_envs,
+                require_profile_identity=require_profile_identity,
+                profile_routing=self._profile_routing,
+                allow_weighted_new_tasks=allow_weighted_new_tasks,
             )
             cursor.execute(
                 select_sql,
@@ -337,8 +358,11 @@ class MySQLTaskRepository:
                 return None
 
             token = uuid.uuid4().hex
+            queued_gate, queued_params = _queued_gate_sql(
+                self._profile_routing, allow_new_tasks, allow_weighted_new_tasks, alias="",
+            )
             cursor.execute(
-                """
+                f"""
                 UPDATE customer_profile_tasks
                 SET status = 'processing',
                     execution_backend = %s,
@@ -377,7 +401,7 @@ class MySQLTaskRepository:
                     OR (
                         status = 'queued'
                         AND workflow_target_id IS NULL
-                        AND %s = 1
+                        AND ({queued_gate})
                     )
                   )
                 """,
@@ -393,7 +417,7 @@ class MySQLTaskRepository:
                     workflow_target_revision,
                     int(allow_unbound_retries),
                     execution_pool,
-                    int(allow_new_tasks),
+                    *queued_params,
                 ),
             )
             if cursor.rowcount != 1:
@@ -447,6 +471,7 @@ class MySQLTaskRepository:
             raise
         finally:
             conn.close()
+
 
     def reserve_workflow_attempt(
         self,
@@ -1078,7 +1103,8 @@ class MySQLTaskRepository:
         finally:
             conn.close()
 
-    def recover_expired_retry_leases(self, *, limit: int) -> tuple[int, int]:
+    def recover_expired_retry_leases(self, *, limit: int, workflow_target_id: str | None = None,
+                                    workflow_target_revision: str | None = None) -> tuple[int, int]:
         """Recover known remote runs and safely finalise unknown submissions.
 
         A task with a durable run id can be polled again.  A claim with no run id
@@ -1087,14 +1113,21 @@ class MySQLTaskRepository:
         id may mean that the remote submission succeeded just before a crash;
         that case is *not* blindly resubmitted.
         """
+        if (workflow_target_id is None) != (workflow_target_revision is None):
+            raise ValueError("recovery requires both target id and revision")
+        scope = ""
+        scope_params: tuple = ()
+        if workflow_target_id is not None:
+            scope = "AND task.workflow_target_id = %s AND task.workflow_target_revision = %s"
+            scope_params = (workflow_target_id, workflow_target_revision)
         start = time.perf_counter()
         conn = self._db_client.connect()
         try:
             cursor = conn.cursor()
             cursor.execute("START TRANSACTION")
             cursor.execute(
-                """
-                UPDATE customer_profile_tasks
+                f"""
+                UPDATE customer_profile_tasks AS task
                 SET status = 'retry_wait',
                     workflow_run_started_at = COALESCE(workflow_run_started_at, CURRENT_TIMESTAMP),
                     next_retry_at = CURRENT_TIMESTAMP,
@@ -1107,17 +1140,18 @@ class MySQLTaskRepository:
                 WHERE status = 'processing'
                   AND workflow_run_id IS NOT NULL
                   AND lease_expires_at < CURRENT_TIMESTAMP
+                  {scope}
                 ORDER BY lease_expires_at ASC
                 LIMIT %s
                 """,
-                (limit,),
+                (*scope_params, limit),
             )
             resumed = int(cursor.rowcount)
             remaining = max(0, limit - resumed)
             requeued_before_submit = 0
             if remaining:
                 cursor.execute(
-                    """
+                    f"""
                     UPDATE customer_profile_tasks AS task
                     SET status = 'retry_wait',
                         execution_pool = CASE
@@ -1144,17 +1178,18 @@ class MySQLTaskRepository:
                             AND current_attempt.attempt_no = task.attempt_count
                             AND current_attempt.status = 'submitting'
                       )
+                      {scope}
                     ORDER BY task.lease_expires_at ASC
                     LIMIT %s
                     """,
-                    (remaining,),
+                    (*scope_params, remaining),
                 )
                 requeued_before_submit = int(cursor.rowcount)
                 remaining = max(0, remaining - requeued_before_submit)
             unknown = 0
             if remaining:
                 cursor.execute(
-                    """
+                    f"""
                     UPDATE customer_profile_tasks AS task
                     SET status = 'failed',
                         error_message = 'QINGTIAN_SUBMIT_UNKNOWN: worker lease expired before workflow run id was persisted',
@@ -1176,15 +1211,16 @@ class MySQLTaskRepository:
                             AND current_attempt.attempt_no = task.attempt_count
                             AND current_attempt.status = 'submitting'
                       )
+                      {scope}
                     ORDER BY task.lease_expires_at ASC
                     LIMIT %s
                     """,
-                    (remaining,),
+                    (*scope_params, remaining),
                 )
                 unknown = int(cursor.rowcount)
                 if unknown:
                     cursor.execute(
-                        """
+                        f"""
                         UPDATE customer_profile_task_attempts AS attempt
                         INNER JOIN customer_profile_tasks AS task
                             ON task.id = attempt.task_id
@@ -1199,7 +1235,9 @@ class MySQLTaskRepository:
                         WHERE attempt.status = 'submitting'
                           AND task.status = 'failed'
                           AND task.last_error_code = 'QINGTIAN_SUBMIT_UNKNOWN'
-                        """
+                          {scope}
+                        """,
+                        scope_params,
                     )
             conn.commit()
             if resumed or requeued_before_submit or unknown:
@@ -1574,13 +1612,20 @@ class MySQLTaskRepository:
         finally:
             conn.close()
 
-    def get_queue_stats(self) -> dict[str, object]:
+    def get_queue_stats(self, *, task_types: tuple[str, ...] | None = None,
+                        work_envs: tuple[str, ...] | None = None) -> dict[str, object]:
         start = time.perf_counter()
         conn = self._db_client.connect()
         try:
             cursor = conn.cursor(dictionary=True)
+            filters, filter_params = [], []
+            for column, values in (("task_type", task_types), ("work_env", work_envs)):
+                if values is not None:
+                    filters.append(f"{column} IN ({', '.join('%s' for _ in values)})" if values else "1 = 0")
+                    filter_params.extend(values)
+            scope = " WHERE " + " AND ".join(filters) if filters else ""
             cursor.execute(
-                """
+                f"""
                 SELECT
                     SUM(status = 'queued') AS queue_depth,
                     SUM(status = 'processing') AS processing_count,
@@ -1601,8 +1646,8 @@ class MySQLTaskRepository:
                         MIN(CASE WHEN status = 'processing' THEN updated_at END),
                         CURRENT_TIMESTAMP
                     ) AS oldest_processing_age_seconds
-                FROM customer_profile_tasks
-                """
+                FROM customer_profile_tasks {scope}
+                """, tuple(filter_params),
             )
             row = cursor.fetchone() or {}
             return {
@@ -1631,6 +1676,7 @@ class MySQLTaskRepository:
             raise
         finally:
             conn.close()
+
 
     def _has_work_env_column(self, conn) -> bool:
         return self._cached_column_capability(
@@ -1767,11 +1813,47 @@ def _select_task_by_phone_sql(has_work_env: bool, has_batch_id: bool, has_task_t
                 """
 
 
-def _select_next_queued_sql(has_work_env: bool, has_batch_id: bool, has_task_type: bool) -> str:
+def _select_next_queued_sql(
+    has_work_env: bool,
+    has_batch_id: bool,
+    has_task_type: bool,
+    *,
+    task_types: tuple[str, ...] | None = None,
+    work_envs: tuple[str, ...] | None = None,
+    profile_routing: ProfileRoutingPolicy | None = None,
+) -> tuple[str, tuple[object, ...]]:
     work_env_expr = "work_env" if has_work_env else "'test' AS work_env"
     batch_id_expr = "batch_id" if has_batch_id else "NULL AS batch_id"
     task_type_expr = "task_type" if has_task_type else f"'{_DEFAULT_TASK_TYPE}' AS task_type"
-    return f"""
+    clauses = [
+        "status = 'queued'",
+        "workflow_run_id IS NULL",
+        "workflow_target_id IS NULL",
+        "workflow_target_revision IS NULL",
+    ]
+    params: list[object] = []
+    routing_sql, routing_params = _profile_routing_sql(profile_routing, runner=False, alias="")
+    if routing_sql:
+        clauses.append(routing_sql)
+        params.extend(routing_params)
+    for column, values, available in (
+        ("task_type", task_types, has_task_type),
+        ("work_env", work_envs, has_work_env),
+    ):
+        if values is None:
+            continue
+        if not available:
+            raise RuntimeError(
+                f"Scoped queue claims require the {column} column; run database migrations first"
+            )
+        if not values:
+            clauses.append("1 = 0")
+            continue
+        placeholders = ", ".join("%s" for _ in values)
+        clauses.append(f"{column} IN ({placeholders})")
+        params.extend(values)
+    where_clause = " AND ".join(clauses)
+    sql = f"""
                 SELECT
                     id, customer_phonenumber, status, updated_at, output, card_id, nickname, error_message,
                     {work_env_expr},
@@ -1786,11 +1868,12 @@ def _select_next_queued_sql(has_work_env: bool, has_batch_id: bool, has_task_typ
                     last_error_code, last_error_stage, lease_expires_at, claim_token,
                     queued_at, started_at, finished_at
                 FROM customer_profile_tasks
-                WHERE status = 'queued'
+                WHERE {where_clause}
                 ORDER BY updated_at ASC, id ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
                 """
+    return sql, tuple(params)
 
 
 def _select_next_eligible_sql(
@@ -1805,6 +1888,9 @@ def _select_next_eligible_sql(
     allow_unbound_retries: bool,
     task_types: tuple[str, ...],
     work_envs: tuple[str, ...],
+    require_profile_identity: bool = False,
+    profile_routing: ProfileRoutingPolicy | None = None,
+    allow_weighted_new_tasks: bool = False,
 ) -> tuple[str, tuple[object, ...]]:
     work_env_expr = "task.work_env" if has_work_env else "'test' AS work_env"
     batch_id_expr = "task.batch_id" if has_batch_id else "NULL AS batch_id"
@@ -1815,11 +1901,25 @@ def _select_next_eligible_sql(
     )
     capability_clauses: list[str] = []
     capability_params: list[object] = []
-    if has_task_type:
+    queued_gate, queued_params = _queued_gate_sql(profile_routing, allow_new_tasks, allow_weighted_new_tasks)
+    routing_sql, routing_params = _profile_routing_sql(profile_routing, runner=require_profile_identity)
+    if routing_sql:
+        capability_clauses.append(routing_sql)
+        capability_params.extend(routing_params)
+    if require_profile_identity:
+        if not has_batch_id:
+            capability_clauses.append("1 = 0")
+        else:
+            capability_clauses.append("task.customer_phonenumber REGEXP '^1[3-9][0-9]{9}$'")
+            capability_clauses.append("CHAR_LENGTH(task.batch_id) BETWEEN 1 AND 50")
+    # A scoped worker must never infer another environment/type on an old schema.
+    if not has_task_type or not has_work_env or not task_types or not work_envs:
+        capability_clauses.append("1 = 0")
+    if has_task_type and task_types:
         placeholders = ", ".join("%s" for _ in task_types)
         capability_clauses.append(f"task.task_type IN ({placeholders})")
         capability_params.extend(task_types)
-    if has_work_env:
+    if has_work_env and work_envs:
         placeholders = ", ".join("%s" for _ in work_envs)
         capability_clauses.append(f"task.work_env IN ({placeholders})")
         capability_params.extend(work_envs)
@@ -1898,7 +1998,7 @@ def _select_next_eligible_sql(
                             OR (
                                 task.status = 'queued'
                                 AND task.workflow_target_id IS NULL
-                                AND %s = 1
+                                AND ({queued_gate})
                             )
                         )
                         {capability_sql}
@@ -1923,7 +2023,46 @@ def _select_next_eligible_sql(
         execution_pool,
         workflow_target_id,
         _THROUGHPUT_TARGET_REUSE_GRACE_SECONDS,
-        int(allow_new_tasks),
+        *queued_params,
         *capability_params,
     )
     return sql, params
+
+
+def _profile_routing_sql(
+    policy: ProfileRoutingPolicy | None, *, runner: bool, alias: str = "task",
+) -> tuple[str, tuple[object, ...]]:
+    if policy is None or not policy.enabled:
+        return "", ()
+    prefix = f"{alias}." if alias else ""
+    envs = ", ".join("%s" for _ in policy.work_envs)
+    qualified = (
+        f"{prefix}task_type = 'customer_profile' AND {prefix}work_env IN ({envs}) "
+        f"AND {prefix}customer_phonenumber REGEXP '^1[3-9][0-9]{{9}}$' "
+        f"AND CHAR_LENGTH(COALESCE({prefix}batch_id, '')) BETWEEN 1 AND 50"
+    )
+    bucket = (
+        f"MOD(CRC32(CONCAT('customer_profile:', {prefix}work_env, ':', "
+        f"{prefix}customer_phonenumber, ':', {prefix}batch_id)), 100)"
+    )
+    comparison = "<" if runner else ">="
+    return (
+        f"({prefix}status <> 'queued' OR NOT ({qualified}) OR {bucket} {comparison} %s "
+        f"OR COALESCE({prefix}queued_at, {prefix}updated_at) <= "
+        "DATE_SUB(CURRENT_TIMESTAMP, INTERVAL %s SECOND))",
+        (*policy.work_envs, policy.runner_percent, policy.spillover_seconds),
+    )
+
+
+def _queued_gate_sql(policy: ProfileRoutingPolicy | None, allow_new: bool,
+                     allow_weighted: bool, *, alias: str = "task") -> tuple[str, tuple[object, ...]]:
+    if policy is None or not policy.enabled or not allow_weighted:
+        return "%s = 1", (int(allow_new),)
+    prefix = f"{alias}." if alias else ""
+    envs = ", ".join("%s" for _ in policy.work_envs)
+    return (
+        f"%s = 1 OR ({prefix}task_type = 'customer_profile' AND {prefix}work_env IN ({envs}) "
+        f"AND {prefix}customer_phonenumber REGEXP '^1[3-9][0-9]{{9}}$' "
+        f"AND CHAR_LENGTH(COALESCE({prefix}batch_id, '')) BETWEEN 1 AND 50)",
+        (int(allow_new), *policy.work_envs),
+    )
