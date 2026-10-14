@@ -1,6 +1,6 @@
 # MVP: single image for API and Worker (same deps, different command).
 ARG PYTHON_BASE_IMAGE=python:3.12-slim
-FROM --platform=linux/arm64 ${PYTHON_BASE_IMAGE}
+FROM ${PYTHON_BASE_IMAGE}
 
 WORKDIR /app
 

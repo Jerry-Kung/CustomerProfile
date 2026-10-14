@@ -47,7 +47,7 @@ PROFILE_RUNNER_TARGET_MODE=active
 
 ## Docker Compose 发布
 
-代码提交并推送后才能在服务器获取。先确认镜像适配服务器架构：原 Dockerfile 固定 ARM64，x86_64 环境需要调整首个 FROM 后构建验证。沿用原 backend 的 Compose 项目名、端口、卷、旧工作流密钥和目标身份。
+代码提交并推送后才能在服务器获取。Dockerfile 按构建目标平台选取基础镜像；服务器为 AMD64 时应构建 AMD64 镜像。沿用原 backend 的 Compose 项目名、端口、卷、旧工作流密钥和目标身份。
 
 1. 拉取新代码，添加配置，暂时保持所有组件 `PROFILE_ROUTING_MODE=parallel`。
 2. 构建新镜像，更新全部旧画像 Worker，保留原有重试配置与身份；backend API 不需要更换镜像。沿用原迁移已完成 001–006 的数据库，本次没有新迁移要运行；服务更新使用 `--no-deps` 避免启动旧迁移容器。
@@ -108,7 +108,7 @@ docker compose -p "$CP_BACKEND_PROJECT" -f docker-compose.yml up -d --no-build -
 docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml up -d --no-build --force-recreate profile-runner-worker
 ```
 
-该方式直接指定镜像地址，不需要修改服务器全局 Docker 配置或重启 Docker。基础镜像平台仍为原有 ARM64，沿用原服务器的架构适配方式。
+该方式直接指定镜像地址，不需要修改服务器全局 Docker 配置或重启 Docker。构建完成后可用 `docker image inspect --format '{{.Os}}/{{.Architecture}}' 镜像名` 核对平台；本次 AMD64 服务器应输出 `linux/amd64`。
 
 ## 发布前保留回滚版本
 
