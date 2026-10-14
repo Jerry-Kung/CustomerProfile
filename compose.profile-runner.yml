@@ -8,6 +8,8 @@ services:
     command: ["customer-profile-worker"]
     env_file:
       - ${PROFILE_RUNNER_ENV_FILE:-.env}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       WORKFLOW_PLATFORM: runner
       WORKER_ROLE: local

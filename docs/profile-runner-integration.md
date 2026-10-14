@@ -32,7 +32,7 @@ Runner 使用独立目标 ID，默认 `profile-runner-production`，角色为 `l
 在部署用 `.env` 中添加以下字段，地址必须从新 Worker 容器内可达；示例地址应替换成实际地址。
 
 ```dotenv
-PROFILE_RUNNER_BASE_URL_PRODUCTION=http://10.81.66.8:18000
+PROFILE_RUNNER_BASE_URL_PRODUCTION=http://host.docker.internal:18000
 PROFILE_RUNNER_REQUEST_TIMEOUT_MS=15000
 PROFILE_RUNNER_POLL_INTERVAL_MS=2000
 PROFILE_RUNNER_POLL_TIMEOUT_MS=2400000
@@ -41,13 +41,13 @@ PROFILE_RUNNER_CONCURRENCY=1
 PROFILE_RUNNER_TARGET_MODE=active
 ```
 
-沿用原 `MYSQL_*`，确保连接同一个数据库且从 Runner 容器内可访问。各 Compose 项目默认网络独立，旧项目中的 MySQL 服务名不会自动在新项目解析；使用可达地址或显式共享网络。原 `.env` 的 `WORKFLOW_PLATFORM` 继续保持擎天或 Dify；新增 Compose 只为 Runner 容器覆盖平台、画像任务范围及生产环境。
+画像服务与 backend 在同一台 Docker Compose 宿主机时，使用上例的 `host.docker.internal:18000`；新增 Compose 为此配置了 `host-gateway` 映射。部署在其他机器时，改用 Runner 容器可达的实际地址，不要使用 `127.0.0.1`。沿用原 `MYSQL_*`，确保连接同一个数据库且从 Runner 容器内可访问。各 Compose 项目默认网络独立，旧项目中的 MySQL 服务名不会自动在新项目解析；使用可达地址或显式共享网络。原 `.env` 的 `WORKFLOW_PLATFORM` 继续保持擎天或 Dify；新增 Compose 只为 Runner 容器覆盖平台、画像任务范围及生产环境。
 
 生成服务目前串行执行画像，先保持 adapter 并发 1。增加 adapter 并发主要会增加生成服务内部排队量；不要直接增加共享 SQLite 的生成 Worker 副本。
 
 ## Docker Compose 发布
 
-代码提交并推送后才能在服务器获取。Dockerfile 按构建目标平台选取基础镜像；服务器为 AMD64 时应构建 AMD64 镜像。沿用原 backend 的 Compose 项目名、端口、卷、旧工作流密钥和目标身份。
+代码提交并推送后才能在服务器获取。Dockerfile 按构建目标平台选取基础镜像；服务器为 AMD64 时应构建 AMD64 镜像。K8s 的 `deploy/k8s/build-arm64-image.sh` 已显式指定 `--platform linux/arm64`。沿用原 backend 的 Compose 项目名、端口、卷、旧工作流密钥和目标身份。
 
 1. 拉取新代码，添加配置，暂时保持所有组件 `PROFILE_ROUTING_MODE=parallel`。
 2. 构建新镜像，更新全部旧画像 Worker，保留原有重试配置与身份；backend API 不需要更换镜像。沿用原迁移已完成 001–006 的数据库，本次没有新迁移要运行；服务更新使用 `--no-deps` 避免启动旧迁移容器。
