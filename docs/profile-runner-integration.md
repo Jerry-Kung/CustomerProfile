@@ -72,6 +72,37 @@ docker compose -p "$CP_BACKEND_PROJECT" -f docker-compose.yml up -d --build --no
 
 配置调整后，先停止所有参与画像的 Worker，再分别用 `up -d --no-deps --force-recreate` 重建原项目的画像 Worker 和新增 Worker。保留原业务 API 的 `REMOTE_API_URL`，它继续指向 backend 任务接口。
 
+## 构建时指定基础镜像和 pip 源
+
+Dockerfile 默认使用 `python:3.12-slim`，可用构建参数 `PYTHON_BASE_IMAGE` 指定可访问的镜像仓库。该参数和 `PIP_INDEX_URL` 只用于镜像构建，不需要加入业务 `.env`。
+
+如果 Docker Hub 不可达、腾讯加速域名解析失败，可先确认 DaoCloud 官方入口是否可访问：
+
+```bash
+curl -I --connect-timeout 5 --max-time 10 https://m.daocloud.io/v2/
+```
+
+带有 `docker-distribution-api-version: registry/2.0` 和 Bearer 认证头的 401 是正常认证响应，说明入口可访问；具体镜像能否拉取仍由后续构建确认。参考 [DaoCloud 官方使用说明](https://github.com/DaoCloud/public-image-mirror)。
+
+代码更新后，在原 backend 项目目录构建旧 Worker：
+
+```bash
+docker compose -p "$CP_BACKEND_PROJECT" -f docker-compose.yml build \
+  --build-arg PYTHON_BASE_IMAGE=m.daocloud.io/docker.io/library/python:3.12-slim \
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+  worker commercial-worker
+```
+
+新增 Worker 使用相同构建参数：
+
+```bash
+docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml build \
+  --build-arg PYTHON_BASE_IMAGE=m.daocloud.io/docker.io/library/python:3.12-slim \
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+该方式直接指定镜像地址，不需要修改服务器全局 Docker 配置或重启 Docker。基础镜像平台仍为原有 ARM64，沿用原服务器的架构适配方式。
+
 ## 发布前保留回滚版本
 
 备份部署用 `.env`，记录升级前 Git 提交号，并给运行中的旧 Worker 镜像打标签。以下按 `worker` 和 `commercial-worker` 示范；线上更多旧画像 Worker 应一并备份、升级和回滚。重建旧 Dify Worker 前，等待其正在执行的任务完成。
