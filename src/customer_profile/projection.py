@@ -9,7 +9,7 @@
       ↓ a 归属过滤 → b 来源分级 → c 冲突消解 → d 枚举归一
       ↓ e 单/多值约束 → f 跨字段规则 → g 缺失即留白
     facts          规范事实：一个字段一个值（或一组多值），有据可查
-    notes_updates[] 42 字段投影结果，形状与基线 `basic_notes_updates` 同形
+    notes_updates[] Notes 投影结果（契约全部字段），形状与基线 `basic_notes_updates` 同形
     to_confirm[]   无法坐实的字段：**空着比填错强**，交销售补充
 
 三条设计口径（v2 起第 1、2 条的方向变了，见下）：
@@ -60,16 +60,23 @@ SOCIAL = "social"
 """社交自呈现：微信/朋友圈/支付宝/小红书/抖音截图。"""
 
 PREDICTION = "prediction"
-"""第三方统计预测（极光打点）。"""
+"""第三方预测（极光第三方画像标签）。
+
+v3.2 起**不再等同于「最弱」**：这批标签是采购来的商用画像数据，单独支撑某字段时
+按 ``inferred_high`` 处理（见 :attr:`Claim.effective_basis`）。它仍不是 ``fact``
+（不是客户原话），但在无试驾 / 无沟通记录时是唯一可靠的画像信源。"""
 
 FACT = "fact"
 """三分类·事实：有原文锚点，或由登记系统直接给出。"""
 
 INFERRED_HIGH = "inferred_high"
-"""三分类·高置信推断：无单句锚点，但有 ≥2 条独立来源同向支撑。"""
+"""三分类·高置信推断：无单句锚点，但有 **≥2 条独立来源**同向支撑，或**由第三方画像
+标签单独支撑**（v3.2，用户口径：采购的商用画像数据在无一手记录时是唯一可靠信源）。"""
 
 INFERRED_LOW = "inferred_low"
-"""三分类·低置信推断：仅 1 条弱事实、纯常识，或仅由第三方预测单独支撑。"""
+"""三分类·低置信推断：仅 1 条弱事实、纯常识，或仅由**社交自呈现**单独支撑。
+
+**不含第三方预测**：v3.2 起预测单独支撑即 ``inferred_high``（见 :data:`PREDICTION`）。"""
 
 ANCHOR_VERBATIM = "verbatim"
 """坐标形态·锚定：值能在原文里字面定位，``quote`` 就是切出的原文（v3 接口一）。"""
@@ -124,8 +131,14 @@ CHANNEL_TIER: dict[str, str] = {
 WEAK_TIERS: frozenset[str] = frozenset({SOCIAL, PREDICTION})
 """**弱来源**两档：社交自呈现与第三方预测。
 
-这两档**不得单独支撑**身份字段的确定性（设计稿 §6.2 三条来源硬规则 1、3），
-也不得作为态度/行为类字段的唯一依据（硬规则 2）。v2 的处置是降级保留，不是丢弃。
+两档的处置**从 v3.2 起不同**：
+
+- **社交自呈现**不得单独支撑身份字段的确定性（设计稿 §6.2 硬规则 1、3），也不得作为
+  态度/行为类字段（见 :data:`ATTITUDE_KEYS`）的唯一依据（硬规则 2）——降级保留，不丢弃；
+- **第三方预测**（极光画像标签）单独支撑某字段时改记 ``inferred_high``（用户口径：
+  客户没有试驾与沟通记录时，采购来的画像标签是唯一可靠的画像信源）。
+
+两档仍都不等于 ``fact``：它们不是客户原话，只是「够可信、可作推断结论」。
 """
 
 ATTITUDE_KEYS: frozenset[str] = frozenset({"emotion", "knowledge_of_mengshi", "pain_points"})
@@ -187,17 +200,26 @@ AGGREGATE_TEXT_KEYS: frozenset[str] = frozenset(
         "special_requirements",
         "intended_brand",
         "intended_model",
+        # v3.2：竞品类四字段。客户的意向与竞品本就可以并列多项——「在 A、B、C 之间比」
+        # 是常态，判冲突会把整字段留白，正好丢掉销售最需要的那份对比清单。
+        "competing_brand",
+        "competing_model",
+        "test_driven_models",
+        "brand_concerns",
     }
 )
 """**聚合语义**的自由文本字段：同来源档给出多个不同值时应当**汇总**，而不是判冲突留白。
 
-契约里这 21 个字段全是 `field_type: "text"`、`enum_options: null`，因此
+契约里这些文本字段全是 `field_type: "text"`、`enum_options: null`，因此
 :func:`notes_contract.is_multi_value` 对它们一律为假。但「多个值算不算冲突」是**字段语义**
 问题，契约没给这个标志位：
 
 - **聚合语义**（本集合）：`hobbies`「钓鱼」「露营」并存不矛盾，是同一客户的多面；
-  判冲突会把整字段留白（R0 实测 `16761543238` 因此丢掉全部三个爱好）。
-- **单值语义**（其余 16 个文本字段）：`occupation`「教师」与「医生」互斥，
+  判冲突会把整字段留白（R0 实测 `16761543238` 因此丢掉全部三个爱好）。v3.2 增补的
+  竞品类四字段（`competing_brand` / `competing_model` / `test_driven_models` /
+  `brand_concerns`）同属此列：客户在多个品牌/车型之间对比是常态，`test_driven_models`
+  的契约描述本就写着「提取车型名，**可多个**」。
+- **单值语义**（其余文本字段）：`occupation`「教师」与「医生」互斥，
   同档并列时确应留白转确认（宁空勿错）。
 
 集合的选取依据是契约 `description` 的措辞：「提取…兴趣爱好或生活话题」「提取非常规个性化
@@ -327,10 +349,14 @@ class Claim:
         """自述档位与来源档冲突时，**取更弱的那个**。
 
         典型：一条渠道是「第三方画像数据」却自称 ``basis=fact``。自述档位是模型给的，
-        来源档是代码按渠道定的——来源档更硬，因此这类断言按 ``inferred_low`` 处理。
+        来源档是代码按渠道定的——来源档更硬，因此这类断言不能算 ``fact``。
+
+        v3.2：第三方画像标签是**采购来的商用画像数据**，单独支撑某字段时按
+        ``inferred_high`` 处理（用户口径：客户没有试驾/沟通记录时，它是唯一可靠的
+        画像信源）。此前一并压到 ``inferred_low``，使这类字段在字段级塌陷。
         """
         if self.is_prediction and self.basis == FACT:
-            return INFERRED_LOW
+            return INFERRED_HIGH
         return self.basis or FACT
 
     @property
@@ -590,7 +616,9 @@ def project(
             continue
         kept.append(claim)
 
-    # ---- b 来源分级：预测不得**单独**支撑身份字段
+    # ---- b 来源分级：身份字段的弱来源处置
+    #      社交自呈现仍降级并转人工确认；**第三方画像标签单独支撑改记 inferred_high**
+    #      （v3.2，用户口径：采购的画像数据在无一手记录时是唯一可靠画像信源）。
     grouped: dict[str, list[Claim]] = {}
     for claim in kept:
         grouped.setdefault(claim.attribute, []).append(claim)
@@ -643,33 +671,34 @@ def project(
 
         weak_only = all(c.tier in WEAK_TIERS for c in group)
         if attribute in nc.IDENTITY_KEYS and weak_only:
-            # v2：**不再丢弃**。弱来源撑不起身份字段的「确定性」，但客户大概率就是——
-            # 降为 inferred_low 仍写入，并转人工确认（设计稿 §6.2 规则 b 与三条来源硬规则）。
             only_prediction = all(c.is_prediction for c in group)
-            rule = "b_prediction_only" if only_prediction else "b_social_only"
-            reason = (
-                "身份字段仅由第三方预测支撑"
-                if only_prediction
-                else "身份字段仅由社交自呈现支撑"
-            )
-            result.basis[attribute] = INFERRED_LOW
-            result.downgraded.append(
-                {
-                    "attribute": attribute,
-                    "value": [c.value for c in group],
-                    "rule": rule,
-                    "reason": reason,
-                    "action": "降为 inferred_low 写入（不丢字段）",
-                }
-            )
-            result.to_confirm.append(
-                {
-                    "attribute_key": attribute,
-                    "candidates": [c.value for c in group],
-                    "reason": reason + "，不构成客户事实",
-                    "suggested_action": "向客户或销售确认后补充",
-                }
-            )
+            if only_prediction:
+                # v3.2：**第三方画像标签单独撑身份字段 → 记为可信的高置信推断**。
+                # 它不再是「低置信线索」：这批标签是采购来的商用画像数据，在客户既无
+                # 试驾也无沟通记录时，往往是唯一可靠的画像信源。既不降级、也不转人工
+                # 确认——它已被当作可用的推断结论（用户口径）。
+                result.basis[attribute] = INFERRED_HIGH
+            else:
+                # 社交自呈现（昵称 / 头像 / 主页截图）仍不作数：那是客户**对外表演**的
+                # 身份，与本人实际情况可以不一致。降级保留并转确认。
+                result.basis[attribute] = INFERRED_LOW
+                result.downgraded.append(
+                    {
+                        "attribute": attribute,
+                        "value": [c.value for c in group],
+                        "rule": "b_social_only",
+                        "reason": "身份字段仅由社交自呈现支撑",
+                        "action": "降为 inferred_low 写入（不丢字段）",
+                    }
+                )
+                result.to_confirm.append(
+                    {
+                        "attribute_key": attribute,
+                        "candidates": [c.value for c in group],
+                        "reason": "身份字段仅由社交自呈现支撑，不构成客户事实",
+                        "suggested_action": "向客户或销售确认后补充",
+                    }
+                )
             # 注意：**没有 continue** —— 该组继续进入 c/d/e，仍会被写入 facts。
         if attribute in ATTITUDE_KEYS and all(c.tier in WEAK_TIERS for c in group):
             # 硬规则 2：态度/行为类字段须有一手依据。只有弱来源时降级保留。
@@ -1094,7 +1123,7 @@ def _readable_summary(sources: Sequence[Claim]) -> str:
 def _to_notes_updates(
     result: Projection, grouped: Mapping[str, list[Claim]]
 ) -> list[dict[str, Any]]:
-    """把 ``facts`` 投影成 42 字段形态的 Notes 更新项。
+    """把 ``facts`` 投影成契约字段形态的 Notes 更新项（字段集见 :mod:`customer_profile.notes_contract`）。
 
     只输出**有事实支撑**的字段（缺失即留白，规则 g）。
 

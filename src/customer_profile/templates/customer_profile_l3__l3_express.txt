@@ -51,7 +51,11 @@
 
 ## 四、要输出的 9 个板块
 
-逐个输出下列键，形状如下：
+逐个输出下列键，形状如下。
+
+**这 9 个键是平级的**，一律平铺在 `analysis_result` 之下，没有从属关系。**不得**把其中任何
+一个嵌进另一个板块内部（例：把 `purchase_motivations` 写进 `customer_overview` 里面）。
+每个键的值只装它自己那一节的内容。
 
 ### 1. `profile_summary`（对象）
 ```
@@ -99,16 +103,28 @@
 - `business_opp_level` **必须**与事实表的 `deal_level` 一致（同一个值，不得写出两个等级）；
 - 其余各项是判断类结论，措辞可以给，但依据只能来自事实表。
 
-### 6. `purchase_motivations`（数组）7. `product_preferences`（数组）8. `resistances`（数组）
+### 6. `purchase_motivations`（数组，0–4 项）
 ```
 [{"motivation_name": "", "description": "", "rank_order": 1, "reasoning_detail": {...}}]
+```
+- **先翻事实表再决定写不写**：表里有购车用途、核心关注点、痛点，就据此写出对应条目，
+  不要因为表里没有直接写着「购车动机」四个字就交空数组；
+- 确实一条相关线索都没有（相关字段全空）时，才给空数组。
+
+### 7. `product_preferences`（数组，0–4 项）
+```
 [{"preference_name": "", "description": "", "reasoning_detail": {...}}]
-[{"resistance_name": "", "severity": "", "description": "", "reasoning_detail": {...}}]
 ```
 - 产品偏好尽量对上上面的产品信息的卖点名称；
-- **先翻事实表再决定写不写**：只要表里有车型意向、关注点、用车需求、吐槽点，就据此写出
-  对应条目（各 0–4 项），不要因为表里没有直接写着「产品偏好」四个字就交空数组；
-- 确实一条相关线索都没有（相关字段全空）时，才给空数组。
+- **先翻事实表再决定写不写**：表里有车型意向、关注点、用车需求，就据此写出对应条目；
+- 确实一条相关线索都没有时，才给空数组。
+
+### 8. `resistances`（数组，0–4 项）
+```
+[{"resistance_name": "", "severity": "", "description": "", "reasoning_detail": {...}}]
+```
+- **先翻事实表再决定写不写**：表里有吐槽点、顾虑、比价行为，就据此写出对应条目；
+- 确实一条相关线索都没有时，才给空数组。
 
 ### 9. `emotion_state`（对象）
 ```

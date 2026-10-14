@@ -3,8 +3,10 @@
 **本文件由 :mod:`scripts.snapshot_note_contract` 自动生成，请勿手改。**
 重新生成：``python scripts/snapshot_note_contract.py``。
 
-契约实测跨 **39/39 案完全恒定**（payload 签名 ``0479e326bc88``），共 **42** 个字段、
-**5** 个分类（基础身份 16 / 购车需求 10 / 预算与金融 4 / 决策与节奏 4 / 个人偏好与备注 8）。因此固化为离线快照，运行期不再取接口。
+契约实测跨 **39/39 案完全恒定**（payload 签名 ``0479e326bc88``），共 **46** 个字段、
+**6** 个分类（基础身份 16 / 购车需求 10 / 预算与金融 4 / 决策与节奏 4 / 个人偏好与备注 8 / 竞品对比 4）。因此固化为离线快照，运行期不再取接口。
+
+另含**补充字段**（基线固化后线上契约新增，见 ``src/customer_profile/notes_contract_extension.json``）。
 
 两条使用口径：
 
@@ -27,13 +29,14 @@ PURCHASE_NEED = "购车需求"
 BUDGET_FINANCE = "预算与金融"
 DECISION_RHYTHM = "决策与节奏"
 PREFERENCE_NOTE = "个人偏好与备注"
-
+COMPETITOR = "竞品对比"
 CATEGORIES: tuple[str, ...] = (
     BASE_IDENTITY,
     PURCHASE_NEED,
     BUDGET_FINANCE,
     DECISION_RHYTHM,
     PREFERENCE_NOTE,
+    COMPETITOR,
 )
 
 RAW_CONFIGS: tuple[dict[str, Any], ...] = (
@@ -355,6 +358,30 @@ RAW_CONFIGS: tuple[dict[str, Any], ...] = (
  'category': '个人偏好与备注',
  'field_type': 'text',
  'description': '提取客户兴趣爱好或生活话题。“周末爱钓鱼”“喜欢自驾西藏”“搞收藏的”。找出可支撑销售顾问拉近关系的兴趣标签。',
+ 'enum_options': None},
+    {'attribute_key': 'competing_brand',
+ 'attribute_name': '对比品牌',
+ 'category': '竞品对比',
+ 'field_type': 'text',
+ 'description': '客户购车正在对比的车企品牌。如“方程豹”“坦克”等',
+ 'enum_options': None},
+    {'attribute_key': 'competing_model',
+ 'attribute_name': '对比车型',
+ 'category': '竞品对比',
+ 'field_type': 'text',
+ 'description': '客户购车正在对比的具体车型。如”豹8“，“坦克700”。',
+ 'enum_options': None},
+    {'attribute_key': 'test_driven_models',
+ 'attribute_name': '试驾过的车型',
+ 'category': '竞品对比',
+ 'field_type': 'text',
+ 'description': '提取客户已试驾的车型清单。“上周开了xxx车型”“xx,xx都试了”。提取车型名，可多个。',
+ 'enum_options': None},
+    {'attribute_key': 'brand_concerns',
+ 'attribute_name': '本品牌顾虑',
+ 'category': '竞品对比',
+ 'field_type': 'text',
+ 'description': '客户对购买本品（试驾/顾问推销的品牌）明确表达的担忧或犹豫点。如保值率、质量、售后等',
  'enum_options': None}
 )
 

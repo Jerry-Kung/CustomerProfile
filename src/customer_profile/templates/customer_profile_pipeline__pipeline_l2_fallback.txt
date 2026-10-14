@@ -14,7 +14,7 @@
     "options": [
       {"value": "教师", "channel": "外呼录音信息", "tier": "一手交互", "basis": "fact"},
       {"value": "医生", "channel": "外呼录音信息", "tier": "一手交互", "basis": "fact"},
-      {"value": "货车司机", "channel": "第三方画像数据", "tier": "第三方预测", "basis": "inferred_low"}
+      {"value": "货车司机", "channel": "第三方画像数据", "tier": "第三方预测", "basis": "inferred_high"}
     ],
     "reason": "同来源档（一手交互）给出 2 个不同值"
   }

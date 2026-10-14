@@ -56,8 +56,10 @@ def claim(**kwargs):
     }
     # v2 的字段级结论用 ``basis``（三分类）；未显式给出时按 v1 的 ``claim_type`` 等价映射，
     # 否则 `localize_claims` 会按 ``_basis_of`` 回推，用例就钉不住「传进来的档位有没有被尊重」。
+    # v3.2：``prediction`` 对齐 ``_basis_of``，映射到 ``inferred_high``（第三方画像标签按
+    # 可信的高置信推断处理，不再是最低档）。
     base.setdefault("basis", {"fact": "fact", "observation": "inferred_high",
-                              "prediction": "inferred_low"}.get(base["claim_type"], "fact"))
+                              "prediction": "inferred_high"}.get(base["claim_type"], "fact"))
     base.update(kwargs)
     return base
 
@@ -275,7 +277,7 @@ def test_l1_input_empty_records_still_carries_guide():
     assert "目标字段清单" in built["output"] and "可选字段的合法取值" in built["output"]
 
 
-def test_field_inference_guide_covers_all_42_fields():
+def test_field_inference_guide_covers_all_contract_fields():
     """《字段清单》必须逐条列出契约里**全部**字段，并在每个字段后带上契约原文口径。"""
     guide = pipe.field_inference_guide()
     listed = {
@@ -284,7 +286,7 @@ def test_field_inference_guide_covers_all_42_fields():
         if line.startswith("- `") and line.count("`") >= 2
     }
     assert listed == set(nc.ALL_KEYS)
-    assert len(listed) == 42
+    assert len(listed) == len(nc.ALL_KEYS) == 46
     # 口径取自契约：抽两条逐字比对，钉住「不手抄」这条约束。
     for key in ("planned_purchase_time", "core_concerns"):
         description = (nc.by_key(key).get("description") or "").strip()
@@ -293,10 +295,10 @@ def test_field_inference_guide_covers_all_42_fields():
 
 
 def test_field_inference_guide_labels_categories():
-    """五个字段大类都要出现——清单按类分组，模型才看得出口径的归属。"""
+    """六个字段大类都要出现——清单按类分组，模型才看得出口径的归属。"""
     guide = pipe.field_inference_guide()
     for category in (nc.BASE_IDENTITY, nc.PURCHASE_NEED, nc.BUDGET_FINANCE,
-                     nc.DECISION_RHYTHM, nc.PREFERENCE_NOTE):
+                     nc.DECISION_RHYTHM, nc.PREFERENCE_NOTE, nc.COMPETITOR):
         assert f"### {category}" in guide
 
 

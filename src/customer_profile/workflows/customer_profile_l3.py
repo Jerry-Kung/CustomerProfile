@@ -337,6 +337,33 @@ def assemble_l3(phone: str, batch_id: str, facts_json, notes_updates_json, expre
         for key in SECTION_KEYS:
             if key in sections:
                 analysis_result[key] = sections[key]
+
+    # ---- 上提归位：把被嵌进别的 section 里的节搬回顶层。
+    # 模型会偶发地把「第 6/7/8 节」理解为第 5 节（对象型）的子键，写进
+    # ``customer_overview`` 内部。此前这种输出会被下面的补空静默抹平——内容还在，
+    # 位置错了，卡片上就成了空白（v3.1 八案里有五案如此）。
+    # 顶层的值优先（``setdefault`` 不覆盖），所以正常输出不受影响。
+    hoisted: list[str] = []
+    for outer in SECTION_KEYS:
+        value = analysis_result.get(outer)
+        if not isinstance(value, dict):
+            continue
+        for inner in SECTION_KEYS:
+            if inner == outer or inner not in value:
+                continue
+            if inner in analysis_result:
+                # 顶层已有该节：嵌套的那份是多余的，就地清除，**不覆盖**顶层取值。
+                # 留着它会让该节的内容出现在两个地方，卡片上就是脏键。
+                value.pop(inner)
+                continue
+            analysis_result[inner] = value.pop(inner)
+            hoisted.append(inner)
+
+    # ---- 实到节数在**补空之前**统计。补空之后每个键都在，恒等于 9，
+    # 那样统计等于没统计——缺节必须是可见事件，而不是被补齐掩盖。
+    arrived = [key for key in SECTION_KEYS if analysis_result.get(key)]
+    missing = [key for key in SECTION_KEYS if not analysis_result.get(key)]
+
     # 表达层漏掉的节补空形态，**不编造**：缺就是缺，卡片渲染时自行留白。
     for key in SECTION_KEYS:
         analysis_result.setdefault(key, [] if key in LIST_SECTIONS else {})
@@ -351,7 +378,9 @@ def assemble_l3(phone: str, batch_id: str, facts_json, notes_updates_json, expre
     }
     return {
         "result1": json.dumps(result1, ensure_ascii=False),
-        "section_count": len([k for k in SECTION_KEYS if k in analysis_result]),
+        "section_count": len(arrived),
+        "sections_missing": json.dumps(missing, ensure_ascii=False),
+        "sections_hoisted": json.dumps(hoisted, ensure_ascii=False),
         "new_fact_suspects": len(suspects),
         "suspects_json": json.dumps(suspects, ensure_ascii=False, default=str),
     }
@@ -487,7 +516,8 @@ WORKFLOW: WorkflowDef = WorkflowDef(
                 "notes_updates_json": (START, "notes_updates_json"),
                 "express_json": (EXPRESS, "result"),
             },
-            outputs=("result1", "section_count", "new_fact_suspects", "suspects_json"),
+            outputs=("result1", "section_count", "sections_missing",
+                     "sections_hoisted", "new_fact_suspects", "suspects_json"),
             function=f"customer_profile.workflows.{SLUG}:assemble_l3",
         ),
         make_node(

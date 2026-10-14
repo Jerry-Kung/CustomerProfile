@@ -12,7 +12,8 @@
 
 - `age`、`annual_income`：从职业、工作年限、消费描述综合推断，给区间；
 - `follow_up_frequency`、`communication_rhythm`、`planned_purchase_time`：从沟通记录推断；
-- `personality_and_preferences`、`core_concerns`、`purchase_purpose` 等：从对话内容归纳。
+- `personality_and_preferences`、`core_concerns`、`purchase_purpose` 等：从对话内容归纳；
+- **品牌与竞品**：`intended_model`（客户在考虑买的）、`competing_brand` / `competing_model`（拿来对比的其它品牌与车型）、`test_driven_models`（已试驾过的车型）、`brand_concerns`（对本方品牌的顾虑）。事实清单里若已给出，不要重复；但客户**在多个品牌/车型之间比较**的线索（如「A 和 B 哪个好」「比 XX 便宜」）常要靠你从对话里归纳，别漏。
 
 **确实毫无关联的字段才留空**（形式是**不输出该字段**，不是输出空值）。不要为了凑数硬凑，也不要因为「原文没直接说」就整条不写。
 
@@ -36,8 +37,9 @@
    `phone_number` 若给了 `anchor`，须另给「锚点里支撑该取值的**最小片段**」，
    下游会核对它是锚点的子串。例：`title=Mr` 的锚点为「李先生说下周来」→ `value_signal="先生"`。
 6. **不得编造具体取值。** 金额、年限、车型、品牌、地名、姓名，凡事实清单里没有的，宁可写区间、写类型，也不要杜撰一个精确值。
-5. **性别不要武断**：只有登记信息或明确自述才算硬依据。
-6. **不得把销售顾问的信息写成客户的。** 我方销售顾问的自述（自我介绍、报自己的名字与职务、说自己的车、说我们店的事）**不是**客户信息：
+7. **汽车品牌与车型要判断归属**：Brand/车型名出现时，分清客户是**自己在考虑买**（`intended_model`）、**拿来对比**（`competing_brand` / `competing_model`）、还是**已经试驾过**（`test_driven_models`）；对本方品牌的担忧写 `brand_concerns`。品牌/车型的辨识与 ASR 音近纠错（「领跑」→「零跑」、「安安」→「埃安」）**先以你自己的原生汽车知识为准**，并按 §三 给 `source_quote`。归属实在拿不准，写进对比类字段比漏掉好——**不要**把客户随口一提的品牌塞成 `intended_model`。
+8. **性别不要武断**：只有登记信息或明确自述才算硬依据。
+9. **不得把销售顾问的信息写成客户的。** 我方销售顾问的自述（自我介绍、报自己的名字与职务、说自己的车、说我们店的事）**不是**客户信息：
    - 「我姓郑，是这边的销售顾问」→ **不得**写成 `customer_name` / `occupation`；
    - 顾问称呼客户「大哥」「老板」是**称呼客户**，可作性别弱信号，但**不得**当 `customer_name`。
    - 每条结论的 `subject` 要如实写：客户本人就写 `customer`，销售顾问写 `salesperson`。**不要**因为分不清就一律写 `customer`。

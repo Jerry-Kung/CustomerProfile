@@ -172,15 +172,86 @@ def test_unparsable_inputs_degrade_gracefully():
 # ---------------------------------------------------------------- 装配：9 节同形
 
 def test_assemble_emits_all_nine_sections_even_when_expression_is_empty():
-    """表达层什么都没给时，9 个 section 仍以空形态在位——缺就是缺，**不编造**。"""
+    """表达层什么都没给时，9 个 section 仍以空形态在位——缺就是缺，**不编造**。
+
+    ``section_count`` 统计的是**实到节数**（补空之前），所以这里是 0 而不是 9；
+    9 个键仍然都在位的这件事，由 key set 断言负责。混为一谈会把「缺节」这个
+    必须可见的事件掩盖成「一切正常」。
+    """
     out = l3.assemble_l3("13500000000", "b1", facts_json(occupation="教师"), notes_json(), "{}")
     sections = json.loads(out["result1"])["analysis_result"]
-    assert out["section_count"] == 9
+    assert out["section_count"] == 0
+    assert json.loads(out["sections_missing"]) == list(l3.SECTION_KEYS)
     for key in l3.SECTION_KEYS:
         assert key in sections
     assert sections["inferred_tags"] == []
     assert sections["profile_summary"] == {}
     assert sections["emotion_state"] == {}
+
+
+def test_assemble_reports_arrived_section_count_not_padded_count():
+    """实到节数必须少于 9 时能被看见——补空之后每个键都在，晚统计等于没统计。"""
+    expr = json.dumps({"analysis_result": {
+        "profile_summary": {"gender": "男"},
+        "inferred_tags": [{"id": "tag_001", "title": "务实派"}],
+    }}, ensure_ascii=False)
+    out = l3.assemble_l3("1", "", "{}", notes_json(), expr)
+    assert out["section_count"] == 2
+    missing = json.loads(out["sections_missing"])
+    assert "purchase_motivations" in missing and "emotion_state" in missing
+    assert "profile_summary" not in missing
+
+
+def test_assemble_hoists_sections_nested_inside_another_section():
+    """表达层把 6/7/8/9 节写进 ``customer_overview`` 内部时，装配必须上提归位。
+
+    这是 v3.1 实测踩到的坑：提示词里第 6 节的标题与 7、8 挤在同一行，紧跟第 5 节
+    （对象型）之后，模型据此把这几节当成第 5 节的子键。原先的装配只抄顶层键，
+    嵌套的值被补空静默抹平——内容还在，位置错了，卡片上就成了空白。
+    """
+    expr = json.dumps({"analysis_result": {
+        "profile_summary": {"gender": "男"},
+        "inferred_tags": [{"id": "tag_001", "title": "务实派"}],
+        "usage_scenarios": [{"id": "scn_001", "title": "通勤"}],
+        "communication_strategies": [{"strategy_name": "政策驱动策略"}],
+        "customer_overview": {
+            "business_opp_level": {"value": "A"},
+            "purchase_motivations": [{"motivation_name": "换购省钱"}],
+            "product_preferences": [{"preference_name": "长续航"}],
+            "resistances": [{"resistance_name": "价格不透明", "severity": "高"}],
+            "emotion_state": {"current_state": {"value": "谨慎观望"}},
+        },
+    }}, ensure_ascii=False)
+    out = l3.assemble_l3("1", "", "{}", notes_json(), expr)
+    sections = json.loads(out["result1"])["analysis_result"]
+
+    assert sections["purchase_motivations"] == [{"motivation_name": "换购省钱"}]
+    assert sections["product_preferences"] == [{"preference_name": "长续航"}]
+    assert sections["resistances"][0]["severity"] == "高"
+    assert sections["emotion_state"]["current_state"]["value"] == "谨慎观望"
+    # 上提后不得在原处留副本
+    assert "purchase_motivations" not in sections["customer_overview"]
+    assert "emotion_state" not in sections["customer_overview"]
+    # 第 5 节自己的子键不受影响
+    assert sections["customer_overview"]["business_opp_level"] == {"value": "A"}
+    # 归位算恢复，不算缺节
+    assert out["section_count"] == 9
+    assert json.loads(out["sections_missing"]) == []
+    assert sorted(json.loads(out["sections_hoisted"])) == [
+        "emotion_state", "product_preferences", "purchase_motivations", "resistances",
+    ]
+
+
+def test_assemble_prefers_top_level_value_over_nested_one():
+    """顶层已有该节时，嵌套的那份是多余的，不得覆盖顶层。"""
+    expr = json.dumps({"analysis_result": {
+        "purchase_motivations": [{"motivation_name": "顶层"}],
+        "customer_overview": {"purchase_motivations": [{"motivation_name": "嵌套"}]},
+    }}, ensure_ascii=False)
+    out = l3.assemble_l3("1", "", "{}", notes_json(), expr)
+    sections = json.loads(out["result1"])["analysis_result"]
+    assert sections["purchase_motivations"] == [{"motivation_name": "顶层"}]
+    assert "purchase_motivations" not in sections["customer_overview"]
 
 
 def test_assemble_shape_matches_baseline():

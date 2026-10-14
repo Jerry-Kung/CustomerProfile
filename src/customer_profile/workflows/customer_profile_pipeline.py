@@ -1024,6 +1024,18 @@ FIELD_SOURCE_NOTES: dict[str, str] = {
     "是否已了解配置），**不得**用其他品牌的信息判断。",
     "electronic_ecosystem": "只看客户自述或截图中出现的手机品牌，"
     "**不得**由职业、收入、年龄反推。",
+    # ---- v3.2 竞品类四字段：彼此**极易互串**，逐条指明边界（description 没写这层）。
+    "intended_model": "客户**自己在考虑购买**的车型，或主动向销售问起的那台。"
+    "**不得**把客户随口一提或拿来比较的品牌/车型写进这里——那些归 `competing_*`。",
+    "competing_brand": "客户**拿来与目标车比较**的其它车企品牌（含客户自有旧车品牌）。"
+    "「我也看了 XX」「比 XX 便宜」→ 此字段。与 `intended_model` 的区别是"
+    "「他在考虑买的」还是「他拿来比的」。",
+    "competing_model": "与 `competing_brand` 同口径，落到**具体车型**（如「豹8」「坦克700」）。"
+    "品牌与车型分不清时，两个字段可同时给值，不要硬拆。",
+    "test_driven_models": "客户明确说**已经试驾/开过**的车型（本方的或别家的都算），"
+    "可多个。只是「看过」「了解过」不算试驾。",
+    "brand_concerns": "客户对**本方品牌**（试驾的那台 / 顾问推销的那台）明确说出的担忧"
+    "——保值率、质量、售后、续航等。**不得**把对竞品的吐槽写进这里。",
 }
 """契约描述里**没有写明**取证范围的字段，在此补一句来源方向。
 
@@ -1078,7 +1090,7 @@ def build_l1_input(records_json) -> dict:
     - **来源分级标注**：L1 要据此判 ``claim_type`` 与 ``confidence``，而分级由**代码按渠道
       定**，不由模型猜（``端到端方案.md`` §3.2 硬规则 1）；
     - **记录编号**：供代码回定位原文，也是断言与出处的可追溯凭据；
-    - **《目标字段清单》**：42 个字段的键、口径与取证方向，见 :func:`field_inference_guide`。
+    - **《目标字段清单》**：契约全部字段的键、口径与取证方向，见 :func:`field_inference_guide`。
 
     排序按来源档**从高到低**（人工/系统登记 → 一手交互 → 公开登记查询 → 社交自呈现 →
     第三方预测）：长上下文里靠后的内容召回更低，把登记事实与录音原文前置。
@@ -1402,18 +1414,20 @@ def _basis_of(raw: dict) -> str:
     """从 v1 断言档位推出 v2 的 ``basis``（离线回放既有批次产物时用）。
 
     ``fact`` → ``fact``（v1 的 fact 本来就要求锚点）；``observation`` → ``inferred_high``
-    （「多条记录反复出现、可归纳」本身就是多条同向）；``prediction`` → ``inferred_low``
-    （第三方统计判断，单独出现不构成事实）。
+    （「多条记录反复出现、可归纳」本身就是多条同向）；``prediction`` → ``inferred_high``
+    （v3.2：第三方画像标签是采购来的商用画像数据，单独支撑某字段时按可信的高置信推断
+    处理——此前记 ``inferred_low``，使这类字段在字段级塌陷、最终留白）。
 
-    **来源档优先于自述档位**：渠道本身就在「第三方预测」档的，一律最低档，
-    不看它自称 ``claim_type`` 是什么——来源档是代码按渠道定的，比模型自述更硬。
+    **来源档优先于自述档位**：渠道本身就在「第三方预测」档的，不看它自称 ``claim_type``
+    是什么——来源档是代码按渠道定的，比模型自述更硬。第三方预测永不冒充 ``fact``，
+    但也不再被压到最低档。
     """
     channel = str(raw.get("record_channel") or "").strip()
     if proj.CHANNEL_TIER.get(channel, proj.SOCIAL) == PREDICTION:
-        return proj.INFERRED_LOW
+        return proj.INFERRED_HIGH
     claim_type = str(raw.get("claim_type") or "").strip()
     if claim_type == "prediction":
-        return proj.INFERRED_LOW
+        return proj.INFERRED_HIGH
     if claim_type == "observation":
         return proj.INFERRED_HIGH
     return proj.FACT
@@ -2260,7 +2274,8 @@ WORKFLOW = WorkflowDef(
                 "notes_updates_json": (L2_REVIEW, "notes_updates_json"),
                 "claims_json": (L1_INJECT, "claims_json"),
             },
-            outputs=("result1", "section_count", "new_fact_suspects", "suspects_json"),
+            outputs=("result1", "section_count", "sections_missing",
+                     "sections_hoisted", "new_fact_suspects", "suspects_json"),
             **{
                 "@workflow": L3_WORKFLOW,
                 "@inputs": {

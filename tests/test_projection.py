@@ -24,9 +24,13 @@ def claim(attribute, value, channel="试驾录音信息", **kwargs):
 # ---------------------------------------------------------------- 契约快照
 
 def test_snapshot_is_stable():
-    """契约快照的规模是既定的：42 字段、5 分类、16 基础身份、16 单选 / 5 多选。"""
-    assert len(nc.RAW_CONFIGS) == 42
-    assert len(nc.CATEGORIES) == 5
+    """契约快照的规模是既定的：46 字段、6 分类、16 基础身份、16 单选 / 5 多选。
+
+    46 = 基线 42 + v3.2 补挂的「竞品对比」4 字段（见
+    ``src/customer_profile/notes_contract_extension.json``）。
+    """
+    assert len(nc.RAW_CONFIGS) == 46
+    assert len(nc.CATEGORIES) == 6
     assert len(nc.IDENTITY_KEYS) == 16
     assert sum(1 for k in nc.ALL_KEYS if nc.is_single_value(k)) == 16
     assert sum(1 for k in nc.ALL_KEYS if nc.is_multi_value(k)) == 5
@@ -83,19 +87,21 @@ def test_attribution_filter_still_blocks_other_identity_fields():
         assert key not in result.facts, f"{key} 不应接受非客户本人主体的断言"
 
 
-def test_prediction_alone_downgrades_not_drops_identity():
-    """预测单独撑身份字段：**降为 inferred_low 仍写入**，并转人工确认。
+def test_prediction_alone_supports_identity_as_inferred_high():
+    """第三方画像标签单独撑身份字段：按**可信的高置信推断**写入（v3.2）。
 
-    v1 在这里丢弃整条字段，代价是「妻子在电力局被写成客户职业」那类错误被一并
-    误杀了正确结论。v2 保留值、拉低置信档、转确认——销售看得到线索，也不会
-    把它当客户事实（设计稿 §6.2 规则 b）。
+    v1 在这里丢弃整条字段，代价是「妻子在电力局被写成客户职业」那类错误被一并误杀了
+    正确结论；v2 改为「保留值、拉低到 inferred_low、转人工确认」。v3.2 再进一步：这批
+    标签是**采购来的商用画像数据**，在客户既无试驾也无沟通记录时是唯一可靠的画像信源，
+    因此按 ``inferred_high`` 写入，不再降级、也不转人工确认（用户口径）。
     """
-    result = proj.project([claim("occupation", "货车司机", channel="第三方画像数据")])
-    assert result.facts.get("occupation") == "货车司机"
-    assert result.basis.get("occupation") == "inferred_low"
-    assert any(d["rule"] == "b_prediction_only" for d in result.downgraded)
-    assert any(t["attribute_key"] == "occupation" for t in result.to_confirm)
-    # 降级**不是**拒收：rejected 里不该再有它，否则两条账会互相打架。
+    result = proj.project([claim("occupation", "小车司机", channel="第三方画像数据")])
+    assert result.facts.get("occupation") == "小车司机"
+    assert result.basis.get("occupation") == "inferred_high"
+    # 既不降级、也不转确认：它已被当作可用的推断结论。
+    assert not any(d["rule"] == "b_prediction_only" for d in result.downgraded)
+    assert not any(t["attribute_key"] == "occupation" for t in result.to_confirm)
+    # 但绝不是拒收：rejected 里不该有它，否则两条账会互相打架。
     assert not any(r["rule"] == "b_prediction_only" for r in result.rejected)
 
 
@@ -196,12 +202,16 @@ def test_attitude_field_without_firsthand_downgrades():
     assert any(d["rule"] == "b_attitude_weak_source" for d in result.downgraded)
 
 
-def test_prediction_channel_claiming_fact_is_treated_as_weak():
-    """渠道是第三方预测却自称 ``fact`` → 按更弱的一档处理（来源档比自述档硬）。"""
+def test_prediction_channel_claiming_fact_is_capped_at_inferred_high():
+    """渠道是第三方预测却自称 ``fact`` → 不得冒充事实，但按高置信推断处理。
+
+    来源档比自述档硬：预测渠道来的结论永远不是 ``fact``（不是客户原话）。但 v3.2 起也
+    不再压到 ``inferred_low``——采购的画像标签单独支撑某字段时按 ``inferred_high``。
+    """
     result = proj.project(
-        [claim("occupation", "货车司机", channel="第三方画像数据", basis="fact")]
+        [claim("occupation", "小车司机", channel="第三方画像数据", basis="fact")]
     )
-    assert result.basis.get("occupation") == "inferred_low"
+    assert result.basis.get("occupation") == "inferred_high"
 
 
 # ---------------------------------------------------------------- 兜底：候选集与越界拒收
@@ -226,7 +236,8 @@ def test_l2_candidates_carry_source_and_basis():
     entry = next(c for c in candidates if c["attribute_key"] == "occupation")
     assert len(entry["options"]) == 3
     assert {o["tier"] for o in entry["options"]} == {"一手交互", "第三方预测"}
-    assert {o["basis"] for o in entry["options"]} >= {"fact", "inferred_low"}
+    # v3.2：第三方预测档的候选按 ``inferred_high`` 出现（此前为 inferred_low）。
+    assert {o["basis"] for o in entry["options"]} >= {"fact", "inferred_high"}
 
 
 def test_l2_verdict_cannot_add_value_outside_candidates():
@@ -475,7 +486,17 @@ def test_single_semantic_text_field_still_conflicts():
 def test_aggregate_key_set_is_deliberate():
     """聚合集合是**决策产物**，不是「所有文本字段」——改动会静默改变留白行为。"""
     assert proj.AGGREGATE_TEXT_KEYS == frozenset(
-        {"hobbies", "pain_points", "special_requirements", "intended_brand", "intended_model"}
+        {
+            "hobbies",
+            "pain_points",
+            "special_requirements",
+            "intended_brand",
+            "intended_model",
+            "competing_brand",
+            "competing_model",
+            "test_driven_models",
+            "brand_concerns",
+        }
     )
     # 集合内的字段都是契约里的自由文本字段（无 enum_options），否则归类无意义。
     assert all(not nc.is_enum(k) for k in proj.AGGREGATE_TEXT_KEYS)

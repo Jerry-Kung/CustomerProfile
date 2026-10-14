@@ -230,6 +230,14 @@ result1（含 9 个 section + basic_notes_updates）
 | 无依据确定值率 = 0 | **通过**。13 案回放 `unbacked_count = 0`，`valid = 13/13` |
 | 9 节齐全 | **通过**。13 案全部 `section_count = 9`（表达层缺哪节就补空形态，**不编造**） |
 
+> **口径变更（v3.2 后补）**：上表的 `section_count = 9` 是**当时的语义**——统计的是
+> 「补空之后键在不在位」，因此恒等于 9，**看不出表达层漏节**。v3.1 批实测暴露了代价：
+> 模型把第 6/7/8 节写进 `customer_overview` 内部，顶层只到 5 节，装配层又把它补空，
+> `section_count` 依旧报 9，八案里五案的四节（购车动机 / 产品偏好 / 抗性 / 情绪）
+> 就这样静默变成空白。现行 `section_count` 改为统计**实到节数**（补空之前），并新增
+> `sections_missing` / `sections_hoisted` 两个报警输出；装配层同时把嵌套的节上提归位。
+> 详见 `docs/changelog.md` 2026-10-14「画像卡四节大面积缺失」条。
+
 **6 个业务资产按原名引用**：`PRODUCTION_ASSET(node_id) → customer_profile_production__<id>`。
 不复制副本——「正文一字不改」因此**可验证**（用例断言模板名指回生产图那份）。
 
