@@ -1,0 +1,4 @@
+you are an useful assistant
+请你针对下述的json字符串进行修复，保证其是一个合法的json字符串，进输出合法的json字符串。
+输入：
+{{#1777372470283.result#}}
