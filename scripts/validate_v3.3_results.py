@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-RESULT_DIR = REPO_ROOT / "docs/business_opt01_v3/baseline-v3.3-final"
+RESULT_DIR = REPO_ROOT / "experiments/batches/pipeline-v3.3-39"
 
 
 def check_file_exists(path: Path, name: str) -> bool:
@@ -132,54 +132,113 @@ def check_database_schema(trace_db: Path) -> dict[str, Any]:
     }
 
 
-def check_result_quality(runs_dir: Path, sample_size: int = 5) -> dict[str, Any]:
-    """抽样检查结果质量"""
+ANALYSIS_SECTIONS = (
+    "profile_summary",
+    "inferred_tags",
+    "usage_scenarios",
+    "communication_strategies",
+    "customer_overview",
+    "purchase_motivations",
+    "product_preferences",
+    "resistances",
+    "emotion_state",
+    "basic_notes_updates",
+)
+"""``analysis_result`` 的 10 个段落。
+
+**修正记录（2026-10-15）**：本工具原先读 ``data["result"]["customer_profile_card"]``，
+那条路径不存在——真实层级是 ``result.json`` → ``result1``（JSON **字符串**）→
+``analysis_result``。因为路径错，它对每个成功用例都报「字段缺失」，39 个用例报出
+25 条假问题。评测工具档错路径比不评测更糟：它把真实问题淹在噪声里。
+"""
+
+
+def _is_blank(value: Any) -> bool:
+    """段落是否「空」。列表看长度，字典看是否所有取值都为空白。"""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple)):
+        return len(value) == 0
+    if isinstance(value, dict):
+        return all(_is_blank(v) for v in value.values())
+    return False
+
+
+def check_result_quality(runs_dir: Path) -> dict[str, Any]:
+    """逐案检查 ``analysis_result`` 的 10 个段落（全量，不抽样）。"""
     if not runs_dir.exists():
-        return {"ok": False, "error": "runs/ 目录不存在"}
+        return {"ok": False, "error": "runs/ 目录不存在", "issues": []}
 
-    phone_dirs = sorted([d for d in runs_dir.iterdir() if d.is_dir()])[:sample_size]
+    phone_dirs = sorted([d for d in runs_dir.iterdir() if d.is_dir()])
 
-    issues = []
+    issues: list[str] = []
+    sparse: dict[str, list[str]] = {}
+    checked = 0
+
     for phone_dir in phone_dirs:
         result_json = phone_dir / "result.json"
         if not result_json.exists():
             issues.append(f"{phone_dir.name}: result.json 缺失")
             continue
-
-        with result_json.open(encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            data = json.loads(result_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            issues.append(f"{phone_dir.name}: result.json 无法解析（{exc}）")
+            continue
 
         if data.get("status") != "succeeded":
             continue
 
-        # 检查画像卡片
-        result = data.get("result", {})
-        card = result.get("customer_profile_card", {})
+        raw = data.get("result1")
+        if not raw:
+            issues.append(f"{phone_dir.name}: 缺 result1（管线未回填分析结果）")
+            continue
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError as exc:
+                issues.append(f"{phone_dir.name}: result1 不是合法 JSON（{exc}）")
+                continue
 
-        required_fields = [
-            "customer_overview",
-            "purchase_motivation",
-            "budget_and_decision",
-            "concerns_and_objections",
-            "communication_strategy",
-        ]
+        analysis = raw.get("analysis_result")
+        if not isinstance(analysis, dict):
+            issues.append(f"{phone_dir.name}: 缺 analysis_result 段落")
+            continue
 
-        for field in required_fields:
-            value = card.get(field)
-            if not value or len(str(value).strip()) < 10:
-                issues.append(f"{phone_dir.name}: {field} 过短或缺失")
+        checked += 1
+        missing = [s for s in ANALYSIS_SECTIONS if s not in analysis]
+        if missing:
+            issues.append(f"{phone_dir.name}: analysis_result 缺段落 {missing}")
+        blank = [s for s in ANALYSIS_SECTIONS if s in analysis and _is_blank(analysis[s])]
+        if blank:
+            sparse[phone_dir.name] = blank
 
+    print(f"  已检查成功用例: {checked}")
     if issues:
-        print(f"  [WARN] 发现 {len(issues)} 个质量问题:")
-        for issue in issues[:3]:  # 只显示前3个
+        print(f"  [WARN] 结构性问题 {len(issues)} 条:")
+        for issue in issues[:10]:
             print(f"    - {issue}")
-        if len(issues) > 3:
-            print(f"    ... 还有 {len(issues) - 3} 个")
+        if len(issues) > 10:
+            print(f"    ... 还有 {len(issues) - 10} 条")
     else:
-        print(f"  [OK] 抽样 {len(phone_dirs)} 个结果无明显问题")
+        print("  [OK] 所有成功用例均含完整的 10 个段落")
 
-    ok = len(issues) == 0
-    return {"ok": ok, "issues": issues, "sample_size": len(phone_dirs)}
+    if sparse:
+        print(f"  [INFO] 有段落留空的用例 {len(sparse)} 个"
+              "（事实簿信息不足属正常，不视为缺陷，但需人工确认）:")
+        for phone, fields in sorted(sparse.items()):
+            print(f"    - {phone}: 空段落 {len(fields)}/{len(ANALYSIS_SECTIONS)} -> {fields}")
+    else:
+        print("  [OK] 无段落留空")
+
+    return {
+        "ok": not issues,
+        "issues": issues,
+        "sparse": sparse,
+        "checked": checked,
+    }
 
 
 def main():
@@ -236,9 +295,9 @@ def main():
         all_ok = False
     print()
 
-    # 5. 结果质量
-    print("5. 结果质量（抽样）")
-    quality_result = check_result_quality(RESULT_DIR / "runs", sample_size=5)
+    # 5. 结果质量（全量）
+    print("5. 结果质量（analysis_result 十段落，全量）")
+    quality_result = check_result_quality(RESULT_DIR / "runs")
     if not quality_result.get("ok", False):
         all_ok = False
     print()

@@ -448,6 +448,7 @@ class LlmClient:
         expect_jsonl: bool = False,
         node_ref: Any = None,
         max_attempts: int = MAX_ATTEMPTS,
+        min_completion_tokens: int | None = None,
     ) -> str | dict[str, Any]:
         """调用模型，最多 ``max_attempts`` 次尝试（§6.4.1 + §6.4.2）。
 
@@ -462,6 +463,16 @@ class LlmClient:
         不是被截断。因此严格解析失败时先 :func:`salvage_json_output` 补括号/截断；
         抢救得到对象即算成功（否则一次结尾手误就让整案归零）。抢救不到才按原逻辑重试。
 
+        ``min_completion_tokens`` 是**输出量下限**（v3.3 跑批可靠性 A3）：给出时，某次
+        尝试的 ``completion_tokens`` 低于它就判为 ``output_too_short`` 异常并按重试语义
+        处理。它服务于「输入很大、输出不该很少」的节点——大输入配十几 token 的输出，
+        是静默截断的典型形态，而这时 ``finish_reason`` 往往仍是 ``stop``。
+
+        **缺省为 ``None``，即不启用**。这不只是兼容旧行为：短输出不总是故障，
+        事簿信息稀薄的案子（本例 ``167****3251`` 只有姓名与称呼两条事实）合法地返回
+        ``{"fields": []}``。阈值该由**知道该节点输入规模的调用点**按节点配置给，
+        不能在公共层设一个全局值——那会把「数据稀疏」误判成「模型截断」并白烧重试。
+
         每次尝试都写入 ``node_ref`` 指向的尝试记录，失败时抛 :class:`LlmCallError`
         并把全部尝试带出。
         """
@@ -469,7 +480,9 @@ class LlmClient:
         attempts: list[LlmAttempt] = []
 
         for attempt_no in range(1, max_attempts + 1):
-            attempt = await self._single_attempt(payload, attempt_no)
+            attempt = await self._single_attempt(
+                payload, attempt_no, min_completion_tokens
+            )
             attempts.append(attempt)
             await self._record_attempt(node_ref, attempt, payload)
 
@@ -511,7 +524,10 @@ class LlmClient:
         )
 
     async def _single_attempt(
-        self, payload: Mapping[str, Any], attempt_no: int
+        self,
+        payload: Mapping[str, Any],
+        attempt_no: int,
+        min_completion_tokens: int | None = None,
     ) -> LlmAttempt:
         """一次尝试。异常一律转成 ``LlmAttempt.error``，不向上抛，以便记录全部尝试。"""
         attempt = LlmAttempt(attempt_no=attempt_no, request=dict(payload))
@@ -545,6 +561,7 @@ class LlmClient:
                 attempt.reasoning_content,
                 attempt.usage,
                 attempt.finish_reason,
+                min_completion_tokens,
             )
             return attempt
 
@@ -608,6 +625,7 @@ class LlmClient:
             attempt.reasoning_content,
             attempt.usage,
             attempt.finish_reason,
+            min_completion_tokens,
         )
         return attempt
 

@@ -79,6 +79,37 @@ def test_normal_output_is_clean():
     assert detect_output_anomaly("正常回答", None, Usage(5, 5, 10)) is None
 
 
+# ------------------------------------------------- 输出量下限（v3.3 可靠性 A3）
+
+
+def test_output_too_short_flags_short_completion():
+    """给出下限时，低于下限的输出判为截断。"""
+    assert (
+        detect_output_anomaly("短", None, Usage(9000, 5, 9005), "stop", 200)
+        == "output_too_short: 5 < 200"
+    )
+
+
+def test_output_too_short_not_triggered_at_or_above_floor():
+    assert detect_output_anomaly("够长", None, Usage(9000, 200, 9200), "stop", 200) is None
+    assert detect_output_anomaly("够长", None, Usage(9000, 500, 9500), "stop", 200) is None
+
+
+def test_no_floor_means_no_judgement():
+    """不设下限时短输出照旧放行——「输出短」本身不是判据。"""
+    assert detect_output_anomaly('{"fields": []}', None, Usage(9000, 5, 9005), "stop") is None
+    assert (
+        detect_output_anomaly('{"fields": []}', None, Usage(9000, 5, 9005), "stop", None)
+        is None
+    )
+
+
+def test_output_too_short_skipped_when_usage_unknown():
+    """``completion_tokens`` 未知时不能判——没有依据就不能说「太短」。"""
+    assert detect_output_anomaly("文本", None, Usage(9000, None, 9000), "stop", 200) is None
+    assert detect_output_anomaly("文本", None, None, "stop", 200) is None
+
+
 # ---------------------------------------------------------------- JSON 解析
 
 
@@ -221,6 +252,78 @@ async def test_json_fence_is_accepted(tmp_path):
     )
     client, _, _ = _client(tmp_path, frames)
     assert await client.llm_call("提示词", expect_json=True, node_ref=REF) == {"ok": 1}
+
+
+async def test_short_output_below_floor_retries_then_succeeds(tmp_path):
+    """接线后的端到端语义：短输出算异常 → 按既有重试语义再来一次。
+
+    这补上了本次跑批暴露的缺口：``167****3251`` 那一档 ``fields`` 只回 5 token、
+    ``finish_reason`` 却是 ``stop``，旧判定放行。接线后，声明了下限的节点能把这种
+    形态挡住；**未声明**下限的节点行为不变。
+    """
+    frames = _frames_for(
+        make_settings(tmp_path),
+        [
+            {"text": '{"fields": []}', "usage": {"prompt_tokens": 9000, "completion_tokens": 5, "total_tokens": 9005}},
+            {"text": '{"fields": [{"k": "v"}]}', "usage": {"prompt_tokens": 9000, "completion_tokens": 480, "total_tokens": 9480}},
+        ],
+    )
+    client, _, recorded = _client(tmp_path, frames)
+
+    result = await client.llm_call("提示词", expect_json=True, node_ref=REF, min_completion_tokens=200)
+    assert result == {"fields": [{"k": "v"}]}
+    assert [a.attempt_no for a in recorded] == [1, 2]
+    assert recorded[0].anomaly == "output_too_short: 5 < 200"
+    assert recorded[1].anomaly is None
+
+
+async def test_same_short_output_passes_without_floor(tmp_path):
+    """同一份短输出，不声明下限时必须原样通过——阈值是按节点给的，不是全局的。"""
+    frames = _frames_for(
+        make_settings(tmp_path),
+        [{"text": '{"fields": []}', "usage": {"prompt_tokens": 9000, "completion_tokens": 5, "total_tokens": 9005}}],
+    )
+    client, _, recorded = _client(tmp_path, frames)
+
+    result = await client.llm_call("提示词", expect_json=True, node_ref=REF)
+    assert result == {"fields": []}
+    assert len(recorded) == 1
+    assert recorded[0].anomaly is None
+
+
+# ------------------------------------------- 节点配置到调用层的接线
+
+
+def _node(config: dict):
+    from customer_profile.definitions import NodeDef
+
+    return NodeDef(
+        node_id="n1",
+        title="测试节点",
+        node_type="llm",
+        predecessors=(),
+        bindings=(),
+        outputs={},
+        config=config,
+    )
+
+
+def test_floor_is_read_from_node_config():
+    from customer_profile.execution.executors_llm import _resolve_min_completion_tokens
+
+    assert _resolve_min_completion_tokens(_node({})) is None
+    assert _resolve_min_completion_tokens(_node({"min_completion_tokens": None})) is None
+    assert _resolve_min_completion_tokens(_node({"min_completion_tokens": 200})) == 200
+
+
+def test_illegal_floor_fails_loudly():
+    """非法阈值必须报错——静默忽略会造出「看着在守、实际没守」的闸门。"""
+    from customer_profile.execution.executors_llm import _resolve_min_completion_tokens
+    from customer_profile.execution.executors import NodeExecutionError
+
+    for bad in ("200", 200.5, True, 0, -5):
+        with pytest.raises(NodeExecutionError):
+            _resolve_min_completion_tokens(_node({"min_completion_tokens": bad}))
 
 
 async def test_replay_miss_fails_loudly_in_strict_mode(tmp_path):

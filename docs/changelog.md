@@ -2,6 +2,69 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-10-15 — business_opt01_v2 第三轮（v3.3）：跑批可靠性四项修复 + 全量 39 案验收
+
+分支 `dev-business-opt01-v2`。本轮是「事实账本管线」（实验臂 `customer_profile_pipeline`）
+的**收口批次**：跑通全量 39 案并完成第三方审核，余下优化点转入下一轮。
+
+**可靠性四项（`docs/runbooks/v3.3-可靠性改进.md`）**
+
+- **A4 异常落库**：`request_attempts` 表新增 `anomaly` / `finish_reason` 两列（migration
+  自动补列）。此前 `LlmAttempt.anomaly` 只在内存里用，重试成功后前几次的异常原因永久丢失。
+- **A3 输出量下限闸门**：`detect_output_anomaly()` 新增 `output_too_short` 与
+  `suspicious_finish_reason`。起因是 `171****0673` 案输出从 12k 字符塌陷到 575 字符
+  （22 倍），而 `finish_reason` 仍是 `stop`、无语法错误，被判成功——静默降级。
+  本轮把 `min_completion_tokens` 从 `llm_call()` 一路接到 **executor 层**
+  （`src/customer_profile/execution/{llm,executors_llm}.py`）：节点在 `config` 里声明阈值，
+  可写非法值**报错而非忽略**（静默降级正是要修的那类「看着在守、实际没守」）。
+  **缺省不启用**——短输出不总是故障，信息稀薄的案子合法返回 `{"fields": []}`
+  （`167****3251` 只有 5 token）。故阈值由**知道自身输入规模**的节点按节点给，
+  不在公共层设全局值。
+- **A2 失败案自动重跑**：`run_baseline.py --retry-failed N`（默认 0，退避 60 秒，
+  `manifest.json` 记 `retry_rounds`）。v3.2 首跑 4/8 案因上游瞬断失败，靠人工 `--resume` 救回。
+- **A5 参数错配防护**：批次 ID 以 `A-` 开头但 `workflow_id` 不是实验臂时告警；转写缓存
+  目录为空且有输入待跑时提示可能配错路径。两个坑都实际浪费过整批产物。
+
+**验收工具修正**
+
+- `scripts/validate_v3.3_results.py`：原先读 `result["customer_profile_card"]`——该路径
+  **不存在**，真实层级是 `result.json` → `result1`（JSON **字符串**）→ `analysis_result`。
+  错路径让它对每个成功用例都报「字段缺失」，39 案报出 25 条假问题。改为按 10 个段落
+  **全量**核查（不抽样），并把「段落留空」与「结构缺失」分开报告：前者在事实簿稀疏时
+  属正常，交人工确认；后者才算缺陷。
+
+**全量跑批与审核**
+
+- 全量 39 案两臂对照。读数：Notes 字段 1005 → **1564**，契约字段覆盖 914 → **1524** 字段次；
+  LLM 调用 897 → **317**，token 14.72M → **7.09M**，单案耗时中位 281.4s → **117.3s**；
+  异常留痕 0 条，重试救回 4 案。
+- 产出两份第三方审核报告（`docs/business_opt01_v3/审核报告-{业务,销售}视角.md`，
+  **含客户原话，不入库**），逐案核读 26/39 案。已确认的最高优先级缺陷：**L2 审查层
+  「能判但不拦」**——审查已能报出枚举违规（如 `payment_method=公司采购`），
+  判定结果却未落到装配动作上，违规值照样进最终 Notes。判据现成，只差执行。
+- 其余已确认缺陷（销售的话被当成客户的话、沟通策略同模板复读、客户明说的地域/语言被丢弃、
+  产品参数由模型内部知识补全、L3 同源守卫误报率 114/115）逐条记在两份报告里，
+  连同各自**证据底稿**（`docs/business_opt01_v3/ab对照-v3.3/review/`）留作下一轮输入。
+
+**工作区整改**
+
+- 管线设计写成**给人看的**文档：`docs/design/客户人设画像管线设计.md`。
+- `experiments/` 从 2152 MB 精简到 **857 MB**：删除旧 AB 场地 `abexperiments/`（906 MB）、
+  失败批次 `FAILED-template-miss-*`（254 MB）、`batches/batches/`（60 MB）、
+  `A-pipeline-L8-v3.2-*`（71 MB）、`_smoke/`。保留**基线臂**、**v3.3 实验臂**与
+  **转写归档** `transcript_cache/`（跨批次共用，删掉等于毁掉复用设计）。
+  批次目录规范化：`batches/baseline-39-dsv41-noThink/`（基线臂）与
+  `batches/pipeline-v3.3-39/`（实验臂）。批次数据**不在 `docs/` 下留存**，只此一份。
+- 删除已收口的中间文档：v3/v3.1/v3.2/v3.3 方案设计与交付说明、`docs/specs/` 四份任务书、
+  `old_templates/`（84 份 = `src/templates/` 现有版本 + 5 份仅属**已删节点**的孤儿模板，
+  `REMOVED_NODES` 可查）、一次性脚本与探针共 9 个。
+- **`old_templates/` 的判定依据**：模板完整性守卫
+  `tests/test_llm_template_bindings.py` 扫描 `llm` + `template-transform` 两类节点并要求
+  每个引用都能解析，全量测试通过即证明 `src/templates/` 自足。该守卫本身正是为此拓宽过的
+  ——一次清理把 83 个模板删到 5 个时，被删的 29 个只被 `template-transform` 引用，
+  守卫因只扫 `llm` 而全程绿灯，直到 39/39 跑批失败才暴露。
+
+
 ## 2026-10-14 — business_opt01_v2：画像卡四节大面积缺失（表达层嵌套 + 装配层静默补空）
 
 分支 `dev-business-opt01-v2`。用户审查 v3.1 批（`A-pipeline-L8-v3.1-20261014`，8 案）时发现

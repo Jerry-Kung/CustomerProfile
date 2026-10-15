@@ -171,7 +171,7 @@ def main() -> int:
         print("[OK] 环境检查通过，可以开始跑批")
         print()
         print("下一步:")
-        print("  python scripts/run_v3.3_baseline_full.py")
+        print("  python scripts/run_baseline.py --workflow-id customer_profile_pipeline")
     else:
         print("[FAIL] 环境检查发现问题，请先解决")
     print("=" * 60)
