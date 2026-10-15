@@ -1,7 +1,7 @@
 {
   "_comment": [
-    "契约补充字段（v3.2）。快照基线取自 baseline-39-dsv41-noThink（42 字段），",
-    "本文件补入其后线上契约新增的「竞品对比」类字段，由",
+    "契约补充字段（v3.2 + v3.3）。快照基线取自 baseline-39-dsv41-noThink（42 字段），",
+    "本文件补入其后线上契约新增的「竞品对比」类字段 + v3.3 加回的 resistances，由",
     "scripts/snapshot_note_contract.py 默认合并进 notes_contract.py。",
     "字段定义逐字取自线上 GET /api/v1/remote/config/note-attributes，勿手改取值。",
     "本文件只含字段结构与口径，不含任何客户数据，可入库。"
@@ -37,6 +37,14 @@
       "category": "竞品对比",
       "field_type": "text",
       "description": "客户对购买本品（试驾/顾问推销的品牌）明确表达的担忧或犹豫点。如保值率、质量、售后等",
+      "enum_options": null
+    },
+    {
+      "attribute_key": "resistances",
+      "attribute_name": "购车抗性/顾虑",
+      "category": "购车需求",
+      "field_type": "text",
+      "description": "客户购车的抗性与顾虑（价格透明度/保值率/质量/售后等）。从 analysis_result.resistances 汇总而来，格式：「抗性1/抗性2」。",
       "enum_options": null
     }
   ]

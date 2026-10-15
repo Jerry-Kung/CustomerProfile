@@ -44,6 +44,37 @@
 }
 ```
 
+**重要**：`persona` 中的每一项**必须给 `value` 键**，即使值为空字符串。下游依赖固定的 key 结构。
+
+**必填项**（即使为空也要给出该项）：
+
+- `gender`、`age_range`、`occupation`、`income_level`、`family`
+- 其余字段（`education`、`purchase_power`、`personality` 等）若信息不足，可省略或给空 `value`。
+
+**错误示范**（会导致下游读不到字段）：
+
+```json
+{
+  "persona": {
+    "gender": {"value": "男", "provenance": [...]},
+    // ❌ 缺了 age_range 项，下游会读到 undefined
+    "occupation": {"value": "司机", "provenance": [...]}
+  }
+}
+```
+
+**正确示范**：
+
+```json
+{
+  "persona": {
+    "gender": {"value": "男", "provenance": [...]},
+    "age_range": {"value": "", "provenance": []},  // ✓ 给了空值
+    "occupation": {"value": "司机", "provenance": [...]}
+  }
+}
+```
+
 - 直接输出 JSON，**不要**围栏，**不要**说明文字。
 
 【以下是你的输入一：客户原始信息记录】

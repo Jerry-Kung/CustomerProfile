@@ -1609,9 +1609,13 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
         # 否则销售分不清「三条来源同向汇出来的」与「表里什么都没有、模型补的空」。
         soft = bool(item.get("missing"))
         confidence = 0.4 if soft else 0.8
-        lead = "按已有信息补充：%s" % (item.get("reason") or "据已有事实归纳") if soft else (
-            "兜底裁决：%s" % (item.get("reason") or "候选集内取值")
-        )
+        reason = item.get("reason") or ""
+        # v3.3：移除 reason 中的工程术语措辞（问题2修复）。
+        # L2 提示词已规范，但为防止模型偶发漏出，代码再清洗一遍。
+        if soft:
+            lead = f"根据已有信息推断：{reason}" if reason else "据已有事实归纳（低置信，供核对）"
+        else:
+            lead = reason if reason else "多条来源同向，取一致结论"
         existing = by_key.get(key)
         if existing is not None:
             existing["attribute_value"] = item["attribute_value"]

@@ -286,7 +286,7 @@ def test_field_inference_guide_covers_all_contract_fields():
         if line.startswith("- `") and line.count("`") >= 2
     }
     assert listed == set(nc.ALL_KEYS)
-    assert len(listed) == len(nc.ALL_KEYS) == 46
+    assert len(listed) == len(nc.ALL_KEYS) == 47
     # 口径取自契约：抽两条逐字比对，钉住「不手抄」这条约束。
     for key in ("planned_purchase_time", "core_concerns"):
         description = (nc.by_key(key).get("description") or "").strip()

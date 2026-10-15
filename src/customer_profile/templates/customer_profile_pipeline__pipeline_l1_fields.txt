@@ -13,6 +13,13 @@
 - `age`、`annual_income`：从职业、工作年限、消费描述综合推断，给区间；
 - `follow_up_frequency`、`communication_rhythm`、`planned_purchase_time`：从沟通记录推断；
 - `personality_and_preferences`、`core_concerns`、`purchase_purpose` 等：从对话内容归纳；
+- **用车体验与痛点**：`driving_preference`（驾驶感受）、`pain_points`（用车痛点）
+  **不要**因为「客户未直接说『我喜欢平顺的动力』」就整条不写。**客户很少会直接表达这些**。
+  从职业、家庭、兴趣、已有车型**主动推测**：
+  - 职业司机 → 可能关注油耗、驾驶舒适性；
+  - 已婚有孩 → 可能重视空间、安全；
+  - 旧车是紧凑型轿车 → 可能痛点是「空间太小」。
+  **缺一手信息时，从已知事实推断，不要留空。**
 - **品牌与竞品**：`intended_model`（客户在考虑买的）、`competing_brand` / `competing_model`（拿来对比的其它品牌与车型）、`test_driven_models`（已试驾过的车型）、`brand_concerns`（对本方品牌的顾虑）。事实清单里若已给出，不要重复；但客户**在多个品牌/车型之间比较**的线索（如「A 和 B 哪个好」「比 XX 便宜」）常要靠你从对话里归纳，别漏。
 
 **确实毫无关联的字段才留空**（形式是**不输出该字段**，不是输出空值）。不要为了凑数硬凑，也不要因为「原文没直接说」就整条不写。

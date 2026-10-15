@@ -3,8 +3,8 @@
 **本文件由 :mod:`scripts.snapshot_note_contract` 自动生成，请勿手改。**
 重新生成：``python scripts/snapshot_note_contract.py``。
 
-契约实测跨 **39/39 案完全恒定**（payload 签名 ``0479e326bc88``），共 **46** 个字段、
-**6** 个分类（基础身份 16 / 购车需求 10 / 预算与金融 4 / 决策与节奏 4 / 个人偏好与备注 8 / 竞品对比 4）。因此固化为离线快照，运行期不再取接口。
+契约实测跨 **39/39 案完全恒定**（payload 签名 ``0479e326bc88``），共 **47** 个字段、
+**6** 个分类（基础身份 16 / 购车需求 11 / 预算与金融 4 / 决策与节奏 4 / 个人偏好与备注 8 / 竞品对比 4）。因此固化为离线快照，运行期不再取接口。
 
 另含**补充字段**（基线固化后线上契约新增，见 ``src/customer_profile/notes_contract_extension.json``）。
 
@@ -382,6 +382,12 @@ RAW_CONFIGS: tuple[dict[str, Any], ...] = (
  'category': '竞品对比',
  'field_type': 'text',
  'description': '客户对购买本品（试驾/顾问推销的品牌）明确表达的担忧或犹豫点。如保值率、质量、售后等',
+ 'enum_options': None},
+    {'attribute_key': 'resistances',
+ 'attribute_name': '购车抗性/顾虑',
+ 'category': '购车需求',
+ 'field_type': 'text',
+ 'description': '客户购车的抗性与顾虑（价格透明度/保值率/质量/售后等）。从 analysis_result.resistances 汇总而来，格式：「抗性1/抗性2」。',
  'enum_options': None}
 )
 

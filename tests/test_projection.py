@@ -29,7 +29,7 @@ def test_snapshot_is_stable():
     46 = 基线 42 + v3.2 补挂的「竞品对比」4 字段（见
     ``src/customer_profile/notes_contract_extension.json``）。
     """
-    assert len(nc.RAW_CONFIGS) == 46
+    assert len(nc.RAW_CONFIGS) == 47
     assert len(nc.CATEGORIES) == 6
     assert len(nc.IDENTITY_KEYS) == 16
     assert sum(1 for k in nc.ALL_KEYS if nc.is_single_value(k)) == 16
