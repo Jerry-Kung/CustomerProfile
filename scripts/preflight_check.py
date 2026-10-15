@@ -156,13 +156,18 @@ def main() -> int:
 
     # 6. 输出目录
     print("6. 输出目录")
-    out_dir = REPO_ROOT / "docs/business_opt01_v3"
+    out_dir = REPO_ROOT / "experiments"
     all_ok &= check("输出目录", out_dir.is_dir(), str(out_dir.relative_to(REPO_ROOT)))
-    final_dest = out_dir / "baseline-v3.3-final"
-    if final_dest.exists():
-        check("最终保存位置", True, "已存在旧结果，跑批时会先备份")
-    else:
-        check("最终保存位置", True, "不存在（就绪）")
+    batches_dir = out_dir / "batches"
+    existing = sorted(p.name for p in batches_dir.glob("*")) if batches_dir.is_dir() else []
+    print(f"  已有批次 {len(existing)} 个：{'、'.join(existing) if existing else '（无）'}")
+    cache_dir = out_dir / "transcript_cache"
+    check(
+        "转写缓存目录",
+        cache_dir.is_dir(),
+        f"{cache_dir.relative_to(REPO_ROOT)}（{len(list(cache_dir.glob('*')))} 条）"
+        if cache_dir.is_dir() else "缺失——跑批会重新识别全部录音",
+    )
     print()
 
     # 总结
