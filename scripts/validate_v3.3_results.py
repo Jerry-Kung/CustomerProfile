@@ -20,10 +20,10 @@ RESULT_DIR = REPO_ROOT / "docs/business_opt01_v3/baseline-v3.3-final"
 def check_file_exists(path: Path, name: str) -> bool:
     """检查文件是否存在"""
     if path.exists():
-        print(f"  ✓ {name}")
+        print(f"  [OK] {name}")
         return True
     else:
-        print(f"  ✗ {name} - 缺失")
+        print(f"  [FAIL] {name} - 缺失")
         return False
 
 
@@ -45,9 +45,9 @@ def check_summary(summary_path: Path) -> dict[str, Any]:
 
     ok = success_rate >= 95.0  # 期望至少95%成功率
     if ok:
-        print(f"  ✓ 成功率达标 (>= 95%)")
+        print(f"  [OK] 成功率达标 (>= 95%)")
     else:
-        print(f"  ⚠ 成功率偏低 (< 95%)")
+        print(f"  [WARN] 成功率偏低 (< 95%)")
 
     return {"ok": ok, "total": total, "succeeded": succeeded, "rate": success_rate}
 
@@ -75,9 +75,9 @@ def check_result_completeness(runs_dir: Path, expected_count: int) -> dict[str, 
 
     ok = actual_count == expected_count and complete == sample_size
     if ok:
-        print("  ✓ 结果文件完整")
+        print("  [OK] 结果文件完整")
     else:
-        print("  ⚠ 部分结果文件缺失")
+        print("  [WARN] 部分结果文件缺失")
 
     return {"ok": ok, "actual_count": actual_count, "expected_count": expected_count}
 
@@ -96,8 +96,8 @@ def check_database_schema(trace_db: Path) -> dict[str, Any]:
     has_anomaly = "anomaly" in columns
     has_finish_reason = "finish_reason" in columns
 
-    print(f"  anomaly 列: {'✓' if has_anomaly else '✗'}")
-    print(f"  finish_reason 列: {'✓' if has_finish_reason else '✗'}")
+    print(f"  anomaly 列: {'[OK]' if has_anomaly else '[FAIL]'}")
+    print(f"  finish_reason 列: {'[OK]' if has_finish_reason else '[FAIL]'}")
 
     # 检查是否有数据
     cursor = conn.execute("SELECT COUNT(*) FROM request_attempts WHERE kind = 'llm'")
@@ -120,9 +120,9 @@ def check_database_schema(trace_db: Path) -> dict[str, Any]:
 
     ok = has_anomaly and has_finish_reason and llm_count > 0
     if ok:
-        print("  ✓ v3.3 改进生效")
+        print("  [OK] v3.3 改进生效")
     else:
-        print("  ⚠ v3.3 改进未完全生效")
+        print("  [WARN] v3.3 改进未完全生效")
 
     return {
         "ok": ok,
@@ -170,13 +170,13 @@ def check_result_quality(runs_dir: Path, sample_size: int = 5) -> dict[str, Any]
                 issues.append(f"{phone_dir.name}: {field} 过短或缺失")
 
     if issues:
-        print(f"  ⚠ 发现 {len(issues)} 个质量问题:")
+        print(f"  [WARN] 发现 {len(issues)} 个质量问题:")
         for issue in issues[:3]:  # 只显示前3个
             print(f"    - {issue}")
         if len(issues) > 3:
             print(f"    ... 还有 {len(issues) - 3} 个")
     else:
-        print(f"  ✓ 抽样 {len(phone_dirs)} 个结果无明显问题")
+        print(f"  [OK] 抽样 {len(phone_dirs)} 个结果无明显问题")
 
     ok = len(issues) == 0
     return {"ok": ok, "issues": issues, "sample_size": len(phone_dirs)}
@@ -190,7 +190,7 @@ def main():
     print()
 
     if not RESULT_DIR.exists():
-        print("✗ 结果目录不存在")
+        print("[FAIL] 结果目录不存在")
         print()
         print("请先运行: python scripts/run_v3.3_baseline_full.py")
         return 1
@@ -246,9 +246,9 @@ def main():
     # 总结
     print("=" * 60)
     if all_ok:
-        print("✓ 验证通过，数据可用于制作结果页面")
+        print("[OK] 验证通过，数据可用于制作结果页面")
     else:
-        print("⚠ 验证发现问题，建议检查后再使用")
+        print("[WARN] 验证发现问题，建议检查后再使用")
     print("=" * 60)
 
     return 0 if all_ok else 1

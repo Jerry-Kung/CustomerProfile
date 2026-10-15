@@ -43,7 +43,7 @@ def main():
     print()
 
     if not PHONE_LIST.exists():
-        print(f"❌ 手机号清单不存在: {PHONE_LIST}")
+        print(f"[FAIL] 手机号清单不存在: {PHONE_LIST}")
         return 1
 
     response = input("确认开始跑批? (y/N): ").strip().lower()
@@ -75,9 +75,9 @@ def main():
     print()
     print("=" * 60)
     if exit_code == 0:
-        print("✓ 跑批全部成功")
+        print("[OK] 跑批全部成功")
     else:
-        print(f"⚠ 部分用例失败 (exit code: {exit_code})")
+        print(f"[WARN] 部分用例失败 (exit code: {exit_code})")
         print(f"  查看详情: {temp_batch_dir / 'summary.md'}")
     print("=" * 60)
 
@@ -286,7 +286,7 @@ v3.3 跑批含以下可靠性改进：
 
     (final_dest / "README.md").write_text(readme_content, encoding="utf-8")
 
-    print(f"✓ 数据已保存到: {final_dest.relative_to(REPO_ROOT)}")
+    print(f"[OK] 数据已保存到: {final_dest.relative_to(REPO_ROOT)}")
     print()
     print("生成文件:")
     print("  - README.md      (数据说明书)")
@@ -332,11 +332,11 @@ v3.3 跑批含以下可靠性改进：
             has_finish_reason = "finish_reason" in columns
 
             if has_anomaly and has_finish_reason:
-                print("✓ anomaly 和 finish_reason 字段已记录")
+                print("[OK] anomaly 和 finish_reason 字段已记录")
             else:
-                print("⚠ 新字段缺失（需检查 migration）")
+                print("[WARN] 新字段缺失（需检查 migration）")
         except Exception as exc:
-            print(f"⚠ 无法检查数据库: {exc}")
+            print(f"[WARN] 无法检查数据库: {exc}")
 
     print()
     print("完成！")

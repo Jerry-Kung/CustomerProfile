@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def check_database_schema(db_path: Path) -> bool:
     """检查数据库 schema 是否已更新"""
     if not db_path.exists():
-        print(f"❌ 数据库不存在: {db_path}")
+        print(f"[FAIL] 数据库不存在: {db_path}")
         return False
 
     conn = sqlite3.connect(db_path)
@@ -24,10 +24,10 @@ def check_database_schema(db_path: Path) -> bool:
     missing = required - columns
 
     if missing:
-        print(f"❌ request_attempts 表缺少字段: {missing}")
+        print(f"[FAIL] request_attempts 表缺少字段: {missing}")
         return False
 
-    print("✓ 数据库 schema 已更新 (anomaly, finish_reason 列已添加)")
+    print("[OK] 数据库 schema 已更新 (anomaly, finish_reason 列已添加)")
     return True
 
 
@@ -48,7 +48,7 @@ def check_recent_attempts(db_path: Path) -> bool:
     conn.close()
 
     if not rows:
-        print("ℹ️ 尚无 LLM 尝试记录（需跑批后再检查）")
+        print("ℹ 尚无 LLM 尝试记录（需跑批后再检查）")
         return True
 
     print(f"\n最近 {len(rows)} 条 LLM 尝试:")
@@ -60,9 +60,9 @@ def check_recent_attempts(db_path: Path) -> bool:
     # 检查是否有至少一条记录了 finish_reason
     has_finish_reason = any(row[4] for row in rows)
     if has_finish_reason:
-        print("✓ finish_reason 已被记录")
+        print("[OK] finish_reason 已被记录")
     else:
-        print("⚠️ finish_reason 尚未被记录（可能是旧记录或回放模式）")
+        print("[WARN] finish_reason 尚未被记录（可能是旧记录或回放模式）")
 
     return True
 

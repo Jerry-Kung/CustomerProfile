@@ -1,22 +1,74 @@
 #!/usr/bin/env python
-"""环境预检 - 跑批前确认一切就绪"""
+"""环境预检 —— 跑批前确认一切就绪。
+
+**这一版的要害是「真的执行一遍跑批入口」。** 上一版只 import 了
+``customer_profile.*`` 包内的模块，从未拉起 ``scripts/run_baseline.py`` 本身，
+于是在 ``collect_test_phones`` 被误删、跑批入口 import 即崩的情况下仍然报绿——
+预检若与真实入口走的不是同一条路，它给的绿灯就没有意义。
+
+因此第 1 项直接以子进程跑 ``run_baseline.py --help``：这与真实跑批走的是同一条
+import 路径，任何「模块缺失 / 循环导入 / 语法错误」都会在这里现形。
+
+输出一律 ASCII 标记（``[OK]`` / ``[FAIL]`` / ``[WARN]``）：Windows 控制台默认 GBK，
+``✓`` / ``✗`` 这类符号会直接抛 ``UnicodeEncodeError``，把预检自己变成一次故障。
+"""
+
+from __future__ import annotations
+
 import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+ENTRY_SCRIPT = REPO_ROOT / "scripts" / "run_baseline.py"
+WORKFLOW_ID = "customer_profile_pipeline"
+
 
 def check(name: str, ok: bool, detail: str = "") -> bool:
-    """打印检查结果"""
-    status = "✓" if ok else "✗"
-    print(f"  [{status}] {name}")
+    """打印一行检查结果，返回 ``ok`` 以便调用方累计。"""
+    print(f"  [{'OK' if ok else 'FAIL'}] {name}")
     if detail:
-        print(f"      {detail}")
+        print(f"         {detail}")
     return ok
 
 
-def main():
+def run_entry_help() -> tuple[bool, str]:
+    """以子进程跑跑批入口的 ``--help``，返回 ``(是否成功, 说明)``。
+
+    用子进程而不是 in-process import：跑批本身就是以「脚本」方式被执行的，
+    ``run_baseline.py`` 顶部那几行 ``sys.path.insert`` 只在直接执行时生效。
+    in-process import 会绕过它，检查的就不再是真实路径。
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, str(ENTRY_SCRIPT), "--help"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+    if result.returncode != 0:
+        # 取 stderr 的最后几行：那里才是真正的异常信息
+        tail = " / ".join(
+            line.strip()
+            for line in (result.stderr or "").strip().splitlines()[-4:]
+            if line.strip()
+        )
+        return False, f"exit={result.returncode} {tail}"
+
+    missing = [flag for flag in ("--retry-failed", "--workflow-id") if flag not in result.stdout]
+    if missing:
+        return False, f"--help 缺少参数：{missing}"
+    return True, "入口可执行，参数齐备"
+
+
+def main() -> int:
     print("=" * 60)
     print("v3.3 跑批环境预检")
     print("=" * 60)
@@ -24,130 +76,104 @@ def main():
 
     all_ok = True
 
-    # 1. 代码版本
-    print("1. 代码版本")
-    try:
-        result = subprocess.run(
-            ["git", "log", "-1", "--oneline"],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-        )
-        commit = result.stdout.strip()
-        ok = "feat(reliability)" in commit or len(commit) > 0
-        all_ok &= check("Git 提交", ok, commit[:60] if commit else "无法获取")
-    except Exception as exc:
-        all_ok &= check("Git 提交", False, str(exc))
-
-    # 检查是否有未提交的改动
-    try:
-        result = subprocess.run(
-            ["git", "status", "--short"],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-        )
-        uncommitted = result.stdout.strip()
-        has_uncommitted = bool(uncommitted)
-        if has_uncommitted:
-            lines = uncommitted.split("\n")
-            detail = f"{len(lines)} 个文件未提交"
-            check("工作区状态", False, detail)
-            print("      建议先提交改动或使用 git stash")
-        else:
-            check("工作区状态", True, "无未提交改动")
-    except Exception:
-        pass
+    # 1. 跑批入口（最重要的一项：走真实 import 路径）
+    print("1. 跑批入口")
+    ok, detail = run_entry_help()
+    all_ok &= check("run_baseline.py 可执行", ok, detail)
     print()
 
-    # 2. 输入文件
-    print("2. 输入文件")
-    phone_list = REPO_ROOT / "experiments/batches/baseline-39-dsv41-noThink/phones.txt"
-    ok = phone_list.exists()
-    if ok:
-        count = len(phone_list.read_text().strip().split("\n"))
-        all_ok &= check("手机号清单", ok, f"{phone_list.relative_to(REPO_ROOT)} ({count} 个)")
-    else:
-        all_ok &= check("手机号清单", False, f"{phone_list.relative_to(REPO_ROOT)} 不存在")
+    # 2. 手机号清单
+    print("2. 手机号清单")
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+    try:
+        import run_baseline as rb  # noqa: PLC0415
+
+        phones = rb.read_phone_list(rb.DEFAULT_PHONES)
+        all_ok &= check(
+            "清单可读",
+            True,
+            f"{rb.DEFAULT_PHONES.name} -> {len(phones)} 个号码",
+        )
+        if len(phones) != 39:
+            print(f"         [WARN] 预期 39 个，实际 {len(phones)} 个")
+    except Exception as exc:
+        all_ok &= check("清单可读", False, f"{type(exc).__name__}: {exc}")
     print()
 
     # 3. 转写缓存
     print("3. 转写缓存")
     cache_dir = REPO_ROOT / "experiments/transcript_cache"
-    ok = cache_dir.exists()
-    if ok:
-        cached_files = list(cache_dir.rglob("*.json"))
-        detail = f"{len(cached_files)} 个已缓存文件"
-        check("缓存目录", ok, detail)
+    if cache_dir.is_dir():
+        cached = len(list(cache_dir.rglob("*.json")))
+        check("缓存目录", True, f"{cached} 个已缓存文件")
+        if cached == 0:
+            print("         [WARN] 缓存为空：录音将重新识别，非缓存失效")
     else:
-        check("缓存目录", False, f"{cache_dir.relative_to(REPO_ROOT)} 不存在（首次跑会创建）")
+        check("缓存目录", True, f"{cache_dir.name} 不存在，首次跑批会创建")
     print()
 
-    # 4. Python 依赖
-    print("4. Python 依赖")
+    # 4. 工作流 ID
+    print("4. 工作流 ID")
     try:
-        sys.path.insert(0, str(REPO_ROOT / "src"))
-        from customer_profile.execution.llm import detect_output_anomaly
-        from customer_profile.persistence.store import Store
+        from customer_profile.workflows import load_all  # noqa: PLC0415
 
-        all_ok &= check("核心模块", True, "导入成功")
-    except ImportError as exc:
-        all_ok &= check("核心模块", False, str(exc))
-    print()
-
-    # 5. v3.3 改进代码
-    print("5. v3.3 改进验证")
-    try:
-        # 检查 detect_output_anomaly 是否有新参数
-        from inspect import signature
-        sig = signature(detect_output_anomaly)
-        params = list(sig.parameters.keys())
-        has_finish_reason = "finish_reason" in params
-        has_min_tokens = "min_completion_tokens" in params
-
-        all_ok &= check("LLM 输出闸门", has_finish_reason and has_min_tokens,
-                       "detect_output_anomaly 已更新")
+        defined = load_all()
+        all_ok &= check(
+            f"{WORKFLOW_ID} 已定义",
+            WORKFLOW_ID in defined,
+            f"共 {len(defined)} 个工作流已注册",
+        )
     except Exception as exc:
-        all_ok &= check("LLM 输出闸门", False, str(exc))
+        all_ok &= check("工作流注册表可读", False, f"{type(exc).__name__}: {exc}")
+    print()
 
-    # 检查 run_baseline.py 是否有 --retry-failed
-    run_baseline = REPO_ROOT / "scripts/run_baseline.py"
-    if run_baseline.exists():
-        content = run_baseline.read_text(encoding="utf-8")
-        has_retry = "--retry-failed" in content
-        all_ok &= check("自动重跑", has_retry, "run_baseline.py 已更新")
-    else:
-        all_ok &= check("自动重跑", False, "run_baseline.py 不存在")
+    # 5. v3.3 改进是否在位
+    print("5. v3.3 改进")
+    try:
+        from inspect import signature  # noqa: PLC0415
+
+        from customer_profile.execution.llm import detect_output_anomaly  # noqa: PLC0415
+
+        params = set(signature(detect_output_anomaly).parameters)
+        ok = {"finish_reason", "min_completion_tokens"} <= params
+        all_ok &= check("LLM 输出闸门", ok, "detect_output_anomaly 已扩参")
+    except Exception as exc:
+        all_ok &= check("LLM 输出闸门", False, f"{type(exc).__name__}: {exc}")
+
+    try:
+        import sqlite3  # noqa: PLC0415
+
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from customer_profile.persistence.store import _ADDED_COLUMNS  # noqa: PLC0415
+
+        added = {name for name, _ in _ADDED_COLUMNS.get("request_attempts", ())}
+        ok = {"anomaly", "finish_reason"} <= added
+        all_ok &= check("attempts 补列已登记", ok, f"migration 列：{sorted(added)}")
+    except Exception as exc:
+        all_ok &= check("attempts 补列已登记", False, f"{type(exc).__name__}: {exc}")
     print()
 
     # 6. 输出目录
     print("6. 输出目录")
     out_dir = REPO_ROOT / "docs/business_opt01_v3"
-    ok = out_dir.exists()
-    all_ok &= check("输出目录", ok, str(out_dir.relative_to(REPO_ROOT)))
-
+    all_ok &= check("输出目录", out_dir.is_dir(), str(out_dir.relative_to(REPO_ROOT)))
     final_dest = out_dir / "baseline-v3.3-final"
     if final_dest.exists():
-        check("最终保存位置", False, f"{final_dest.relative_to(REPO_ROOT)} 已存在（将备份）")
+        check("最终保存位置", True, "已存在旧结果，跑批时会先备份")
     else:
-        check("最终保存位置", True, f"{final_dest.relative_to(REPO_ROOT)} 不存在（就绪）")
+        check("最终保存位置", True, "不存在（就绪）")
     print()
 
     # 总结
     print("=" * 60)
     if all_ok:
-        print("✓ 环境检查通过，可以开始跑批")
+        print("[OK] 环境检查通过，可以开始跑批")
         print()
         print("下一步:")
-        print("  1. 小批量测试: python scripts/run_baseline.py --limit 1 ...")
-        print("  2. 全量跑批:   python scripts/run_v3.3_baseline_full.py")
+        print("  python scripts/run_v3.3_baseline_full.py")
     else:
-        print("⚠ 环境检查发现问题，请先解决")
-        print()
-        print("常见问题:")
-        print("  - 缺少依赖: pip install -e .")
-        print("  - 代码未更新: git pull")
-        print("  - 未提交改动: git commit / git stash")
+        print("[FAIL] 环境检查发现问题，请先解决")
     print("=" * 60)
 
     return 0 if all_ok else 1
