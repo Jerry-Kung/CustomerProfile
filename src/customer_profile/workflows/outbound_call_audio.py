@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..definitions import WorkflowDef
-from .audio_flow import AudioFlow, build_audio_workflow
+from .audio_flow import AudioFlow, build_audio_workflow, build_pure_workflow
 
 WORKFLOW_ID = "outbound_call_audio"
 DISPLAY_NAME = "外呼录音信息提取"
@@ -36,6 +36,18 @@ FLOW = AudioFlow(
 )
 
 WORKFLOW: WorkflowDef = build_audio_workflow(FLOW)
+"""迁移前的定义基线（18 节点）。**基线臂在用，逐字不得改动。**"""
+
+PURE_WORKFLOW_ID = "outbound_call_audio_pure"
+"""v2 纯识别变体的工作流 ID。见 :func:`customer_profile.workflows.audio_flow.build_pure_workflow`。"""
+
+PURE_WORKFLOW: WorkflowDef = build_pure_workflow(
+    FLOW, pure_flow_id=PURE_WORKFLOW_ID, pure_display_name=f"{DISPLAY_NAME}（纯识别）"
+)
+"""v2 纯识别变体（15 节点、零 LLM）。事实账本管线的「外呼录音信息提取」在用它。"""
+
+SUBWORKFLOWS: tuple[WorkflowDef, ...] = (PURE_WORKFLOW,)
+"""本模块导出的子工作流。``load_all`` 会把它们一并注册。"""
 
 
 def default_inputs(customer_data: str, phone_number: str = "") -> dict[str, Any]:

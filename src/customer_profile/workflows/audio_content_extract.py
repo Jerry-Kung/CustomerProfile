@@ -38,6 +38,7 @@ VALIDITY_BRANCH = "1773215096599"
 NO_CONTENT_TEMPLATE = "1776152619357"
 END_VALID = "1773127141209"
 END_INVALID = "1773216279486"
+END_PURE = "1773112560828"
 
 TRUE_BRANCH = "true"
 ELSE_BRANCH = "false"
@@ -50,8 +51,39 @@ def template_name(node_id: str) -> str:
     return f"{SLUG}__{node_id}"
 
 
-WORKFLOW = WorkflowDef(
-    workflow_id=WORKFLOW_ID,
+PURE_WORKFLOW_ID = "audio_content_extract_pure"
+"""v2 专用的纯识别变体：只跑 ASR 逐字识别，不做校对与有效性判断。
+
+**为什么要一个变体而不是就地删节点**：本模块被基线臂的
+``test_drive_audio`` / ``outbound_call_audio`` 复用（``audio_flow`` 的
+``AUDIO_EXTRACT_SINGLE`` / ``AUDIO_EXTRACT_IN_ITERATION``）。就地删除两个 LLM 节点会让
+基线臂的图结构改变，``definition_hash`` 漂移，AB 实验的可比性判据失效。变体作为**新的
+workflow_id** 注册，与原件并存，回退只需改父图里的一个常量。
+
+产物形状与原件对齐（同样交出 ``auc_result``），差别只在：
+
+- **不做校对**：``file_content`` 直接给逐字原文，而不是「LLM 识别结果校对」的产物；
+- **不做有效性判断**：因此不产出 ``is_valid``（那正是被关闭的那个节点的职责），
+  也不会在内容判为无效时把原文替换成一句固定提示。
+"""
+
+
+def build_workflow(pure_recognition: bool = False) -> WorkflowDef:
+    """构造录音抽取定义。
+
+    ``pure_recognition=False``（缺省）产出迁移前的定义基线：12 节点 / 11 边，
+    「识别结果提取 → LLM 校对 → LLM 有效性判断 → 判断结果提取 → 条件分支 → 两支 end」。
+    这一支是**基线臂**在用的，逐字不得改动。
+
+    ``pure_recognition=True`` 产出 v2 的纯识别变体：只保留
+    ``start → 提交 → 取任务参数 → 查询 → 识别结果提取 → end``，**零 LLM 节点**。
+    它交出的 ``auc_result`` 与原件逐字节相同（同一个「识别结果提取」节点产出），
+    因此关闭那两个 LLM 节点**不改变任何被消费的产出**。
+    """
+    if pure_recognition:
+        return _build_pure_workflow()
+    return WorkflowDef(
+        workflow_id=WORKFLOW_ID,
     display_name=DISPLAY_NAME,
     source_dsl=DISPLAY_NAME,
     entries=(START,),
@@ -184,8 +216,12 @@ WORKFLOW = WorkflowDef(
             inputs={
                 "is_valid": (VALIDITY_CODE, "is_valid"),
                 "file_content": (PROOFREAD_LLM, "text"),
+                # 逐字原文（ASR 六字段数组文本）。取值自「识别结果提取」，**不经校对 LLM**。
+                # 供 L0 记录层留存原文用：`file_content` 是校对后的产物，且内容判为无效时
+                # 会被替换成一句固定提示，逐字原话在那条路径上会整个丢失。
+                "auc_result": (EXTRACT_RESULT, "auc_result"),
             },
-            outputs=("is_valid", "file_content"),
+            outputs=("is_valid", "file_content", "auc_result"),
         ),
         make_node(
             END_INVALID,
@@ -195,11 +231,115 @@ WORKFLOW = WorkflowDef(
             inputs={
                 "is_valid": (VALIDITY_CODE, "is_valid"),
                 "file_content": (NO_CONTENT_TEMPLATE, "output"),
+                # 同上：内容判无效也要留下原文，否则「输入有录音、输出却说无录音」无法纠正。
+                "auc_result": (EXTRACT_RESULT, "auc_result"),
             },
-            outputs=("is_valid", "file_content"),
+            outputs=("is_valid", "file_content", "auc_result"),
         ),
     ),
-)
+    )
+
+
+def _build_pure_workflow() -> WorkflowDef:
+    """纯识别变体：零 LLM 节点，只产出逐字原文。
+
+    ``file_content`` 与 ``auc_result`` 同源（都取「识别结果提取」的产出）：
+    前者供 ``audio_flow`` 的父节点消费（它按 ``file_content`` 取录音正文），
+    后者供事实账本管线消费（它按 ``auc_result`` 取逐字原文）。
+    **两者在此处指向同一份逐字文本**，正是「关掉的是压缩、不是产出」的体现。
+    """
+    return WorkflowDef(
+        workflow_id=PURE_WORKFLOW_ID,
+        display_name=f"{DISPLAY_NAME}（纯识别）",
+        source_dsl=DISPLAY_NAME,
+        entries=(START,),
+        exits=(END_PURE,),
+        outputs={"file_content": "file_content", "auc_result": "auc_result"},
+        nodes=(
+            make_node(
+                START,
+                "用户输入",
+                "start",
+                variables=("file_url",),
+                required_file_url=True,
+            ),
+            make_node(
+                SUBMIT,
+                "AUC语音大模型任务提交",
+                "http-request",
+                after=(START,),
+                outputs=("body", "status"),
+                **{
+                    "@service": "auc",
+                    "@method": "post",
+                    "@path": "/submit_analyze",
+                    "@headers": {"Content-Type": "application/json"},
+                    "@body_template": '{ "file_url": {{#1773112560827.file_url#}} }',
+                    "@ssl_verify": False,
+                    "@outputs": {"body": "$text", "status": "$status"},
+                },
+            ),
+            make_node(
+                PARSE_TASK,
+                "获取任务参数",
+                "code",
+                after=(SUBMIT,),
+                inputs={"body": (SUBMIT, "body")},
+                outputs=("task_id", "x_tt_logid"),
+                function=f"{SHARED_CODE_MODULE}:parse_task_params",
+            ),
+            make_node(
+                QUERY,
+                "轮询语音识别结果",
+                "http-request",
+                after=(PARSE_TASK,),
+                outputs=("body", "status"),
+                **{
+                    "@service": "auc",
+                    "@method": "post",
+                    "@path": "/query_analyze",
+                    "@headers": {"Content-Type": "application/json"},
+                    "@body_template": (
+                        '{"task_id": {{#17731967052740.task_id#}},'
+                        ' "x_tt_logid": {{#17731967052740.x_tt_logid#}}}'
+                    ),
+                    "@retry_max": 5,
+                    "@ssl_verify": False,
+                    "@outputs": {"body": "$text", "status": "$status"},
+                },
+            ),
+            make_node(
+                EXTRACT_RESULT,
+                "识别结果提取",
+                "code",
+                after=(QUERY,),
+                inputs={"body": (QUERY, "body")},
+                outputs=("auc_result", "poll_count"),
+                function=f"{SHARED_CODE_MODULE}:extract_auc_result",
+            ),
+            make_node(
+                END_PURE,
+                "输出",
+                "end",
+                after=(EXTRACT_RESULT,),
+                inputs={
+                    "file_content": (EXTRACT_RESULT, "auc_result"),
+                    "auc_result": (EXTRACT_RESULT, "auc_result"),
+                },
+                outputs=("file_content", "auc_result"),
+            ),
+        ),
+    )
+
+
+WORKFLOW: WorkflowDef = build_workflow(False)
+"""迁移前的定义基线（12 节点）。**基线臂在用，逐字不得改动。**"""
+
+PURE_WORKFLOW: WorkflowDef = build_workflow(True)
+"""v2 纯识别变体（6 节点、零 LLM）。事实账本管线的录音链在用它。"""
+
+SUBWORKFLOWS: tuple[WorkflowDef, ...] = (PURE_WORKFLOW,)
+"""本模块导出的子工作流。``load_all`` 会把它们一并注册。"""
 
 
 def default_inputs(file_url: str) -> dict[str, Any]:
