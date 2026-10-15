@@ -494,6 +494,26 @@ async def run_batch(args: argparse.Namespace) -> int:
         log_path,
         f"batch {batch_id}: {len(queue)} of {len(snapshot_phones)} phones queued",
     )
+    # v3.3+: 臂选择校验（跑批可靠性 A5）
+    if batch_id.startswith("A-") or (batch_dir.name.startswith("A-")):
+        if args.workflow_id == ENTRY_WORKFLOW:
+            _log(log_path, "WARNING: batch ID starts with 'A-' (experimental) but workflow_id is baseline")
+            _log(log_path, f"         Expected experimental workflow, got {args.workflow_id}")
+            _log(log_path, "         Use --workflow-id customer_profile_pipeline for experimental arm")
+    _log(log_path, f"workflow_id = {args.workflow_id}")
+
+    # v3.3+: 转写缓存检查（跑批可靠性 A5）
+    if transcript_cache.root.is_dir():
+        existing_count = sum(1 for _ in transcript_cache.root.rglob("*.json"))
+        if existing_count == 0 and len(queue) > 0:
+            # 有输入待跑但缓存目录为空,可能是缓存路径配错
+            _log(log_path, f"INFO: transcript cache dir exists but empty (0 cached files)")
+            _log(log_path, f"      cache dir: {transcript_cache.root}")
+        else:
+            _log(log_path, f"transcript cache: {existing_count} existing files at {transcript_cache.root}")
+    else:
+        _log(log_path, f"transcript cache: dir does not exist, will be created: {transcript_cache.root}")
+
     if not queue:
         # 没有任何号码要跑。**这条路径必须零写入**：对已完成的批次重跑同一个 `--only`
         # 会走到这里，此时覆盖任何文件都会把该批次的既有记录改掉——批次目录是证据。
@@ -589,6 +609,65 @@ async def run_batch(args: argparse.Namespace) -> int:
 
     ordered = merge_results(batch_dir, list(results.values()))
     written = write_summary(batch_dir, ordered, batch_id)
+
+    # v3.3+: 失败案自动重跑（跑批可靠性 A2）
+    retry_round = 0
+    while retry_round < args.retry_failed:
+        failed_phones = [item.phone for item in ordered if item.status != "succeeded"]
+        if not failed_phones:
+            break
+        retry_round += 1
+        _log(log_path, f"RETRY round {retry_round}/{args.retry_failed}: {len(failed_phones)} failed phones")
+        _log(log_path, f"waiting 60s before retry...")
+        await asyncio.sleep(60)
+
+        # 重建 service（原 service 已在 finally 里关闭）
+        service = await build_service(
+            settings,
+            max_active_nodes=GATE_FOR_CONCURRENCY,
+            transcript_cache=transcript_cache,
+        )
+        results.clear()
+        try:
+            cleaned = await service.store.mark_running_as_interrupted()
+            if cleaned:
+                _log(log_path, f"marked {cleaned} leftover running run(s) as interrupted")
+
+            semaphore = asyncio.Semaphore(args.concurrency)
+
+            async def worker(phone: str) -> None:
+                async with semaphore:
+                    _log(log_path, f"start {phone}")
+                    item = await run_one(
+                        service,
+                        phone,
+                        timeout=args.per_phone_timeout,
+                        policy=policy,
+                        batch_dir=batch_dir,
+                        workflow_id=args.workflow_id,
+                    )
+                    results[phone] = item
+                    _log(
+                        log_path,
+                        f"done  {phone}: {item.status} wall={item.wall_ms}ms "
+                        f"nodes={(item.export_summary or {}).get('node_count', 0)} "
+                        f"attempts={(item.export_summary or {}).get('attempt_count', 0)}",
+                    )
+                    write_summary(batch_dir, merge_results(batch_dir, list(results.values())), batch_id)
+
+            await asyncio.gather(*(worker(phone) for phone in failed_phones))
+        finally:
+            await service.aclose()
+            if service.store is not None:
+                service.store.close()
+
+        ordered = merge_results(batch_dir, list(results.values()))
+        written = write_summary(batch_dir, ordered, batch_id)
+        recovered = sum(1 for phone in failed_phones if any(
+            item.phone == phone and item.status == "succeeded" for item in ordered
+        ))
+        _log(log_path, f"RETRY round {retry_round} done: {recovered}/{len(failed_phones)} recovered")
+
     leftovers = leftover_temp_files(batch_dir / "runs")
     # 历史保留：`queue_this_run` 是**本次调用**入队的号码，`runs_all` 是累计。
     # 补跑时把上一轮的号码抹掉，会让「这批一共跑过什么」只取决于最后一次调用。
@@ -605,6 +684,7 @@ async def run_batch(args: argparse.Namespace) -> int:
             "bytes_written": batch_bytes_on_disk(batch_dir),
             "leftover_temp_files": [str(p) for p in leftovers],
             "transcript_cache": transcript_cache.asdict(),
+            "retry_rounds": retry_round,
         }
     )
     dump_json(manifest_path, manifest)
@@ -642,6 +722,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume", dest="resume", action="store_true", default=True)
     parser.add_argument("--no-resume", dest="resume", action="store_false")
     parser.add_argument(
+        "--retry-failed", type=int, default=0, metavar="N",
+        help="跑完后自动重排失败案 N 轮（默认 0 不重跑），每轮退避 60 秒",
+    )
+    parser.add_argument(
         "--max-inline-bytes", type=int, default=ExportPolicy().max_inline_bytes,
         help="单条节点输出超过此字节数就存摘要与哈希",
     )
@@ -666,6 +750,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if not 1 <= args.concurrency <= MAX_CONCURRENCY:
         raise SystemExit(f"--concurrency 须在 1..{MAX_CONCURRENCY} 之间，实际 {args.concurrency}")
+    if args.retry_failed < 0 or args.retry_failed > 10:
+        raise SystemExit(f"--retry-failed 须在 0..10 之间，实际 {args.retry_failed}")
     # 开跑前把工作流 ID 判掉：拼错一个字母就会在跑完几十个号码之后才以「子工作流未注册」
     # 暴露，或者更糟——静默跑成另一张图。这里只做「能不能取到定义」的检查，不建服务、不出网。
     from customer_profile.workflows import load_all  # noqa: PLC0415

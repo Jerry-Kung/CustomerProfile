@@ -68,6 +68,8 @@ def detect_output_anomaly(
     text: str | None,
     reasoning_content: str | None = None,
     usage: Usage | None = None,
+    finish_reason: str | None = None,
+    min_completion_tokens: int | None = None,
 ) -> str | None:
     """判定输出是否中途异常截断，返回原因码；正常则返回 ``None``。
 
@@ -78,6 +80,13 @@ def detect_output_anomaly(
     - ``unfinished_think_block``：``text`` 以 ``<think>`` 开头但不含 ``</think>``；
     - ``thinking_only_suspected``：``reasoning_content`` 为空、``text`` 以 ``<think>``
       开头且长度 < 500。
+
+    v3.3+ 新增（对应跑批可靠性 A3）：
+
+    - ``suspicious_finish_reason``：``finish_reason`` 不是 ``stop`` 且不是 ``None``
+      （``length`` / ``content_filter`` / 其它异常终止原因）；
+    - ``output_too_short``：指定了 ``min_completion_tokens`` 且实际 ``completion_tokens``
+      低于该阈值——用于「输入很大、输出不该很少」的节点。
 
     ``usage`` 缺失（``None`` 或三项皆为 ``None``）不触发 ``usage_zero``——没有依据时
     不能把「未知」当成异常，也不能当成 0。
@@ -99,6 +108,19 @@ def detect_output_anomaly(
         and len(stripped) < _THINKING_ONLY_MIN_CHARS
     ):
         return "thinking_only_suspected"
+
+    # v3.3+: 检查 finish_reason
+    if finish_reason is not None and finish_reason not in ("stop", "end_turn"):
+        # length = 达到 max_tokens 被截断
+        # content_filter = 内容过滤触发
+        # tool_calls / function_call = 工具调用（本项目不使用）
+        # 其它值都是异常终止
+        return f"suspicious_finish_reason: {finish_reason}"
+
+    # v3.3+: 输出量下限闸门
+    if min_completion_tokens is not None and usage.completion_tokens is not None:
+        if usage.completion_tokens < min_completion_tokens:
+            return f"output_too_short: {usage.completion_tokens} < {min_completion_tokens}"
 
     return None
 
@@ -272,6 +294,7 @@ class LlmAttempt:
     model: str | None = None
     provider_request_id: str | None = None
     anomaly: str | None = None
+    finish_reason: str | None = None
     replayed: bool = False
     """是否来自固定响应回放。回放结果不算真实模型效果。"""
 
@@ -292,6 +315,7 @@ class LlmAttempt:
             "model": self.model,
             "provider_request_id": self.provider_request_id,
             "anomaly": self.anomaly,
+            "finish_reason": self.finish_reason,
             "replayed": self.replayed,
         }
 
@@ -515,8 +539,12 @@ class LlmClient:
             attempt.usage = Usage.from_raw(frame.get("usage"))
             attempt.model = frame.get("model", payload.get("model"))
             attempt.duration_ms = _ms(started)
+            attempt.finish_reason = frame.get("finish_reason")
             attempt.anomaly = detect_output_anomaly(
-                attempt.response_text, attempt.reasoning_content, attempt.usage
+                attempt.response_text,
+                attempt.reasoning_content,
+                attempt.usage,
+                attempt.finish_reason,
             )
             return attempt
 
@@ -574,8 +602,12 @@ class LlmClient:
         attempt.reasoning_content = (
             message.get("reasoning_content") or message.get("reasoning")
         )
+        attempt.finish_reason = choice.get("finish_reason")
         attempt.anomaly = detect_output_anomaly(
-            attempt.response_text, attempt.reasoning_content, attempt.usage
+            attempt.response_text,
+            attempt.reasoning_content,
+            attempt.usage,
+            attempt.finish_reason,
         )
         return attempt
 

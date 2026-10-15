@@ -216,6 +216,8 @@ class RunTracker:
                 usage=usage,
                 provider_request_id=getattr(attempt, "provider_request_id", None),
                 replayed=attempt.replayed,
+                anomaly=getattr(attempt, "anomaly", None),
+                finish_reason=getattr(attempt, "finish_reason", None),
             )
         except Exception as exc:
             self._report("attempt_recorded", getattr(node_ref, "node_id", "?"), exc)
