@@ -1,12 +1,13 @@
 # 部署与运行指南（MVP）
 
-本文说明如何以**微服务方式**启动 Customer Profile 后端：HTTP API 与异步 Worker 分离部署，数据库与 Dify/擎天使用外部环境变量配置。
+本文说明如何以**微服务方式**启动 Customer Profile 后端：HTTP API 与异步 Worker 分离部署，数据库、Dify/擎天与独立画像生成服务通过环境变量配置。
 
 ## 1. 前置条件
 
 - Python **3.11+**（本地运行）或 **Docker / Docker Compose**（容器运行）
 - 可访问的 **MySQL 8.x**，并已创建业务库（如 `customer_profile`）
 - 可访问的 **Dify 或擎天**（由 `WORKFLOW_PLATFORM` 选择）
+- 统一 Compose 还需要可访问的画像生成服务，配置 `PROFILE_RUNNER_BASE_URL_PRODUCTION`。
 - 数据库迁移：**docker compose 启动时由独立的 `migrate` 容器自动执行**（见 §4 / §5）；本地裸跑可手动执行 `customer-profile-migrate`。
 
 ## 2. 环境变量
@@ -22,7 +23,7 @@ cp .env.example .env
 若未安装依赖，请先执行：`pip install -e .` 或 `pip install python-dotenv`。
 
 必填项见 `.env.example`：`MYSQL_*`，以及所选平台对应的 `DIFY_*` 或
-`QINGTIAN_*`。可选：
+`QINGTIAN_*`；统一 Compose 还需填写 `PROFILE_RUNNER_BASE_URL_PRODUCTION`。可选：
 
 | 变量 | 说明 | 默认 |
 |------|------|------|
@@ -76,12 +77,13 @@ Worker 现在把“资源池”和“具体工作流目标”分开：
   另外两种模式只处理已经绑定到本目标的恢复任务。
 - `WORKER_TASK_TYPES` / `WORKER_WORK_ENVS`：声明该目标能处理的任务类型和环境。
 
-当前 Docker Compose 测试拓扑默认启动一条本地目标和一条商用目标：
+当前 Docker Compose 统一启动本地、商用和 Runner 三个目标，读取同一份 `.env`：
 
 | 服务 | 目标 ID | 资源池 | 任务类型 |
 |------|---------|--------|----------|
 | `worker` | `local-default` | `local` | 客户画像、邀请策略 |
 | `commercial-worker` | `commercial-default` | `commercial` | 客户画像 |
+| `profile-runner-worker` | `profile-runner-production` | `local` | 生产环境客户画像 |
 
 商用目标配置自己的 TEST/PRODUCTION AppKey：
 
@@ -225,15 +227,15 @@ uvicorn src.app.asgi:app --host 0.0.0.0 --port 8000
 在项目根目录：
 
 ```bash
-# 准备 .env（含 MYSQL_ / DIFY_ 等）
-docker compose build
-docker compose up -d
+# 准备 .env（含 MYSQL_ / DIFY_ 或 QINGTIAN_，以及 PROFILE_RUNNER_BASE_URL_PRODUCTION）
+docker compose up -d --build
 ```
 
 - **api**：对外暴露 HTTP，默认映射本机 `18008` → 容器内 `18008`。
 - **worker**：本地 Worker，后台轮询 MySQL 队列并调用工作流。
-- **commercial-worker**：测试环境的一条商用工作流目标。
-- **migrate**：一次性容器，启动时扫 `db/migrations/*.sql` 并按文件名顺序全部执行（所有 SQL 已实现幂等，可放心重复执行）。`api` 和两个 Worker 通过 `depends_on: service_completed_successfully` 等它退出成功后再启动；任一迁移失败都会阻塞业务进程启动。MySQL 尚未就绪时 `migrate` 会自动重试（次数与间隔由 `MIGRATION_DB_WAIT_MAX_TRIES` / `MIGRATION_DB_WAIT_INTERVAL_MS` 控制，默认 30 次 × 2s）。
+- **commercial-worker**：一条商用工作流目标。
+- **profile-runner-worker**：独立画像生成服务的适配 Worker，只处理生产环境客户画像，默认并发 1；与其他服务统一启动。
+- **migrate**：一次性容器，启动时扫 `db/migrations/*.sql` 并按文件名顺序全部执行（所有 SQL 已实现幂等，可放心重复执行）。`api` 和三个 Worker 通过 `depends_on: service_completed_successfully` 等它退出成功后再启动；任一迁移失败都会阻塞业务进程启动。MySQL 尚未就绪时 `migrate` 会自动重试（次数与间隔由 `MIGRATION_DB_WAIT_MAX_TRIES` / `MIGRATION_DB_WAIT_INTERVAL_MS` 控制，默认 30 次 × 2s）。
 
 修改本机映射端口（例如改为 8080）：
 
@@ -255,6 +257,7 @@ docker compose up -d
 docker compose logs -f api
 docker compose logs -f worker
 docker compose logs -f commercial-worker
+docker compose logs -f profile-runner-worker
 ```
 
 同一份 Loguru 日志也会按服务写入宿主机 `./logs/`。文件名包含组件、Pod 名（非 K8s 环境为 `local`）和日期；stderr 与文件使用相同格式。
@@ -267,7 +270,7 @@ docker compose down
 
 ## 5. 数据库迁移
 
-**Docker Compose 部署下无需手动操作**：`docker compose up` 会先跑独立的 `migrate` 容器，扫描 `db/migrations/*.sql` 并按文件名顺序全部应用，成功退出后 `api` 和两个 Worker 才会启动。所有迁移文件都使用 `CREATE TABLE IF NOT EXISTS` 或 `information_schema` 检查实现幂等，每次启动重复执行都是安全的。
+**Docker Compose 部署下无需手动操作**：`docker compose up` 会先跑独立的 `migrate` 容器，扫描 `db/migrations/*.sql` 并按文件名顺序全部应用，成功退出后 `api` 和三个 Worker 才会启动。所有迁移文件都使用 `CREATE TABLE IF NOT EXISTS` 或 `information_schema` 检查实现幂等，每次启动重复执行都是安全的。
 
 如需单独触发（例如只想做迁移、不起业务进程）：
 
@@ -359,4 +362,4 @@ API_E2E_BASE_URL=http://127.0.0.1:8000 ./scripts/api_e2e_curl.sh
 
 ## 新增画像 Runner Worker
 
-将部分画像任务分流到独立生成服务时，参见 [Runner 接入与部署](profile-runner-integration.md)。复用现有 001–006 表结构与重试机制，无新增数据库迁移。
+`profile-runner-worker` 已合入根目录 `docker-compose.yml`，使用 `docker compose up -d --build` 与其他服务统一启动。配置、首次切换比例分流及旧独立项目迁移见 [Runner 接入与部署](profile-runner-integration.md)。复用现有 001–006 表结构与重试机制，无新增数据库迁移。

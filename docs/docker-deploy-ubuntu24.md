@@ -12,9 +12,10 @@
 | 组件 | 运行方式 | 是否进 Docker |
 |------|----------|----------------|
 | **本仓库 API** | `docker compose` 中的 `api` 服务 | ✅ |
-| **本仓库 Worker** | `worker`（本地）+ `commercial-worker`（商用） | ✅ |
+| **本仓库 Worker** | `worker`（本地）+ `commercial-worker`（商用）+ `profile-runner-worker`（画像生成服务适配） | ✅ |
 | **MySQL** | 业务数据库 | ❌ 默认**外部**（云 RDS 或自建机上的 MySQL） |
 | **Dify / 擎天** | 工作流引擎（由 `WORKFLOW_PLATFORM` 选择） | ❌ 默认**外部** |
+| **独立画像生成服务** | 由 `PROFILE_RUNNER_BASE_URL_PRODUCTION` 指定地址 | ❌ 默认**外部** |
 
 容器内的 **Worker** 需要能访问：
 
@@ -79,7 +80,8 @@ nano .env   # 或用 vim
 ```
 
 **必填**：`MYSQL_*`，以及 `WORKFLOW_PLATFORM` 所选平台对应的 Dify 或擎天变量。当前
-Compose 测试拓扑还需要一套独立的 `QINGTIAN_COMMERCIAL_API_KEY_*`。完整清单见
+Compose 在擎天模式下还需要一套独立的 `QINGTIAN_COMMERCIAL_API_KEY_*`，并必须填写
+画像生成服务地址 `PROFILE_RUNNER_BASE_URL_PRODUCTION`。完整清单见
 [部署快速上手](deploy-quickstart.md) §4。
 
 **Docker 下建议同时检查**：
@@ -105,7 +107,7 @@ Compose 测试拓扑还需要一套独立的 `QINGTIAN_COMMERCIAL_API_KEY_*`。�
 ## 4. 数据库迁移
 
 无需手工逐个执行 SQL。Compose 的 `migrate` 一次性服务会按文件名顺序执行全部幂等
-迁移（包括 005 重试状态和 006 目标路由），成功后 API 和两个 Worker 才会启动。
+迁移（包括 005 重试状态和 006 目标路由），成功后 API 和三个 Worker 才会启动。
 
 ---
 
@@ -114,8 +116,7 @@ Compose 测试拓扑还需要一套独立的 `QINGTIAN_COMMERCIAL_API_KEY_*`。�
 ```bash
 cd /opt/customer_profile_backend   # 项目根目录，含 Dockerfile 与 docker-compose.yml
 
-docker compose build
-docker compose up -d
+docker compose up -d --build
 ```
 
 查看状态与日志：
@@ -125,6 +126,7 @@ docker compose ps
 docker compose logs -f api
 docker compose logs -f worker
 docker compose logs -f commercial-worker
+docker compose logs -f profile-runner-worker
 ```
 
 健康检查（默认映射宿主机 **18008** 时）：

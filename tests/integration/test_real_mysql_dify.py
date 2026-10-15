@@ -21,20 +21,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _load_env_file(env_path: Path) -> None:
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        text = line.strip()
-        if not text or text.startswith("#") or "=" not in text:
-            continue
-        key, value = text.split("=", 1)
-        if key and key not in os.environ:
-            os.environ[key] = value
+ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(scope="module")
 def integration_context():
-    env_path = Path("d:/Huawei/Projects/swt_dfms/customer_profile_backend/.env.example")
-    _load_env_file(env_path)
     # Long-running workflows may take 10-15 minutes.
     os.environ["DIFY_STREAM_INIT_TIMEOUT_MS"] = "30000"
     os.environ["DIFY_POLL_INTERVAL_MS"] = "1000"
@@ -59,7 +50,7 @@ def integration_context():
 
 
 def _load_test_data() -> tuple[str, str, str]:
-    root = Path("d:/Huawei/Projects/swt_dfms/customer_profile_backend/tests/test_data")
+    root = ROOT / "tests" / "test_data"
     phone = (root / "customer_phonenumber.txt").read_text(encoding="utf-8").strip()
     return phone, str(root / "customer_wechat_homepage.jpg"), str(root / "customer_moment_homepage.jpg")
 
@@ -147,7 +138,7 @@ def test_dify_mysql_end_to_end_with_real_images(integration_context):
     dify_client: DifyClient = integration_context["dify_client"]
     logger: logging.Logger = integration_context["logger"]
     parser = WorkflowOutputParser(
-        schema_path=Path("d:/Huawei/Projects/swt_dfms/customer_profile_backend/contracts/customer-profile-output.schema.json")
+        schema_path=ROOT / "contracts" / "customer-profile-output.schema.json"
     )
 
     phone_base, wechat_img, moment_img = _load_test_data()

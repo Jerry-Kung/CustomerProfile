@@ -1,6 +1,8 @@
-# 将部分画像任务分流到 Runner Worker
+# 客户画像 Runner 与统一 Docker Compose 部署
 
 业务 `customer-profile-api` 继续向原 backend 的 `/v1/customer-profile/tasks` 提交任务。新增 Runner Worker 与擎天／Dify Worker 连接同一 MySQL 队列，只处理客户画像；邀约保留原流程。
+
+`profile-runner-worker` 已合入根目录的 `docker-compose.yml`，与 `api`、`worker`、`commercial-worker` 统一启动。画像生成服务本身仍是外部依赖，需要提前运行。
 
 本次只增加 Runner 适配和画像首次分流，复用现有 001–006 表结构。没有新增表、数据库迁移、批次收据、失败通知进程或回写补偿进程；提交、重复提交以及旧 Dify 的执行方式保持原行为。
 
@@ -41,36 +43,50 @@ PROFILE_RUNNER_CONCURRENCY=1
 PROFILE_RUNNER_TARGET_MODE=active
 ```
 
-画像服务与 backend 在同一台 Docker Compose 宿主机时，使用上例的 `host.docker.internal:18000`；新增 Compose 为此配置了 `host-gateway` 映射。部署在其他机器时，改用 Runner 容器可达的实际地址，不要使用 `127.0.0.1`。沿用原 `MYSQL_*`，确保连接同一个数据库且从 Runner 容器内可访问。各 Compose 项目默认网络独立，旧项目中的 MySQL 服务名不会自动在新项目解析；使用可达地址或显式共享网络。原 `.env` 的 `WORKFLOW_PLATFORM` 继续保持擎天或 Dify；新增 Compose 只为 Runner 容器覆盖平台、画像任务范围及生产环境。
+画像服务与 backend 在同一台 Docker Compose 宿主机时，使用上例的 `host.docker.internal:18000`；Runner 服务已配置 `host-gateway` 映射。部署在其他机器时，改用 Runner 容器可达的实际地址，不要使用 `127.0.0.1`。沿用原 `MYSQL_*`，确保连接同一个数据库且从容器内可访问。三个 Worker 共用根目录的 `.env`；其中的 `WORKFLOW_PLATFORM` 继续保持擎天或 Dify，Compose 只为 Runner 容器覆盖平台、画像任务范围及生产环境。
 
 生成服务目前串行执行画像，先保持 adapter 并发 1。增加 adapter 并发主要会增加生成服务内部排队量；不要直接增加共享 SQLite 的生成 Worker 副本。
 
-## Docker Compose 发布
+## Docker Compose 统一启动
 
-代码提交并推送后才能在服务器获取。Dockerfile 按构建目标平台选取基础镜像；服务器为 AMD64 时应构建 AMD64 镜像。K8s 的 `deploy/k8s/build-arm64-image.sh` 已显式指定 `--platform linux/arm64`。沿用原 backend 的 Compose 项目名、端口、卷、旧工作流密钥和目标身份。
-
-1. 拉取新代码，添加配置，暂时保持所有组件 `PROFILE_ROUTING_MODE=parallel`。
-2. 构建新镜像，更新全部旧画像 Worker，保留原有重试配置与身份；backend API 不需要更换镜像。沿用原迁移已完成 001–006 的数据库，本次没有新迁移要运行；服务更新使用 `--no-deps` 避免启动旧迁移容器。
-3. 用独立 `compose.profile-runner.yml` 启动新增 Worker，不与原 Compose 文件叠加，不发布端口。
-4. 所有画像 Worker 都更新后，短暂停止画像 Worker，统一切换 `weighted` 配置，再重建启动。新提交继续留在原队列；共享画像与邀约的 Worker 暂停期间，邀约也会短暂等待。
-5. 验证原画像、邀约及新服务的生成回写。核对启动日志中的平台和分流配置，并查询任务表中的执行目标与状态；领取原因保存在重试尝试表中，不是当前日志输出字段。
-
-在 backend 项目目录，新增 Worker 的命令逐条执行：
+在包含 `docker-compose.yml` 的 backend 项目根目录准备好 `.env` 后，一条命令统一构建并启动：
 
 ```bash
-docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml build
-docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml up -d
-docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml ps
-docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml logs --tail=100 profile-runner-worker
+docker compose up -d --build
 ```
 
-原项目按实际项目名与服务名更新全部旧画像 Worker：
+Compose 会先运行 `migrate`，迁移成功后启动 `api`、`worker`、`commercial-worker` 和 `profile-runner-worker`。已有数据库会重新检查幂等的 001–006 迁移，本次接入没有新增迁移。Runner 不发布端口，与旧 Worker 共用队列和日志目录。
+
+线上沿用原 backend 的 Compose 项目名、端口、卷、旧工作流密钥和目标身份。若原部署显式使用了 `-p`，下面所有 backend 命令也要带相同的 `-p`，例如 `docker compose -p "$CP_BACKEND_PROJECT" up -d --build`。代码提交并推送后，服务器才能拉取到本次配置修改。
+
+查看整组服务和 Worker 日志：
 
 ```bash
-docker compose -p "$CP_BACKEND_PROJECT" -f docker-compose.yml up -d --build --no-deps worker commercial-worker
+docker compose ps
+docker compose logs --tail=100 worker commercial-worker profile-runner-worker
 ```
 
-配置调整后，先停止所有参与画像的 Worker，再分别用 `up -d --no-deps --force-recreate` 重建原项目的画像 Worker 和新增 Worker。保留原业务 API 的 `REMOTE_API_URL`，它继续指向 backend 任务接口。
+首次从不支持比例分流的旧版本升级时，先保持 `PROFILE_ROUTING_MODE=parallel` 统一更新全部画像 Worker。旧 Dify 在途任务完成后，停止三个画像 Worker，再在共享 `.env` 中切换为 `weighted`，统一重建：
+
+```bash
+docker compose stop worker commercial-worker profile-runner-worker
+# 编辑 .env，设置 PROFILE_ROUTING_MODE=weighted 以及所需比例
+docker compose up -d --no-deps --force-recreate worker commercial-worker profile-runner-worker
+```
+
+新提交继续留在原队列；共享画像与邀约的 Worker 暂停期间，邀约也会短暂等待。保留业务 API 的 `REMOTE_API_URL`，它继续指向 backend 任务接口。核对启动日志中的平台和分流配置，领取原因保存在重试尝试表中。
+
+## 从旧独立 Runner 项目迁移
+
+如果此前已经使用 `customer-profile-runner-adapter` 独立 Compose 项目运行 Runner，需要一次性将它迁到原 backend 项目。若旧 Runner 使用独立环境文件，先把 Runner 配置合入 backend 的 `.env`，保留 `MYSQL_*`、目标 ID `profile-runner-production` 和目标 revision。
+
+更新代码后，在 backend 目录使用统一配置定位并停止旧项目里的 Runner 容器：
+
+```bash
+docker compose -p customer-profile-runner-adapter -f docker-compose.yml stop profile-runner-worker
+```
+
+确认旧 Runner 已停止后，沿用原 backend 项目名执行上面的 `docker compose up -d --build`。持久化的运行 ID 仍由相同目标恢复；以后所有服务统一启停，不再使用独立 Runner Compose 文件。
 
 ## 构建时指定基础镜像和 pip 源
 
@@ -84,19 +100,10 @@ curl -I --connect-timeout 5 --max-time 10 https://m.daocloud.io/v2/
 
 带有 `docker-distribution-api-version: registry/2.0` 和 Bearer 认证头的 401 是正常认证响应，说明入口可访问；具体镜像能否拉取仍由后续构建确认。参考 [DaoCloud 官方使用说明](https://github.com/DaoCloud/public-image-mirror)。
 
-代码更新后，在原 backend 项目目录构建旧 Worker：
+Dockerfile 按构建目标平台选取基础镜像；服务器为 AMD64 时应构建 AMD64 镜像。在 backend 项目目录统一构建全部服务：
 
 ```bash
-docker compose -p "$CP_BACKEND_PROJECT" -f docker-compose.yml build \
-  --build-arg PYTHON_BASE_IMAGE=m.daocloud.io/docker.io/library/python:3.12-slim \
-  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
-  worker commercial-worker
-```
-
-新增 Worker 使用相同构建参数：
-
-```bash
-docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml build \
+docker compose build \
   --build-arg PYTHON_BASE_IMAGE=m.daocloud.io/docker.io/library/python:3.12-slim \
   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ```
@@ -104,15 +111,14 @@ docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml 
 启动 Runner 前，用一次性容器验证配置的画像服务地址；输出应为 `200`，且不会领取画像任务：
 
 ```bash
-docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml run --rm --no-deps --pull never profile-runner-worker \
+docker compose run --rm --no-deps --pull never profile-runner-worker \
   python -c 'import os, urllib.request; url = os.environ["PROFILE_RUNNER_BASE_URL_PRODUCTION"].rstrip("/") + "/health"; print(urllib.request.urlopen(url, timeout=10).status)'
 ```
 
 构建成功后，启动时沿用已经生成的镜像，避免再次使用默认构建参数：
 
 ```bash
-docker compose -p "$CP_BACKEND_PROJECT" -f docker-compose.yml up -d --no-build --no-deps --force-recreate worker commercial-worker
-docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml up -d --no-build --force-recreate profile-runner-worker
+docker compose up -d --no-build --force-recreate
 ```
 
 该方式直接指定镜像地址，不需要修改服务器全局 Docker 配置或重启 Docker。构建完成后可用 `docker image inspect --format '{{.Os}}/{{.Architecture}}' 镜像名` 核对平台；本次 AMD64 服务器应输出 `linux/amd64`。
@@ -157,11 +163,10 @@ PROFILE_ROUTING_MODE=parallel
 PROFILE_RUNNER_TARGET_MODE=draining
 ```
 
-先重建 Runner，再更新全部旧画像 Worker；旧 Dify 在途任务应先完成：
+旧 Dify 在途任务完成后，在同一项目中统一重建三个 Worker：
 
 ```bash
-docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml up -d --no-deps --force-recreate profile-runner-worker
-docker compose -p "$CP_BACKEND_PROJECT" -f docker-compose.yml up -d --no-deps --force-recreate worker commercial-worker
+docker compose up -d --no-deps --force-recreate worker commercial-worker profile-runner-worker
 ```
 
 确认 Runner 绑定的未完成任务为 0；出现 SUBMIT_UNKNOWN、RUN_STALLED 或 REQUIRES_RECONCILIATION 的任务先核对远端结果，不能直接换平台重建运行。
@@ -176,7 +181,7 @@ WHERE workflow_target_id = 'profile-runner-production'
 处理完已有运行后停止新增 Worker：
 
 ```bash
-docker compose -p customer-profile-runner-adapter -f compose.profile-runner.yml stop profile-runner-worker
+docker compose stop profile-runner-worker
 ```
 
 只将比例改为 0 仍允许等待超时接手，停用新任务领取应使用 draining。配置回滚无需恢复数据库，也无需更新两个 API。

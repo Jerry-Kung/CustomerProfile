@@ -1,14 +1,18 @@
-.git
-.gitignore
-.pytest_cache
-__pycache__
-*.pyc
-.venv
-venv
-*.egg-info
-tests
-docs
-.env
-logs
-*.md
+# Only inputs used by the backend Dockerfile belong in the build context.
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
 !README.md
+!src/
+!src/**
+!contracts/
+!contracts/**
+!db/
+!db/**
+
+# Local Python and OS artifacts can also live under allowed directories.
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/.DS_Store

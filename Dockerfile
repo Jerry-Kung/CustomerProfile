@@ -9,25 +9,14 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app
 
-# 优化方案：
-# 1. 先复制 pyproject.toml，从中提取并安装第三方依赖（这层会被缓存）
-# 2. 再复制源码并安装项目本身
-
+# Install dependencies from the package metadata before copying application code.
+# This layer stays cached when only source files change.
 COPY pyproject.toml ./
 
 ARG PIP_INDEX_URL=https://pypi.org/simple
 
-# 升级 pip，然后安装第三方依赖（从 pyproject.toml 中提取）
-RUN pip install --no-cache-dir --upgrade pip --index-url "${PIP_INDEX_URL}" \
-    && pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" \
-        "fastapi>=0.115.0" \
-        "httpx>=0.28.0" \
-        "loguru>=0.7.3" \
-        "mysql-connector-python>=9.4.0" \
-        "PyYAML>=6.0.1" \
-        "python-multipart>=0.0.9" \
-        "uvicorn>=0.31.0" \
-        "python-dotenv>=1.0.1"
+RUN python -m pip install --no-cache-dir --upgrade pip --index-url "${PIP_INDEX_URL}" \
+    && python -c 'import pathlib, subprocess, sys, tomllib; deps = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["dependencies"]; subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "--index-url", sys.argv[1], *deps])' "${PIP_INDEX_URL}"
 
 # 复制代码和其他资源
 COPY src ./src

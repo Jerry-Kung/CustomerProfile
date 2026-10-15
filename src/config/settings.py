@@ -188,6 +188,18 @@ def _default_task_upload_dir() -> Path:
 _SUPPORTED_PLATFORMS = ("dify", "qingtian", "runner")
 
 
+def load_mysql_config() -> MySQLConfig:
+    """Load database settings for tools that do not invoke a workflow."""
+    _load_dotenv_from_project_root()
+    return MySQLConfig(
+        host=_require_env("MYSQL_HOST"),
+        port=_env_int("MYSQL_PORT", 3306),
+        user=_require_env("MYSQL_USER"),
+        password=_require_env("MYSQL_PASSWORD"),
+        database=_require_env("MYSQL_DATABASE"),
+    )
+
+
 def load_config() -> AppConfig:
     _load_dotenv_from_project_root()
     upload_dir_raw = os.getenv("TASK_UPLOAD_DIR", "").strip()
@@ -259,13 +271,7 @@ def load_config() -> AppConfig:
             poll_interval_ms=_env_int("QINGTIAN_POLL_INTERVAL_MS", 2000),
             poll_timeout_ms=_env_int("QINGTIAN_POLL_TIMEOUT_MS", 2400000),
         ),
-        mysql=MySQLConfig(
-            host=_require_env("MYSQL_HOST"),
-            port=_env_int("MYSQL_PORT", 3306),
-            user=_require_env("MYSQL_USER"),
-            password=_require_env("MYSQL_PASSWORD"),
-            database=_require_env("MYSQL_DATABASE"),
-        ),
+        mysql=load_mysql_config(),
         upload=UploadConfig(
             base_dir=upload_base,
             max_bytes_per_file=_env_int("TASK_UPLOAD_MAX_BYTES_PER_FILE", 10 * 1024 * 1024),

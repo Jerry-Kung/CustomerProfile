@@ -1,98 +1,75 @@
-"""Quick inspection script for the duplicate-execution investigation.
-
-Fill in the connection fields below, then run:
-    python scripts/inspect_phone_tasks.py
-
-Outputs:
-  - SQL 1: rows for id IN (928, 942) OR customer_phonenumber = TARGET_PHONE
-  - SQL 2: all rows for TARGET_PHONE
-"""
-
+"""Read task diagnostics using the repository's configured MySQL connection."""
 from __future__ import annotations
 
-import pymysql
+import argparse
+import json
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from mysql.connector import Error as MySQLError
+
+from src.config.settings import load_mysql_config
+from src.infrastructure.db.client import MySQLClient
 
 
-HOST = "10.81.67.210"
-PORT = 33306
-USER = "mengshi"
-PASSWORD = "MengShi#$12"
-DATABASE = "customer_profile"
-
-TARGET_IDS = (928, 942)
-TARGET_PHONE = "13332887454"
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--phone", help="Exact customer phone number")
+    parser.add_argument("--task-id", type=int, action="append", default=[], help="Task ID; repeat for several IDs")
+    parser.add_argument("--limit", type=int, default=100, help="Maximum rows, from 1 to 1000")
+    return parser
 
 
-SQL_1 = """
-SELECT id, customer_phonenumber, task_type, status, error_message,
-       created_at, updated_at
-FROM customer_profile_tasks
-WHERE id IN (%s, %s)
-   OR customer_phonenumber = %s
-ORDER BY id
-"""
-
-SQL_2 = """
-SELECT id, customer_phonenumber, status,
-       LEFT(error_message, 80) AS err,
-       updated_at
-FROM customer_profile_tasks
-WHERE customer_phonenumber = %s
-"""
-
-
-def _print_rows(title: str, columns: list[str], rows: list[tuple]) -> None:
-    print(f"\n===== {title} =====")
-    if not rows:
-        print("(no rows)")
-        return
-    widths = [len(c) for c in columns]
-    str_rows = [["" if v is None else str(v) for v in row] for row in rows]
-    for row in str_rows:
-        for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(cell))
-    header = " | ".join(c.ljust(widths[i]) for i, c in enumerate(columns))
-    sep = "-+-".join("-" * w for w in widths)
-    print(header)
-    print(sep)
-    for row in str_rows:
-        print(" | ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
-
-
-def main() -> int:
-    conn = pymysql.connect(
-        host=HOST,
-        port=PORT,
-        user=USER,
-        password=PASSWORD,
-        database=DATABASE,
-        connect_timeout=5,
+def build_query(phone: str | None, task_ids: list[int], limit: int) -> tuple[str, tuple]:
+    if not (phone and phone.strip()) and not task_ids:
+        raise ValueError("at least one phone number or task ID is required")
+    if not 1 <= limit <= 1000 or any(task_id <= 0 for task_id in task_ids):
+        raise ValueError("limit must be 1..1000 and task IDs must be positive")
+    filters = []
+    params: list[object] = []
+    if phone and phone.strip():
+        filters.append("customer_phonenumber = %s")
+        params.append(phone)
+    if task_ids:
+        filters.append("id IN (" + ", ".join("%s" for _ in task_ids) + ")")
+        params.extend(task_ids)
+    sql = (
+        "SELECT id, customer_phonenumber, task_type, work_env, batch_id, status, "
+        "workflow_target_id, workflow_target_revision, workflow_run_id, attempt_count, "
+        "last_error_code, last_error_stage, error_message, lease_expires_at, updated_at "
+        "FROM customer_profile_tasks WHERE (" + " OR ".join(filters) + ") "
+        "ORDER BY updated_at DESC, id DESC LIMIT %s"
     )
+    return sql, (*params, limit)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
     try:
-        cursor = conn.cursor()
-
-        cursor.execute(SQL_1, (TARGET_IDS[0], TARGET_IDS[1], TARGET_PHONE))
-        rows = cursor.fetchall()
-        columns = [d[0] for d in cursor.description]
-        _print_rows(
-            f"SQL 1: id IN {TARGET_IDS} OR customer_phonenumber = {TARGET_PHONE!r}",
-            columns,
-            rows,
-        )
-
-        cursor.execute(SQL_2, (TARGET_PHONE,))
-        rows = cursor.fetchall()
-        columns = [d[0] for d in cursor.description]
-        _print_rows(
-            f"SQL 2: all rows for customer_phonenumber = {TARGET_PHONE!r}",
-            columns,
-            rows,
-        )
-
-        cursor.close()
+        sql, params = build_query(args.phone, args.task_id, args.limit)
+    except ValueError as exc:
+        parser.error(str(exc))
+    connection = None
+    cursor = None
+    try:
+        connection = MySQLClient(load_mysql_config()).connect()
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute(sql, params)
+        print(json.dumps(cursor.fetchall(), ensure_ascii=False, indent=2, default=str))
+        return 0
+    except (ValueError, MySQLError) as exc:
+        print(f"inspection failed: {exc}", file=sys.stderr)
+        return 1
     finally:
-        conn.close()
-    return 0
+        if cursor is not None:
+            cursor.close()
+        if connection is not None:
+            connection.close()
 
 
 if __name__ == "__main__":
