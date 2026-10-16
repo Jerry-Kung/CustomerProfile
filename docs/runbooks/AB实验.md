@@ -17,8 +17,8 @@
 
 | 臂 | `--workflow-id` | 说明 |
 |---|---|---|
-| 基线臂 | `customer_profile_entry` | 现行主入口（`证据线索汇总 → 人设特征判断 → 画像内容生成与回写`） |
-| 业务测试臂 | `customer_profile_pipeline` | 事实账本管线（`L0 记录 → L1 取证 → L2 投影 → L4 分诊 → 成文`）。该臂的实验已完成并通过核验，2026-10-15 起对外口径由「实验臂」改为「业务测试臂」；`workflow_id` 不动 |
+| 业务测试臂 | `customer_profile_pipeline` | 事实账本管线（`L0 记录 → L1 取证 → L2 投影 → L4 分诊 → 成文`）。该臂的实验已完成并通过核验，2026-10-15 起对外口径由「实验臂」改为「业务测试臂」；`workflow_id` 不动。**2026-10-16 起是本项目唯一可运行的画像臂，也是提交页与跑批脚本的缺省臂** |
+| 基线臂（已摘除） | ~~`customer_profile_entry`~~ | 结构为 `证据线索汇总 → 人设特征判断 → 画像内容生成与回写`。2026-10-16 从 `WORKFLOW_MODULES` 摘除：不再加载、不可提交、不可跑批，历史运行已从留痕库清除。**要重跑基线臂必须先把它加回注册表**（模块文件与它引用的 `evidence_subagent` / `profile_features_analysis` 都还在） |
 
 两臂**共用同一个跑批脚本** `scripts/run_baseline.py`，只用 `--workflow-id` 区分。
 这是刻意的：复制脚本会让两臂的归档逻辑分叉，产出不可比的产物。
@@ -38,13 +38,16 @@ python scripts/run_baseline.py \
 `--workflow-id` 拼错会在**开跑前**报错退出（脚本先核对 ID 是否已定义，不建服务、不出网），
 不会跑几十个号码之后才失败。这比在跑批中途以「子工作流未注册」暴露要便宜得多。
 
-### 3.2 跑基线臂
+### 3.2 跑基线臂（需先恢复该臂）
 
-分两种场合，别混：
+基线臂已于 2026-10-16 摘除，**当前跑不了**。要用时先把
+`customer_profile.workflows.customer_profile_entry` 加回 `workflows/__init__.py`
+的 `WORKFLOW_MODULES`，再分两种场合：
 
 - **阶段一/二期间不必重跑。** 用已冻结的历史批次
   `experiments/batches/baseline-39-dsv41-noThink/` 作为对照物即可——那时两臂共用的
-  `customer_profile_production` 还没被改。
+  `customer_profile_production` 还没被改。该批次自带 `trace.db`，**不依赖留痕库**，
+  因此入口臂历史运行被清除后它仍完整可读。
 - **阶段三落地后必须重跑一次。** 阶段三要改 production，一改基线臂也跟着变。此时在
   **分支点 commit** 的 worktree 里跑，保证基线臂拿到的是改动前的 production：
 

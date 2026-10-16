@@ -26,7 +26,7 @@ python -m customer_profile.main
 # 提交一次任务
 curl -X POST localhost:8000/runs \
   -H 'content-type: application/json' \
-  -d '{"workflow_id":"customer_profile_entry","inputs":{"phone_number":"13800000000"},"business_ref":"13800000000"}'
+  -d '{"workflow_id":"customer_profile_pipeline","inputs":{"phone_number":"13800000000"},"business_ref":"13800000000"}'
 ```
 
 运行台需先构建前端：`cd frontend && npm run build`，再设 `SERVE_UI=true`。

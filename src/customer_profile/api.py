@@ -24,8 +24,13 @@ from .runner import QueueFull, RunSlotUnavailable, Service, build_service
 from .settings import get_settings
 
 
-ENTRY_WORKFLOW_ID = "customer_profile_entry"
-"""主入口工作流 ID。手机号校验只对它启用，不把入口契约硬编码给全部工作流。"""
+ENTRY_WORKFLOW_ID = "customer_profile_pipeline"
+"""主入口工作流 ID，即业务测试臂。手机号校验只对它启用，不把入口契约硬编码给全部工作流。
+
+2026-10-16 由 ``customer_profile_entry``（客户初始画像，基线臂）改指本臂：该臂已从
+``WORKFLOW_MODULES`` 摘除、不再可运行，而提交页与入参校验必须落在同一个 ID 上——
+只改前端会让手机号校验静默失效。
+"""
 
 PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
 """中国大陆手机号。与 ``scripts/smoke_run.py`` 的脱敏正则同一形状，此处锚定整串。"""

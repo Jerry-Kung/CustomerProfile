@@ -54,7 +54,15 @@ from customer_profile.execution.transcript_cache import TranscriptCache  # noqa:
 from customer_profile.runner import build_service  # noqa: E402
 from customer_profile.settings import Settings  # noqa: E402
 
-ENTRY_WORKFLOW = "customer_profile_entry"
+ENTRY_WORKFLOW = "customer_profile_pipeline"
+"""缺省跑的臂。2026-10-16 起是**业务测试臂**。
+
+原缺省是基线臂 ``customer_profile_entry``，它已从 ``WORKFLOW_MODULES`` 摘除（不再可运行），
+且《跑批可靠性》 A5 记着「漏传 ``--workflow-id`` 会整批跑在旧链路上、产物全废」这一坑。
+缺省指向当前唯一在用的臂，是那个坑的正面修法。
+"""
+BASELINE_WORKFLOW = "customer_profile_entry"
+"""基线臂 ID。已摘除，仅保留给文档与历史批次对照引用；显式指定它会由 ID 校验直接拒绝。"""
 DEFAULT_OUT_DIR = REPO_ROOT / "experiments"
 DEFAULT_PHONES = REPO_ROOT / "test_phone_numbers.txt"
 DEFAULT_TRANSCRIPT_CACHE_DIR = DEFAULT_OUT_DIR / "transcript_cache"
@@ -496,10 +504,13 @@ async def run_batch(args: argparse.Namespace) -> int:
     )
     # v3.3+: 臂选择校验（跑批可靠性 A5）
     if batch_id.startswith("A-") or (batch_dir.name.startswith("A-")):
-        if args.workflow_id == ENTRY_WORKFLOW:
-            _log(log_path, "WARNING: batch ID starts with 'A-' (experimental) but workflow_id is baseline")
-            _log(log_path, f"         Expected experimental workflow, got {args.workflow_id}")
-            _log(log_path, "         Use --workflow-id customer_profile_pipeline for experimental arm")
+        if args.workflow_id != ENTRY_WORKFLOW:
+            _log(
+                log_path,
+                f"WARNING: batch ID starts with 'A-' (experimental) but "
+                f"workflow_id is {args.workflow_id}",
+            )
+            _log(log_path, f"         Expected {ENTRY_WORKFLOW}")
     _log(log_path, f"workflow_id = {args.workflow_id}")
 
     # v3.3+: 转写缓存检查（跑批可靠性 A5）
@@ -701,8 +712,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--workflow-id", default=ENTRY_WORKFLOW,
         help=(
-            "入口工作流 ID（缺省 %(default)s）。AB 实验用它区分两臂："
-            "基线臂 customer_profile_entry、实验臂 customer_profile_pipeline"
+            "入口工作流 ID（缺省 %(default)s，业务测试臂）。两臂口径："
+            "业务测试臂 customer_profile_pipeline、基线臂 customer_profile_entry"
+            "（基线臂已于 2026-10-16 摘除，显式指定会报错）"
         ),
     )
     parser.add_argument("--phones", default=str(DEFAULT_PHONES), help="手机号清单文件")

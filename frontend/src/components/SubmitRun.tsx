@@ -5,7 +5,8 @@
  *
  * 1. **只服务主入口的手机号触发。** 本次不做通用入参表单：其它工作流的入参契约各不相同
  *    （录音类要 `customer_data` / `data_source`），做成一个「什么都能填」的表单等于假装
- *    它们同构。`customer_profile_entry` 的契约是 `phone_number` 必填 + `batch_id` 可选。
+ *    它们同构。主入口（业务测试臂 `customer_profile_pipeline`）的契约是
+ *    `phone_number` 必填 + `batch_id` 可选，与基线臂一致。
  * 2. **前端也校验一次手机号。** 后端会校验（422 带 detail），前端先拦一道只是为了省一次
  *    往返；**不替代**后端校验——真正生效的是后端那条。
  * 3. **提交中禁用按钮。** 真实运行一次约二十一分钟，重复点击会堆叠真实模型调用，
@@ -23,7 +24,7 @@ import { api, type RuntimeInfo } from '../api/client'
 /** 与后端 `api.py` 的 PHONE_PATTERN、脚本里的脱敏正则同一形状。 */
 const PHONE_PATTERN = /^1[3-9]\d{9}$/
 
-const ENTRY_WORKFLOW_ID = 'customer_profile_entry'
+const ENTRY_WORKFLOW_ID = 'customer_profile_pipeline'
 
 export interface SubmitRunProps {
   runtime: RuntimeInfo | null
@@ -71,7 +72,7 @@ export function SubmitRun({ runtime, onSubmitted }: SubmitRunProps) {
       >
         <h2>提交任务</h2>
         <p className="submit-hint">
-          运行 <code>{ENTRY_WORKFLOW_ID}</code>（主入口）。提交后跳到运行详情，
+          运行 <code>{ENTRY_WORKFLOW_ID}</code>（业务测试臂）。提交后跳到运行详情，
           在那里可以看到完整的运行过程与每一次模型调用。
         </p>
 

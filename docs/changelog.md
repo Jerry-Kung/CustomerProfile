@@ -2,6 +2,33 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-10-16 — 提交入口改指业务测试臂；修复「节点永久停在运行中」
+
+分支 `dev-business-opt01`。两件事：提交页跑的仍是已无用途的旧臂；业务测试臂的运行里
+「极光数据」节点永远显示「运行中」。方案见
+`docs/design/提交臂切换与极光节点卡死修复方案.md`。
+
+- **入口臂切换。** 「提交任务」写死的 `customer_profile_entry`（显示名「客户初始画像」，
+  基线臂）从 `WORKFLOW_MODULES` 摘除：不再加载、不再出现在 `/workflows`、不可提交与跑批。
+  前端提交页与后端入参校验必须同指一个 ID——只改前端会让手机号校验**静默失效**，
+  因此 `api.py` 的 `ENTRY_WORKFLOW_ID` 一并改指 `customer_profile_pipeline`（业务测试臂）。
+  该臂历史运行连同子运行树共 **248 条运行 / 3199 条节点行 / 293 条尝试记录**已从留痕库清除
+  （3 份不再被引用的定义快照一并删除）；
+  `experiments/batches/baseline-39-dsv41-noThink/` 自带 `trace.db`，**不受影响**。
+  `run_baseline.py` 的 `--workflow-id` 缺省值同步改指业务测试臂——原缺省是基线臂，
+  正是《跑批可靠性》A5 记录的「漏传参数导致整批白烧」那个坑。
+  模块文件保留：`tests/test_contract.py` 等仍以它为样本图，且它是基线臂**可复位**的前提。
+- **节点永久停在运行中（真实缺陷，非脏数据）。** `_RunRecord.call_path` 被当成跨节点的
+  可变字段：`scheduler.py` 为循环体临时改写它，`tracker.py` 的 `node_finished` 又以
+  `execution.call_path or run.call_path` 回落取值，而顶层节点的 `execution.call_path` 是空串。
+  运行内节点是**并发**的，于是循环体覆盖期间结束的**兄弟节点**把终态写进了另一条调用路径，
+  自己那条 `running` 行再无人更新——界面因此永久显示「运行中」。
+  **修法**：调用路径在本次执行上定死（`NodeExecution.call_path`），并显式传给
+  `node_started`；循环体改用 `ContextVar` 取基路径，嵌套迭代的路径重复段一并消除。
+- **回归用例**：`tests/test_iteration_call_path.py`。**修复前失败**（实测复现
+  `[('', 'running'), ('/iter:n_iter/0', 'succeeded')]`），修复后通过。库里 4 处孤儿节点行
+  按「终态回填 + 删错位行」修复（动手前整库备份 `data/customer_profile.db.bak-20261016`）。
+
 ## 2026-10-16 — 运行台对齐 v2 回传：双产物并列、链路分层、回写状态可读
 
 分支 `dev-business-opt01`。回传旁支落地后，运行台（`frontend/`）的展示口径没跟上——

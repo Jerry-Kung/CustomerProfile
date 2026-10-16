@@ -87,14 +87,22 @@ class RunTracker:
 
     # ------------------------------------------------------------ 节点层
 
-    async def node_started(self, run: Any, node: Any) -> None:
+    async def node_started(
+        self, run: Any, node: Any, call_path: str | None = None
+    ) -> None:
+        """记下节点开始执行。
+
+        ``call_path`` 由调度层显式给出，**不再回落到 ``run.call_path``**：那个字段曾被
+        循环体覆盖，导致并发结束的兄弟节点把自己的开始行写进另一条调用路径。
+        为兼容直接调用本方法且不传该参的旧路径，缺省仍回落一次。
+        """
         try:
             await self.store.upsert_node_execution(
                 run_id=run.run_id,
                 node_id=node.node_id,
                 node_title=node.title,
                 node_type=node.node_type,
-                call_path=run.call_path,
+                call_path=call_path if call_path is not None else run.call_path,
                 status="running",
                 inputs=self._collect_inputs(run, node),
                 queued_at_ms=run.node_started_at.get(node.node_id),
