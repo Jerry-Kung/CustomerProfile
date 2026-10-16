@@ -2,6 +2,29 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-10-16 — 部署改容器化：Dockerfile + docker compose
+
+分支 `dev-business-opt01`。上线测试环境的部署方式由「手工装依赖起三个进程」改为容器编排，
+新文件 `Dockerfile`、`.dockerignore`、`docker-compose.yml`。运维要点见 `docs/runbooks/部署.md` §1.1。
+
+- **一个镜像承载三个进程**，compose 服务 `api` / `worker` / `inbound` 只覆盖 `command`。
+  三份几乎相同的镜像各自构建会互相漂移，因此不拆多个 Dockerfile。
+- **依赖源全部换清华镜像**（apt 与 pip），替换方式取自仓库里的 `Dockerfile.example`。
+  apt 侧同时处理 deb822 的 `debian.sources` 与旧式 `sources.list`：只改前者的话，将来换
+  基础镜像标签会让替换静默失效、退回官方源（慢但不出声）。
+- **未照抄示例里的 ffmpeg**：本项目音频走云端 URL，仓库内无 ffmpeg / ffprobe / pydub 调用，
+  装它只增体积。只装 `curl`（健康检查）与 `ca-certificates`（对外 HTTPS）。
+- **镜像内不做 npm 构建**。`frontend/dist` 本就随仓库入库（`.gitignore` 的例外），
+  直接 `COPY`；前端改动需先 `npm run build` 再 `docker build`。
+- **配置仍以 `.env` 为唯一入口**，compose 用 `env_file` 注入，与 `settings.py` 自己读 `.env`
+  取值一致。compose 只覆盖两项随形态变化的：`SERVE_UI=true`，以及 API 服务的
+  `INLINE_WORKER=false`——否则 API 与 worker 两个容器会抢同一个队列。
+- **命名卷 `cp-data` 挂 `/app/data`**，落在本机磁盘，满足「SQLite 不可放网络挂载」这条
+  硬约束（WAL 依赖 `-shm`，网络文件系统上会锁失效并可能损坏库）。
+- **停止宽限期按进程分别设**：api 90s、inbound 30s、**worker 30 分钟**。一次画像约 21 分钟，
+  缺省的 10 秒宽限会在停机时把在飞运行砍成 `interrupted`。
+- **`init: true`**：uvicorn 与 worker 都靠信号优雅停机，让 shell 当 PID 1 会让信号转发不可靠。
+
 ## 2026-10-16 — 上线测试环境准备：新增对外任务接口（8099）
 
 分支 `dev-business-opt01`。上线业务测试前补对外面：运行台（8000）是**内部只读面**，

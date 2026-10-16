@@ -17,20 +17,33 @@
 
 ## 快速开始
 
+**容器部署**（API、worker、对外任务接口三个服务，共用一个 SQLite 卷）：
+
+```
+cp .env.example .env          # 然后填入真实端点与凭据
+docker compose up -d --build
+```
+
+**直接跑进程**：
+
 ```
 pip install -r requirements.txt
 cp .env.example .env          # 然后填入真实端点与凭据
 
 # 起服务（API 进程默认同时消费队列，单机形态即可跑通）
 python -m customer_profile.main
+```
 
-# 提交一次任务
+两种方式都起好后，提交一次任务：
+
+```
 curl -X POST localhost:8000/runs \
   -H 'content-type: application/json' \
   -d '{"workflow_id":"customer_profile_pipeline","inputs":{"phone_number":"13800000000"},"business_ref":"13800000000"}'
 ```
 
-运行台需先构建前端：`cd frontend && npm run build`，再设 `SERVE_UI=true`。
+运行台只在前端构建过之后可用：`cd frontend && npm run build`。容器部署时 `SERVE_UI` 已打开；
+直接跑进程时把它设为 `true`。
 
 ## 目录
 
