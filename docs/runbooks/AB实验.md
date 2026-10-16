@@ -18,14 +18,14 @@
 | 臂 | `--workflow-id` | 说明 |
 |---|---|---|
 | 基线臂 | `customer_profile_entry` | 现行主入口（`证据线索汇总 → 人设特征判断 → 画像内容生成与回写`） |
-| 实验臂 | `customer_profile_pipeline` | 事实账本管线（`L0 记录 → L1 取证 → L2 投影 → L4 分诊 → 成文`） |
+| 业务测试臂 | `customer_profile_pipeline` | 事实账本管线（`L0 记录 → L1 取证 → L2 投影 → L4 分诊 → 成文`）。该臂的实验已完成并通过核验，2026-10-15 起对外口径由「实验臂」改为「业务测试臂」；`workflow_id` 不动 |
 
 两臂**共用同一个跑批脚本** `scripts/run_baseline.py`，只用 `--workflow-id` 区分。
 这是刻意的：复制脚本会让两臂的归档逻辑分叉，产出不可比的产物。
 
 ## 3. 操作流程
 
-### 3.1 跑实验臂
+### 3.1 跑业务测试臂
 
 ```
 python scripts/run_baseline.py \
@@ -116,7 +116,7 @@ git worktree add ../cp-baseline <dev-business-opt01 的 HEAD>
 experiments/abexperiments/
 ├─ batches/
 │  ├─ B-baseline-<日期>/  基线臂（结构与 experiments/batches/ 完全一致）
-│  └─ A-pipeline-<日期>/  实验臂
+│  └─ A-pipeline-<日期>/  业务测试臂
 └─ compare/               逐案比对表与指标汇总
 ```
 
@@ -124,7 +124,7 @@ experiments/abexperiments/
 `基线实验.md` §4 逐字相同——两臂跑的是同一个脚本，没有第二套归档格式。
 
 **`manifest.json` 的 `workflow_id` 记的是实际使用的入口工作流**，不是缺省常量。
-写死常量会让实验臂的批次声称自己跑的是基线图，第 1、2 条判据随之失效。
+写死常量会让业务测试臂的批次声称自己跑的是基线图，第 1、2 条判据随之失效。
 
 ## 6. 不放进这个目录的东西
 

@@ -141,7 +141,8 @@ def validate_l3(claims_json, facts_json, notes_updates_json, basis_json="{}") ->
     1. **无依据确定值率 = 0**。``fact`` 必须能指回原文——它要么有 ``quote``（L1 定位层
        切出的原文片段），要么来源渠道是登记档（登记系统直接给出，本就不需要原文锚点）。
        指不出来的 ``fact`` 是「编造的确定性」，这是本次要杜绝的头号错误。
-    2. **枚举合法**。枚举字段的值须是契约合法键（多选用 ``||`` 连接）——
+    2. **枚举合法**。枚举字段的值须是该字段的合法键（多选用 ``||`` 连接）——
+       合法键来自契约与编外登记表**并集**（见 :func:`enum_is_known`），编外枚举照样要校验。
        **但已降级为 ``inferred_low`` 的取值除外**：P3 规则 d 刻意保留归不到合法键的
        客户原话（「想上广州那边的牌」「裸金价格」），标低置信并转人工确认。那种取值
        本就不是「确定值」，拦它等于把 P3 的降级策略又废掉一遍。降级的记为
@@ -198,11 +199,11 @@ def validate_l3(claims_json, facts_json, notes_updates_json, basis_json="{}") ->
     illegal = []
     downgraded_illegal = []
     for key, value in facts.items():
-        if not nc_is_enum(key):
+        if not enum_is_known(key):
             continue
         soft = str(basis.get(key) or "") == INFERRED_LOW
         for item in _enum_items(value):
-            if nc_is_legal(key, item):
+            if enum_is_legal(key, item):
                 continue
             entry = {"attribute": key, "value": item}
             (downgraded_illegal if soft else illegal).append(entry)
@@ -270,21 +271,33 @@ def _enum_items(value: Any) -> list[Any]:
     return [value]
 
 
-def nc_is_enum(attribute: str) -> bool:
-    from .. import notes_contract as nc
+def enum_is_known(attribute: str) -> bool:
+    """该字段是否为**枚举字段**（契约或编外——判定集合见 :mod:`customer_profile.internal_fields`）。
 
-    return nc.is_enum(attribute)
+    不去问 :mod:`notes_contract` 直接问：
+
+    - 编外枚举（``emotion`` / ``communication_rhythm`` / ``personality_and_preferences``
+      / ``seating_requirement`` / ``driving_preference`` / ``purchase_nature``）已离开契约，
+      用契约判定会把它们整条跳过——非法值既拦不下也不告警，而它们仍要喂
+      ``decision_psychology`` 三个固定 key，脏值会一路带进回传体；
+    - 与 L2 投影层同源：两处若用不同集合判定，会出现「投影层认、校验层不认」的
+      自相矛盾，而这类不一致不报错，只是产物悄悄变样。
+    """
+    from .. import internal_fields as inf
+
+    return inf.is_enum(attribute)
 
 
-def nc_is_legal(attribute: str, value: Any) -> bool:
-    from .. import notes_contract as nc
+def enum_is_legal(attribute: str, value: Any) -> bool:
+    """取值是否归一到该字段的合法键（合法键本身或展示名皆可）。"""
+    from .. import internal_fields as inf
 
     if value is None:
         return False
     text = _as_text(value)
     if not text:
         return False
-    return text in nc.legal_keys(attribute) or bool(nc.display_to_key(attribute, text))
+    return text in inf.legal_keys(attribute) or bool(inf.display_to_key(attribute, text))
 
 
 INFERRED_LOW = "inferred_low"

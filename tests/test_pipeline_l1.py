@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 
+from customer_profile import internal_fields as inf
 from customer_profile import notes_contract as nc
 from customer_profile.workflows import customer_profile_pipeline as pipe
 
@@ -278,39 +279,58 @@ def test_l1_input_empty_records_still_carries_guide():
 
 
 def test_field_inference_guide_covers_all_contract_fields():
-    """《字段清单》必须逐条列出契约里**全部**字段，并在每个字段后带上契约原文口径。"""
+    """《字段清单》必须逐条列出**全部取证字段**，并在每个字段后带上原文口径。
+
+    覆盖范围是 :data:`internal_fields.EXTRACTION_KEYS`（契约字段 + 编外字段），不是契约
+    全集：L1 照这份清单取证，漏掉编外字段等于把 ``purchase_decisions`` / ``deal_battle``
+    的料一起删掉。契约字段仍按七个大类分组，编外字段另起一节。
+    """
     guide = pipe.field_inference_guide()
     listed = {
         line.split("`")[1]
         for line in guide.splitlines()
         if line.startswith("- `") and line.count("`") >= 2
     }
-    assert listed == set(nc.ALL_KEYS)
-    assert len(listed) == len(nc.ALL_KEYS) == 47
-    # 口径取自契约：抽两条逐字比对，钉住「不手抄」这条约束。
-    for key in ("planned_purchase_time", "core_concerns"):
-        description = (nc.by_key(key).get("description") or "").strip()
+    assert listed == set(inf.EXTRACTION_KEYS)
+    assert set(nc.ALL_KEYS) <= listed
+    assert len(listed) == len(inf.EXTRACTION_KEYS) == 45 + len(inf.EXTRACTION_ONLY_KEYS)
+    # 口径取自登记表：抽两条逐字比对，钉住「不手抄」这条约束。
+    # ``planned_purchase_time`` 走契约，``old_car_model`` 走编外登记表——两条通路都要对。
+    for key in ("planned_purchase_time", "old_car_model"):
+        description = inf.description_of(key)
+        assert description, f"{key} 必须给出取证口径，否则模型不知道这个字段要什么"
         assert f"- `{key}`" in guide
         assert description in guide
+    # 编外字段要标出「不回传」，否则日后会有人按清单去 Notes 里找它们
+    assert "内部字段（照常取证，但**不写入 Notes**" in guide
 
 
 def test_field_inference_guide_labels_categories():
-    """六个字段大类都要出现——清单按类分组，模型才看得出口径的归属。"""
+    """七个字段大类都要出现——清单按类分组，模型才看得出口径的归属。
+
+    v2 契约新增「地域与生活圈」，由 :data:`notes_contract.REGION_LIFE` 承载。
+    """
     guide = pipe.field_inference_guide()
     for category in (nc.BASE_IDENTITY, nc.PURCHASE_NEED, nc.BUDGET_FINANCE,
-                     nc.DECISION_RHYTHM, nc.PREFERENCE_NOTE, nc.COMPETITOR):
+                     nc.DECISION_RHYTHM, nc.PREFERENCE_NOTE, nc.COMPETITOR,
+                     nc.REGION_LIFE):
         assert f"### {category}" in guide
 
 
 def test_field_source_notes_keys_are_real_contract_fields():
-    """来源补充说明的键必须是契约真字段名。
+    """来源补充说明的键必须是**真取证字段**（契约字段或编外字段）。
 
     这是**防漂移**的机制：字段改名或下线后，这张表若不跟着改，那段说明就会静默失效——
-    模型既看不到它，也没人会发现它已经不生效了。
+    模型既看不到它，也没人会发现它已经不生效了。校验集合用
+    :data:`internal_fields.EXTRACTION_KEYS`：字段从 Notes 下线不等于不再取证，
+    ``emotion`` / ``communication_rhythm`` / ``personality_and_preferences``
+    三条说明本轮正是这样留下来的。
     """
     keys = set(pipe.FIELD_SOURCE_NOTES)
     assert keys, "来源补充表不得为空"
-    assert keys <= set(nc.ALL_KEYS), f"不在契约里的字段名：{sorted(keys - set(nc.ALL_KEYS))}"
+    assert keys <= set(inf.EXTRACTION_KEYS), (
+        f"不是取证字段的键：{sorted(keys - set(inf.EXTRACTION_KEYS))}"
+    )
     guide = pipe.field_inference_guide()
     for key in keys:
         assert f"取证范围：" in guide.split(f"- `{key}`")[1].split("\n")[0] or \
@@ -328,43 +348,65 @@ def test_field_inference_guide_renders_source_notes_inline():
 # ---------------------------------------------------------------- 枚举键附录（R0 §5.1 修复）
 
 def test_enum_key_guide_covers_every_enum_field():
-    """附录必须逐条列出契约里**全部** 21 个枚举字段，不多不少。"""
+    """附录必须逐条列出**全部枚举字段**，不多不少。
+
+    契约 24 个枚举，另有 6 个编外枚举（``emotion`` / ``communication_rhythm`` /
+    ``personality_and_preferences`` / ``seating_requirement`` / ``driving_preference`` /
+    ``purchase_nature``）。漏掉编外那 6 个，L1 就会拿中文展示名或口语去填这些字段，
+    归一静默失效、下游拿到的是一串未归一的文本。
+    """
     guide = pipe.enum_key_guide()
     listed = {
         line.split("`")[1]
         for line in guide.splitlines()
         if line.startswith("- `") and line.count("`") >= 2
     }
-    expected = {k for k in nc.ALL_KEYS if nc.is_enum(k)}
+    expected = {k for k in inf.EXTRACTION_KEYS if inf.is_enum(k)}
     assert listed == expected
-    assert len(expected) == 21
+    assert {k for k in nc.ALL_KEYS if nc.is_enum(k)} <= expected
+    assert len(expected) == 24 + len([k for k in inf.EXTRACTION_ONLY_KEYS if inf.is_enum(k)])
 
 
 def test_enum_key_guide_marks_structured_input_value():
-    """结构化枚举要标出随带填写的字段名，否则 L2 只能补空串。"""
+    """结构化枚举要标出随带填写的字段名，否则 L2 只能补空串。
+
+    三处结构化枚举全在契约里（``family_structure`` / ``driver_license_status`` /
+    ``trade_in_requirement``）。``seating_requirement`` 虽已下线，其结构化定义仍在
+    编外登记表里——它按「乘坐人数」取值，丢掉这层定义会让该字段退化成自由文本。
+    """
     guide = pipe.enum_key_guide()
     assert "有孩子（**需随带填孩子人数**）" in guide
     assert "有（**需随带填驾龄年限**）" in guide
-    assert "需大空间（**需随带填乘坐人数**）" in guide
     assert "有（**需随带填旧车品牌**）" in guide
 
 
 def test_enum_key_guide_labels_multi_value_fields():
-    """多选字段要标出「多个值用 || 连接」，与 L2 的落库序列化口径一致。"""
+    """多选字段要标出「多个值用 || 连接」，与 L2 的落库序列化口径一致。
+
+    ``emotion`` / ``driving_preference`` 本轮已挪出 Notes，但两者仍是**内部多选枚举**
+    （见 :mod:`customer_profile.internal_fields`），附录照样要给 L1 标多选——
+    漏标的话模型会用顿号连接，归一后只剩第一个值。
+    """
     guide = pipe.enum_key_guide()
-    for key in ("purchase_purpose", "core_concerns", "driving_preference", "emotion", "frequent_social_media"):
+    for key in ("purchase_purpose", "core_concerns", "follow_up_frequency",
+                "contact_preference", "frequent_social_media",
+                "emotion", "driving_preference"):
         line = next(l for l in guide.splitlines() if l.startswith(f"- `{key}`"))
         assert "多选，多个值用 || 连接" in line
     assert "多选" not in next(l for l in guide.splitlines() if l.startswith("- `purchase_type`"))
+    # 编外字段要带「不回传」标注，免得日后按附录去 Notes 里找它们
+    assert "【内部字段，不回传】" in next(
+        l for l in guide.splitlines() if l.startswith("- `emotion`")
+    )
 
 
 def test_enum_key_guide_is_generated_from_contract_not_handcopied():
     """附录是契约快照的投影：改契约则附录跟着变（钉住「不手抄」这一约束）。"""
     guide = pipe.enum_key_guide()
-    for key in ("fuel_efficiency", "hate_being_rushed", "large_space", "needs_license"):
+    for key in ("fuel_efficiency", "needs_license", "tech_early_adopter", "over_3_months"):
         assert key in guide
     # 展示名也在，模型才可能把口语对上
-    assert "油耗" in guide and "讨厌被催" in guide and "限牌城市" in guide
+    assert "油耗" in guide and "限牌城市" in guide and "科技尝鲜型" in guide
 
 
 def test_l1_input_places_guide_before_records():
@@ -444,10 +486,10 @@ def test_project_claims_old_car_forces_replacement():
     result = pipe.project_claims(
         claims_json(
             claim(attribute="old_car_model", value="2019 别克", anchor="旧车是2019年的别克"),
-            claim(attribute="purchase_type", value="first", claim_id="c_002", anchor="第一次买车"),
+            claim(attribute="purchase_nature", value="first", claim_id="c_002", anchor="第一次买车"),
         )
     )
-    assert json.loads(result["facts_json"]).get("purchase_type") == "replacement"
+    assert json.loads(result["facts_json"]).get("purchase_nature") == "replacement"
 
 
 # ---------------------------------------------------------------- v2.1 R3 渠道塌陷修复

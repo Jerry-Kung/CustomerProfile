@@ -41,6 +41,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
+from . import internal_fields as inf
 from . import notes_contract as nc
 
 # ====================================================================
@@ -458,18 +459,18 @@ def normalize_enum(attribute: str, value: Any) -> Any:
 
     多选字段由调用方先 :func:`split_multi`，本函数只处理单个值。
     """
-    if not nc.is_enum(attribute):
+    if not inf.is_enum(attribute):
         return None
-    legal = nc.legal_keys(attribute)
+    legal = inf.legal_keys(attribute)
 
     structured = _parse_structured(value)
     if structured is not None:
         key = _as_text(structured.get("key"))
         if key not in legal:
-            key = nc.display_to_key(attribute, key) or ""
+            key = inf.display_to_key(attribute, key) or ""
         if not key:
             return None
-        if nc.is_structured(attribute, key):
+        if inf.is_structured(attribute, key):
             raw_input = structured.get("input_value")
             return {"key": key, "input_value": _as_text(raw_input)}
         return key
@@ -479,13 +480,25 @@ def normalize_enum(attribute: str, value: Any) -> Any:
         return None
     if text in legal:
         return text
-    by_display = nc.display_to_key(attribute, text)
+    by_display = inf.display_to_key(attribute, text)
     if by_display:
-        if nc.is_structured(attribute, by_display):
+        if inf.is_structured(attribute, by_display):
             # 只给了展示名、没给 input_value：按契约补空串，由 L4 校验提示补充。
             return {"key": by_display, "input_value": ""}
         return by_display
     return None
+
+
+IDENTITY_GUARD_KEYS: frozenset[str] = nc.IDENTITY_KEYS | inf.INTERNAL_IDENTITY_KEYS
+"""归属过滤与值形态门的判定集合：契约的「基础身份」**并上**编外身份字段。
+
+**为什么必须取并集**：这两道门原来只按 ``nc.IDENTITY_KEYS`` 判定，而 v2 契约把
+``company`` / ``company_type`` / ``old_car_model`` / ``owned_brand_model`` /
+``owned_car_age`` 移出了「基础身份」。若不并回来，保护会**静默消失**——
+不报错、测试也大多仍绿，只是某些本该被拦下的断言开始写进 facts。
+实测：``company`` 下线后，一条 ``subject=unknown`` 的「我们单位也要买一个」
+被当作客户的企业写了出去。
+"""
 
 
 def normalize_age(value: Any) -> str | None:
@@ -569,7 +582,7 @@ def project(
     - ``company_deregistered``：关联企业的登记状态是否为「注销」。
       已注销主体**不得**当作在职企业填入（基线 ``13926073386`` 即此缺陷）。
     - ``has_old_car_evidence``：原文里是否出现旧车证据（用于补 ``old_car_model``
-      与纠正 ``purchase_type``）。
+      与纠正 ``purchase_nature``）。
     """
     context = dict(context or {})
     result = Projection()
@@ -580,7 +593,7 @@ def project(
         if not claim.attribute:
             continue
         if (
-            claim.attribute in nc.IDENTITY_KEYS
+            claim.attribute in IDENTITY_GUARD_KEYS
             and claim.attribute not in IDENTITY_SUBJECT_EXEMPT
             and claim.subject != "customer"
         ):
@@ -601,7 +614,7 @@ def project(
         #      **豁免登记档**：人工/系统登记的取值是销售本人确认过的，客户职业确实可能
         #      就是销售顾问（「我是做销售的」），据此拒收会误杀真实事实。
         if (
-            claim.attribute in nc.IDENTITY_KEYS
+            claim.attribute in IDENTITY_GUARD_KEYS
             and claim.tier != REGISTRY
             and _salesperson_marked(claim)
         ):
@@ -670,7 +683,7 @@ def project(
             )
 
         weak_only = all(c.tier in WEAK_TIERS for c in group)
-        if attribute in nc.IDENTITY_KEYS and weak_only:
+        if attribute in IDENTITY_GUARD_KEYS and weak_only:
             only_prediction = all(c.is_prediction for c in group)
             if only_prediction:
                 # v3.2：**第三方画像标签单独撑身份字段 → 记为可信的高置信推断**。
@@ -729,7 +742,7 @@ def project(
 
         if (
             len(values) > 1
-            and not nc.is_multi_value(attribute)
+            and not inf.is_multi_value(attribute)
             and attribute not in AGGREGATE_TEXT_KEYS
         ):
             # 同来源档给出多个不同值 → 不可判，留白转确认，绝不两个都写。
@@ -752,10 +765,10 @@ def project(
             )
             continue
 
-        if nc.is_enum(attribute):
+        if inf.is_enum(attribute):
             normalized: list[Any] = []
             illegal: list[Any] = []
-            pool = values if nc.is_multi_value(attribute) else [best.value]
+            pool = values if inf.is_multi_value(attribute) else [best.value]
             for raw in pool:
                 for item in split_multi(raw):
                     key = normalize_enum(attribute, item)
@@ -768,7 +781,7 @@ def project(
                 # v2：一个都归不到合法键 → **保留原值** + 降为低置信 + 转人工确认，
                 # 不再丢弃（设计稿 §6.2 规则 d）。原值往往就是客户的原话，丢掉它等于
                 # 「因为格式对不上就把事实扔了」——R0 实测枚举归一失败是掉字段主因之一。
-                original = list(values) if nc.is_multi_value(attribute) else values[0]
+                original = list(values) if inf.is_multi_value(attribute) else values[0]
                 result.facts[attribute] = original
                 result.basis[attribute] = INFERRED_LOW
                 result.downgraded.append(
@@ -800,7 +813,7 @@ def project(
                         "action": "保留可归一的部分",
                     }
                 )
-            result.facts[attribute] = normalized[0] if nc.is_single_value(attribute) else normalized
+            result.facts[attribute] = normalized[0] if inf.is_single_value(attribute) else normalized
         else:
             result.facts[attribute] = values[0] if len(values) == 1 else values
 
@@ -826,7 +839,12 @@ def _apply_cross_field_rules(result: Projection, context: Mapping[str, Any]) -> 
     """跨字段一致性：一处有证据，另一处必须跟上；一处被否，另一处不得留。"""
     facts = result.facts
 
-    # —— 旧车 ⇒ 换购。基线多案正文写了旧车、``purchase_type`` 却仍填 ``first``。
+    # —— 旧车 ⇒ 换购。基线多案正文写了旧车、购买性质却仍填 ``first``。
+    #
+    # 注意落点：v2 契约的 ``purchase_type`` 只剩「个户/公户」，购车性质（首购/增购/换购）
+    # 已由编外字段 ``purchase_nature`` 承接。这条规则原本写 ``purchase_type``，
+    # 不改落点的话它会写进一个只认 ``company``/``personal`` 的单选字段——
+    # ``replacement`` 既非法、又会在回传时被静默丢弃。
     old_car = _as_text(facts.get("old_car_model"))
     has_old_car = bool(old_car) and old_car not in {"无", "没有", "无旧车"}
     has_old_car = has_old_car or bool(context.get("has_old_car_evidence"))
@@ -834,16 +852,16 @@ def _apply_cross_field_rules(result: Projection, context: Mapping[str, Any]) -> 
     trade_in_yes = trade_in == "yes" or (isinstance(trade_in, dict) and trade_in.get("key") == "yes")
 
     # ``trade_in_requirement=yes`` **本身就是**「有旧车」的凭据，因此它与旧车证据同权：
-    # 任一条成立即把购买类型定为换购。这里**不**清除 ``trade_in_requirement``——
+    # 任一条成立即把购买性质定为换购。这里**不**清除 ``trade_in_requirement``——
     # 清除它会抹掉置换的唯一凭据，反而制造新的自相矛盾。
-    if (has_old_car or trade_in_yes) and facts.get("purchase_type") not in {"replacement", "company"}:
-        facts["purchase_type"] = "replacement"
-    if not (has_old_car or trade_in_yes) and facts.get("purchase_type") == "replacement":
+    if (has_old_car or trade_in_yes) and facts.get("purchase_nature") != "replacement":
+        facts["purchase_nature"] = "replacement"
+    if not (has_old_car or trade_in_yes) and facts.get("purchase_nature") == "replacement":
         # 声称换购却没有任何旧车凭据 → 撤销该断言，而不是留一个无证的「换购」。
-        facts.pop("purchase_type", None)
+        facts.pop("purchase_nature", None)
         result.rejected.append(
             {
-                "attribute": "purchase_type",
+                "attribute": "purchase_nature",
                 "value": "replacement",
                 "rule": "f_trade_in",
                 "reason": "声称换购但无旧车证据支撑",
@@ -851,7 +869,7 @@ def _apply_cross_field_rules(result: Projection, context: Mapping[str, Any]) -> 
         )
         result.to_confirm.append(
             {
-                "attribute_key": "purchase_type",
+                "attribute_key": "purchase_nature",
                 "reason": "换购与其证据不一致",
                 "suggested_action": "确认客户是否有旧车置换",
             }
@@ -948,7 +966,7 @@ def serialize_value(attribute: str, value: Any) -> str:
         parts = [part for part in parts if part]
         if not parts:
             return ""
-        if nc.is_enum(attribute) and nc.is_multi_value(attribute):
+        if inf.is_enum(attribute) and inf.is_multi_value(attribute):
             return MULTI_JOIN.join(parts)
         return TEXT_JOIN.join(parts)
 

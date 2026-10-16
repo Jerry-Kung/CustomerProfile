@@ -2,6 +2,70 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-10-16 — business_opt01：AI 画像 v2 回传改造（P0–P5 编码完成）
+
+分支 `dev-business-opt01`。前端（业务架构师侧）指定了新的回传契约：`analysis_result`
+六键 + 一份 45 字段的 Notes 清单。本轮把业务测试臂（原「实验臂」）的产物对齐到该契约，
+**调测期不做真实回传**——回写节点存在、可被断言、但恒不发请求。
+方案与验收标准见 `docs/design/AI画像v2回传改造方案.md`。
+
+- **P0 契约快照重建。** `scripts/snapshot_note_contract.py` 重写为
+  `--from-response <线上 payload>` 模式：签名由契约内容摘要得出（不再是逐进程随机的
+  `hash()`），分类名未登记即报错而不是静默回落。`notes_contract.py` 随之重生成：
+  **45 字段 / 7 分类**，签名 `b36e78edf9a2`，来源 `docs/Notes_new.txt`，
+  `--check` 可复现。`notes_contract_extension.json` 清空——线上 payload 本身就是完整契约。
+- **P1 编外字段机制（`internal_fields.py`）。** 新增「取证照旧全量、回传只走契约」的白名单层。
+  17 个下线字段分三类处置：编外 11 个（`old_car_model` / `company` / `seating_requirement` …）、
+  迁移 4 个（`emotion` / `communication_rhythm` / `personality_and_preferences` → `decision_psychology`；
+  `resistances` → `deal_battle.loss_conditions`）、舍弃 2 个（抖音/小红书账号）。
+  另新增编外字段 `purchase_nature`。
+  **顺带修掉一处静默退化**：编外身份字段（`company` 等）离开契约后，
+  归属过滤与销售顾问值形态门不再认它们，实测有 `subject=unknown` 的「我们单位也要买一个」
+  被当作客户企业写出——现由 `IDENTITY_GUARD_KEYS` 取并集补回。
+- **P2 跨字段规则随枚举换血改写。** 新契约的 `purchase_type` 只剩个户/公户，
+  换购判定的落点改到编外字段 `purchase_nature`，否则会写进一个只认两个值的单选字段并被静默丢弃。
+  编外枚举（`emotion` 等）在 L2 归一、L1 附录、L3 枚举门三处一并接上。
+- **P3 四区块投影（`callback_build.py`，0 token）。** `ai_insight` / `purchase_decisions` /
+  `deal_battle` / `decision_psychology` 由**代码**从 facts 投影，不由表达层 LLM 归类
+  （L-002 的定论）。id 由内容摘要生成（同输入恒同 id），并跑一次同客户全局唯一性断言——
+  重复即抛错而非静默去重。每条的 `reasoning_detail` 复用 Notes 那一条的措辞，同一事实
+  在卡片与 Notes 上不会有两种说法。契约语义一并守住：**缺料的分类整个不出现**，
+  而不是给 `items: []`（后者会清空客户已有数据）。
+- **P4 回写节点接入业务测试臂。** 新增 `@body_ref`：请求体**整段取自绑定值**，
+  绕过文本替换——`@body_template` 恒把引用渲染成字符串，产不出契约要求的
+  `analysis_result` **对象**。与 `@body_template` 互斥，解析失败抛错而不发坏载荷。
+  管线新增 `pipeline_callback_build` → `pipeline_callback_writeback` 旁支，
+  `END` 仍挂 L3，`result1` 的对外契约一个字不改。显示名改「业务测试臂」，
+  `workflow_id` 不动（跑批入口与既有批次的可比性判据以它为准）。
+- **P5 调测（零真实回传）。** 回归用例钉住：回写节点存在、带 `@writeback` 与 `@body_ref`、
+  缺省设置下一个请求都不发且产出 `writeback_skipped: true`；开关打开时请求体是对象而非字符串。
+  `@body_ref` 另附 5 条解析语义用例（含互斥与无绑定两处报错）。
+
+**验收（四条全部取证）**：
+
+- **A1** 契约快照 `--check` 通过（45 字段 / 7 分类 / 签名 `b36e78edf9a2`，来源 `docs/Notes_new.txt`）；
+- **A2** 单号产出的 `basic_notes_updates` 为 45 条、45 唯一键，零越界——每个 `attribute_key`
+  都落在契约 45 键内，编外字段一个都没漏进回传体；
+- **A3** 同客户 20 个 id / 键全局唯一（用例覆盖 + 真实载荷复核双证）；
+- **A4** 调测期零真实回传：全库零条 `update-profile` 请求，回写节点产出
+  `{"writeback_skipped": true, "reason": "WRITEBACK_ENABLED=false"}` / `status: 0`。
+
+单号（`customer_profile_pipeline`，号码 `13415100087`）端到端 `succeeded`：40 个节点、
+16 次子运行、106.7 秒，`result1` 仍为字符串。四区块结构复核：`purchase_decisions` 只产出
+非空的三类（到店动因 / 核心关注 / 决策阻力），`decision_psychology` 四键与契约
+`PSYCHOLOGY_KEYS` 逐字一致，`reasoning_detail` 全为 `{summary, steps, evidence, confidence}` 四键。
+测试 **655 passed / 80 skipped**。
+
+**顺带修一处脚本缺口（非本次改造引入）**：`scripts/smoke_run.py` 原先只为
+`customer_profile_entry` 补 `batch_id` 默认值，业务测试臂漏掉时 `pipeline_start` 不产出该字段，
+而 `pipeline_production` 的 `(START, "batch_id")` 绑定早已存在，解析即 `KeyError`。
+改为无条件补齐，与 `run_baseline.py`（对任何 `--workflow-id` 都显式传 `batch_id`）同口径。
+
+**一处未决**：画像卡原有的 `inferred_tags` / `usage_scenarios` / `communication_strategies` /
+`purchase_motivations` / `product_preferences` 五节在新契约六键里没有落点，本轮刻意不动
+`SECTION_KEYS`（一动 `result1` 形状即变）。登记为 `docs/遗留问题清单.md` L-006。
+L-005（契约快照生成器缺失）已随 P0 解除并删除。
+
 ## 2026-10-15 — business_opt01_v2 第三轮（v3.3）：跑批可靠性四项修复 + 全量 39 案验收
 
 分支 `dev-business-opt01-v2`。本轮是「事实账本管线」（实验臂 `customer_profile_pipeline`）

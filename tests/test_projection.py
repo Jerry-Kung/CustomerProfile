@@ -24,24 +24,32 @@ def claim(attribute, value, channel="试驾录音信息", **kwargs):
 # ---------------------------------------------------------------- 契约快照
 
 def test_snapshot_is_stable():
-    """契约快照的规模是既定的：46 字段、6 分类、16 基础身份、16 单选 / 5 多选。
+    """契约快照的规模是既定的：45 字段、7 分类、15 基础身份、17 单选 / 7 多选。
 
-    46 = 基线 42 + v3.2 补挂的「竞品对比」4 字段（见
-    ``src/customer_profile/notes_contract_extension.json``）。
+    这组数字来自 v2 契约（``docs/Notes_new.txt``，payload 签名 ``b36e78edf9a2``），
+    由 ``scripts/snapshot_note_contract.py --from-response`` 固化。相比上一版
+    （47 字段 / 6 分类）：下线 17 个字段、新增 15 个、9 个同名改定义，
+    并新增「地域与生活圈」分类。改动此处即改契约，须走评审。
     """
-    assert len(nc.RAW_CONFIGS) == 47
-    assert len(nc.CATEGORIES) == 6
-    assert len(nc.IDENTITY_KEYS) == 16
-    assert sum(1 for k in nc.ALL_KEYS if nc.is_single_value(k)) == 16
-    assert sum(1 for k in nc.ALL_KEYS if nc.is_multi_value(k)) == 5
+    assert len(nc.RAW_CONFIGS) == 45
+    assert len(nc.CATEGORIES) == 7
+    assert len(nc.IDENTITY_KEYS) == 15
+    assert sum(1 for k in nc.ALL_KEYS if nc.is_single_value(k)) == 17
+    assert sum(1 for k in nc.ALL_KEYS if nc.is_multi_value(k)) == 7
 
 
 def test_structured_enum_specs():
-    """结构化枚举必须给出要随带填写的契约字段名。"""
+    """结构化枚举必须给出要随带填写的契约字段名。
+
+    v2 契约里结构化枚举**只剩三处**：``seating_requirement`` 已下线，
+    同时新增的字段（学历 / 消费等级 / 客户类型等）一律是平枚举。
+    """
     assert nc.structured_spec("driver_license_status", "yes") == "驾龄年限"
     assert nc.structured_spec("family_structure", "has_children") == "孩子人数"
-    assert nc.structured_spec("seating_requirement", "large_space") == "乘坐人数"
     assert nc.structured_spec("trade_in_requirement", "yes") == "旧车品牌"
+    assert nc.structured_spec("seating_requirement", "large_space") is None, (
+        "seating_requirement 已在 v2 契约中下线，不应仍能取到结构化定义"
+    )
 
 
 def test_channel_tier_covers_pipeline_channels():
@@ -81,7 +89,11 @@ def test_attribution_filter_allows_non_customer_for_family_structure():
 # ---------------------------------------------------------------- b 来源分级
 
 def test_attribution_filter_still_blocks_other_identity_fields():
-    """家庭结构豁免**不等于**身份字段整体放行：其余 15 个仍要求主体是客户本人。"""
+    """家庭结构豁免**不等于**身份字段整体放行：其余 14 个仍要求主体是客户本人。
+
+    v2 契约把基础身份从 16 压到 15（``douyin_id`` / ``xiaohongshu_id`` /
+    ``owned_brand_model`` 等下线），扣掉家庭结构后是 14。
+    """
     for key in sorted(nc.IDENTITY_KEYS - {"family_structure"}):
         result = proj.project([claim(key, "值", subject="spouse")])
         assert key not in result.facts, f"{key} 不应接受非客户本人主体的断言"
@@ -284,8 +296,13 @@ def test_l2_verdict_unparsable_is_reported():
 
 
 def test_enum_key_passthrough():
-    result = proj.project([claim("purchase_type", "additional")])
-    assert result.facts.get("purchase_type") == "additional"
+    """合法枚举键原样直通。
+
+    v2 契约把 ``purchase_type`` 的取值集缩到「个户 / 公户」，购车性质（首购 / 增购 /
+    换购）改由编外字段 ``purchase_nature`` 承接，两者都要能直通。
+    """
+    assert proj.project([claim("purchase_type", "personal")]).facts.get("purchase_type") == "personal"
+    assert proj.project([claim("purchase_nature", "additional")]).facts.get("purchase_nature") == "additional"
 
 
 # ---------------------------------------------------------------- e 单/多值约束
@@ -309,31 +326,36 @@ def test_multi_value_field_keeps_all():
 # ---------------------------------------------------------------- f 跨字段规则
 
 def test_old_car_forces_replacement():
+    """旧车证据 ⇒ 换购。
+
+    落点是**编外字段** ``purchase_nature``：v2 契约的 ``purchase_type`` 只剩
+    「个户 / 公户」，把 ``replacement`` 写进去既非法、又会在回传时被静默丢弃。
+    """
     result = proj.project(
         [
             claim("old_car_model", "2019 别克"),
-            claim("purchase_type", "first"),
+            claim("purchase_nature", "first"),
         ]
     )
-    assert result.facts.get("purchase_type") == "replacement"
+    assert result.facts.get("purchase_nature") == "replacement"
 
 
 def test_trade_in_yes_implies_replacement():
-    """``trade_in_requirement=yes`` 本身就是「有旧车」的凭据 → 购买类型定为换购。"""
+    """``trade_in_requirement=yes`` 本身就是「有旧车」的凭据 → 购买性质定为换购。"""
     result = proj.project(
         [claim("trade_in_requirement", '{"key":"yes","input_value":"现代"}')],
         context={"has_old_car_evidence": False},
     )
     assert result.facts.get("trade_in_requirement") == {"key": "yes", "input_value": "现代"}
-    assert result.facts.get("purchase_type") == "replacement"
+    assert result.facts.get("purchase_nature") == "replacement"
 
 
 def test_replacement_without_evidence_is_withdrawn():
     result = proj.project(
-        [claim("purchase_type", "replacement")],
+        [claim("purchase_nature", "replacement")],
         context={},
     )
-    assert "purchase_type" not in result.facts
+    assert "purchase_nature" not in result.facts
     assert any(r["rule"] == "f_trade_in" for r in result.rejected)
 
 
@@ -418,11 +440,37 @@ def test_split_multi_handles_list_and_string():
 # ---------------------------------------------------------------- h 落库序列化（R0 §5.2/契约）
 
 def test_multi_value_enum_serialized_with_double_pipe():
-    """多选枚举落库恒为 ``a||b`` 字符串（基线 18 个字段用此形态）。"""
-    result = proj.project([claim("emotion", "straightforward||hate_being_rushed")])
-    entry = next(u for u in result.notes_updates if u["attribute_key"] == "emotion")
-    assert entry["attribute_value"] == "straightforward||hate_being_rushed"
+    """多选枚举落库恒为 ``a||b`` 字符串（基线 18 个字段用此形态）。
+
+    原用例取样 ``emotion``，它本轮已挪进编外字段、不再进 Notes 出口，
+    因此改用同样多选的契约字段 ``core_concerns``（落库前先归一到英文键）。
+    """
+    result = proj.project([claim("core_concerns", "油耗||安全")])
+    entry = next(u for u in result.notes_updates if u["attribute_key"] == "core_concerns")
+    assert entry["attribute_value"] == "fuel_efficiency||safety"
     assert isinstance(entry["attribute_value"], str)
+
+
+def test_internal_only_fields_never_reach_notes_updates():
+    """编外字段照常进 ``facts``，但**不得**出现在 Notes 出口。
+
+    这是「编外」二字的全部含义，也是日后一次重构最容易悄悄破坏的一条：
+    :func:`projection._to_notes_updates` 若改成遍历 ``facts`` 而不是遍历契约键，
+    编外字段就会原样回传，而回传体里多出一个契约没有的 ``attribute_key``，
+    服务端反应不可预期。**只对 ``facts`` 断言是查不出这个的**，必须断言出口集合。
+    """
+    result = proj.project(
+        [
+            claim("emotion", "straightforward||hate_being_rushed"),
+            claim("old_car_model", "2019 别克"),
+            claim("core_concerns", "油耗||安全"),
+        ]
+    )
+    # 取证侧：编外字段必须照常落进 facts，否则 purchase_decisions 与画像卡没有料
+    assert result.facts.get("emotion") == ["straightforward", "hate_being_rushed"]
+    assert result.facts.get("old_car_model") == "2019 别克"
+    # 回传侧：只有契约字段能出去
+    assert {u["attribute_key"] for u in result.notes_updates} == {"core_concerns"}
 
 
 def test_structured_enum_serialized_as_json_string():

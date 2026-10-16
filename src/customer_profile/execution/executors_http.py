@@ -50,6 +50,11 @@ async def execute_http_request(
     - ``@body_template``：请求体是**含引用的 JSON 文本**（迁移前的定义里 AUC 的两个节点就是这种
       写法，如 ``'{ "file_url": {{#node.file_url#}} }'``）。与 ``@body`` 的区别在于它由
       引用拼成，且引用的值恒为字符串、需要加引号；渲染结果按 JSON 解析后作为请求体；
+    - ``@body_ref``：请求体**整段取自某个绑定值**，把该值直接作为 JSON 请求体发出。
+      与 ``@body_template`` 的区别是**它不经过文本替换**——因此外层结构不会被摊成字符串，
+      这是「请求体里要有一个对象字段」的唯一走法（``@body_template`` 恒把引用渲染成
+      带引号的字符串，产不出对象）。值可以是 dict/list，也可以是 JSON 字符串（解析后使用）。
+      与 ``@body_template`` **互斥**，同时声明即报错；
     - ``@outputs``：响应字段映射，如 ``{"body": "$text", "status": "$status"}``；
     - ``@writeback``：生产回写节点。``WRITEBACK_ENABLED=false``（缺省）时**不发送**，
       只产出「已跳过」的可解释结果；
@@ -107,6 +112,19 @@ def _resolve_body(
     对象；解析失败说明模板本身不合法，直接报错而不是把坏载荷发出去。
     """
     template = config.get("@body_template")
+    if config.get("@body_ref"):
+        if template is not None:
+            raise NodeExecutionError(
+                f"http-request 节点 {node.node_id} 同时声明了 @body_ref 与 @body_template；"
+                "两者语义互斥（前者整段取自绑定值，后者由文本引用拼成），只能留一个"
+            )
+        for binding in node.bindings:
+            if binding.target == "@body_ref" and binding.source:
+                return _coerce_body(resolve_binding_value(ctx, binding), node)
+        raise NodeExecutionError(
+            f"http-request 节点 {node.node_id} 声明了 @body_ref 但没有对应绑定"
+        )
+
     if template is None:
         json_template = config.get("@body_json_template")
         if json_template is None:
@@ -157,6 +175,31 @@ def _resolve_body(
         raise NodeExecutionError(
             f"http-request 节点 {node.node_id} 的 @body_template 渲染后不是合法 JSON：{text!r}"
         ) from exc
+
+
+def _coerce_body(value: Any, node: NodeDef) -> Any:
+    """把 ``@body_ref`` 取到的值整理成可发送的请求体。
+
+    **不得走 :func:`coerce_to_text`**：那个函数会把 dict 摊成 JSON 文本，请求体于是变成
+    一个**字符串**而不是对象——回传契约要求 ``analysis_result`` 是对象，摊平后正是
+    「发出去的载荷形状不对」这类最难查的故障（服务端只会回一个笼统的 4xx）。
+
+    字符串形态必须**解析**而非原样透传：上游 ``code`` 节点的产出恒是字符串，直接发出去
+    服务端收到的仍是一个被引号包住的串。解析失败即报错——发一个坏载荷比让这次运行失败更糟。
+    """
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise NodeExecutionError(f"http-request 节点 {node.node_id} 的 @body_ref 取值为空")
+        try:
+            return json.loads(text)
+        except ValueError as exc:
+            raise NodeExecutionError(
+                f"http-request 节点 {node.node_id} 的 @body_ref 取值不是合法 JSON：{text[:200]!r}"
+            ) from exc
+    return value
 
 
 def _json_quote(value: str) -> str:

@@ -102,6 +102,34 @@ def test_illegal_enum_is_blocked_when_not_downgraded():
     assert any(i["rule"] == "illegal_enum" for i in json.loads(out["issue_json"]))
 
 
+def test_illegal_internal_enum_is_blocked_too():
+    """编外枚举字段（已离开 Notes，仍在内部取证）也要拦非法取值。
+
+    这条用例钉住的是**易被静默改坏**的一处：``enum_is_known`` 若换回只问
+    :mod:`notes_contract`，这笔断言会被整条 ``continue`` 跳过——不报错、不告警，
+    产物静默变样。而 ``purchase_nature`` 之类仍要喂 ``decision_psychology``，
+    脏值会一路带到回传体。因此这里断言的是「拦下了」，不是「没报错」。
+    """
+    text = claims_json()
+    out = l3.validate_l3(text, facts_json(purchase_nature="想换车"), notes_json())
+    assert out["valid"] is False
+    assert any(i["rule"] == "illegal_enum" for i in json.loads(out["issue_json"]))
+
+
+def test_legal_internal_enum_passes():
+    """合法编外枚举键不得被误拦：``emotion`` 多选、``purchase_nature`` 单选。"""
+    text = claims_json()
+    out = l3.validate_l3(
+        text,
+        json.dumps(
+            {"emotion": ["hate_being_rushed", "guard_against"], "purchase_nature": "replacement"},
+            ensure_ascii=False,
+        ),
+        notes_json(),
+    )
+    assert out["valid"] is True
+
+
 def test_downgraded_illegal_enum_is_warning_not_error():
     """P3 规则 d 保留的客户原话（已降 inferred_low）**不得**阻塞表达。
 

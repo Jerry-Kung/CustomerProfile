@@ -1,51 +1,13 @@
 {
   "_comment": [
-    "契约补充字段（v3.2 + v3.3）。快照基线取自 baseline-39-dsv41-noThink（42 字段），",
-    "本文件补入其后线上契约新增的「竞品对比」类字段 + v3.3 加回的 resistances，由",
-    "scripts/snapshot_note_contract.py 默认合并进 notes_contract.py。",
-    "字段定义逐字取自线上 GET /api/v1/remote/config/note-attributes，勿手改取值。",
+    "契约补充字段（v3.2 增量期遗留机制）。",
+    "2026-10-15 起本文件**已清空**：v2 契约改走",
+    "`python scripts/snapshot_note_contract.py --from-response docs/Notes_new.txt`，",
+    "线上 payload 本身就是完整现行契约，不需要再叠加补挂字段。",
+    "保留文件与 --batch-dir 的合并通路，是为了仍能复现历史快照。",
+    "原 5 条（competing_brand / competing_model / test_driven_models / brand_concerns",
+    "/ resistances）均已包含在新契约里；其中 resistances 本轮已下线。",
     "本文件只含字段结构与口径，不含任何客户数据，可入库。"
   ],
-  "configs": [
-    {
-      "attribute_key": "competing_brand",
-      "attribute_name": "对比品牌",
-      "category": "竞品对比",
-      "field_type": "text",
-      "description": "客户购车正在对比的车企品牌。如“方程豹”“坦克”等",
-      "enum_options": null
-    },
-    {
-      "attribute_key": "competing_model",
-      "attribute_name": "对比车型",
-      "category": "竞品对比",
-      "field_type": "text",
-      "description": "客户购车正在对比的具体车型。如”豹8“，“坦克700”。",
-      "enum_options": null
-    },
-    {
-      "attribute_key": "test_driven_models",
-      "attribute_name": "试驾过的车型",
-      "category": "竞品对比",
-      "field_type": "text",
-      "description": "提取客户已试驾的车型清单。“上周开了xxx车型”“xx,xx都试了”。提取车型名，可多个。",
-      "enum_options": null
-    },
-    {
-      "attribute_key": "brand_concerns",
-      "attribute_name": "本品牌顾虑",
-      "category": "竞品对比",
-      "field_type": "text",
-      "description": "客户对购买本品（试驾/顾问推销的品牌）明确表达的担忧或犹豫点。如保值率、质量、售后等",
-      "enum_options": null
-    },
-    {
-      "attribute_key": "resistances",
-      "attribute_name": "购车抗性/顾虑",
-      "category": "购车需求",
-      "field_type": "text",
-      "description": "客户购车的抗性与顾虑（价格透明度/保值率/质量/售后等）。从 analysis_result.resistances 汇总而来，格式：「抗性1/抗性2」。",
-      "enum_options": null
-    }
-  ]
+  "configs": []
 }

@@ -1,4 +1,4 @@
-"""``客户初始画像（事实账本管线）`` —— 业务优化主方案的实验臂。
+"""``业务测试臂`` —— 业务优化主方案的事实账本管线。
 
 这是 :mod:`customer_profile.workflows.customer_profile_entry` 的**平行实现**，两臂共用
 同一套取数子流程与同一个成文工作流，只在**中间的取证与投影**上换实现。AB 实验按
@@ -9,7 +9,7 @@
         → profile_features_analysis（人设特征判断）
           → customer_profile_production（41 节点 / 11 路 LLM 生成）
 
-    实验臂（本模块，阶段一/二）:
+    业务测试臂（本模块，阶段一/二）:
       取数层（14 路 tool，**原样复用**既有子流程）
         → L0 记录层（纯代码）：把清单与各渠道产物统一成 records[]
           → L4 分诊层（纯代码）：sufficient / thin / empty
@@ -46,12 +46,28 @@ import json
 import re
 from typing import Any
 
+from .. import internal_fields as inf
 from .. import notes_contract as nc
 from .. import projection as proj
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "customer_profile_pipeline"
-DISPLAY_NAME = "客户初始画像（事实账本管线）"
+"""**稳定标识，不得改动。** 模板资源名是 ``<slug>__<node_id>``，而 ``scripts/run_baseline.py
+--workflow-id`` 与既有批次（``pipeline-v3.3-39``）的可比性判据都以它为准。"""
+
+DISPLAY_NAME = "业务测试臂"
+"""对外显示名。
+
+该臂的实验已完成并通过核验，对外口径由「实验臂」改为「**业务测试臂**」（2026-10-15 拍板）。
+**改名只限本层**：``WORKFLOW_ID`` 与 ``SLUG`` 一个字都不动，否则跑批入口与批次可比性判据
+会一并断掉。"""
+
+PROFILE_API_PREFIX = "/api/v1/remote/"
+"""画像服务的 API 前缀。与 :mod:`customer_profile_production` 里同名常量一致。
+
+**为什么不 import 那一份**：两个工作流模块互不依赖是有意的——production 是基线臂、本模块
+是业务测试臂，两臂共用同一套取数子流程但各自独立演进。为一个字符串建依赖会造出反向耦合。
+"""
 
 # ---------------------------------------------------------------- 节点 ID
 
@@ -120,6 +136,17 @@ L2_REVIEW = "pipeline_l2_review"
 
 # —— L3 成文段
 PRODUCTION = "pipeline_production"
+
+# —— v2 回传（旁支，不改变主链与 END 的契约）
+CALLBACK_BUILD = "pipeline_callback_build"
+"""回传体构造（纯代码，0 token）。
+
+**为什么挂在 PRODUCTION 之后而不是塞进 L3 子流程**：L3 是对外产物（``result1``）的产地，
+它的装配形状被 ``tests/test_l3.py`` 逐条钉住。回传是新长出的一条**旁支**——END 仍挂
+PRODUCTION，``result1`` 的来源与形状一个字不改。"""
+
+CALLBACK_WRITE = "pipeline_callback_writeback"
+"""回写节点。带 ``@writeback``，受既有的 ``WRITEBACK_ENABLED`` 闸门管辖（缺省不发送）。"""
 
 SHARED_CODE_MODULE = "customer_profile.workflows.shared_code"
 SLUG = "customer_profile_pipeline"
@@ -985,11 +1012,13 @@ def enum_key_guide() -> str:
     实验臂此前缺的正是这一段。
 
     **清单由契约快照生成，不手抄**：字段一改附录跟着改，不会与
-    :mod:`customer_profile.notes_contract` 漂移。
+    :mod:`customer_profile.notes_contract` 漂移。**编外字段一并渲染**——L1 照这份清单取证，
+    只列契约字段等于把编外字段的取证任务删掉，``purchase_decisions`` 与 ``deal_battle``
+    随即失去料；但编外字段在后面加一句「不回传」，免得日后有人以为它们该出现在 Notes 里。
     """
     lines = ["## 可选字段的合法取值（枚举字段必须用英文键）", ""]
-    for entry in nc.RAW_CONFIGS:
-        options = entry.get("enum_options")
+    for key in inf.EXTRACTION_KEYS:
+        options = inf.enum_options(key)
         if not options:
             continue
         plural = "多选，多个值用 || 连接" if options.get("multiple_value") else "单选"
@@ -1003,7 +1032,8 @@ def enum_key_guide() -> str:
                 )
             else:
                 parts.append(f"{enum_key}={value}")
-        lines.append(f"- `{entry['attribute_key']}`（{plural}）：" + " / ".join(parts))
+        suffix = "　【内部字段，不回传】" if inf.is_internal_only(key) else ""
+        lines.append(f"- `{key}`（{plural}）：" + " / ".join(parts) + suffix)
     return "\n".join(lines)
 
 
@@ -1043,8 +1073,8 @@ FIELD_SOURCE_NOTES: dict[str, str] = {
 「通道矩阵暂不落地、只作研究稿」）；这里只给**契约没给线索的字段**补一句该看哪里、
 不该看哪里，而不是替它决定看哪几路渠道。
 
-键必须是契约里的真字段名，由 :func:`field_inference_guide` 与用例共同把关。
-"""
+键必须是**取证字段**的字段名（契约字段或编外字段），由
+:func:`field_inference_guide` 与用例共同把关。"""
 
 
 def field_inference_guide() -> str:
@@ -1056,10 +1086,11 @@ def field_inference_guide() -> str:
     渲染进去，模型看到的口径与 :mod:`customer_profile.notes_contract` **逐字一致**，
     也不会有第二处手抄的说明日后漂移。
 
-    与 :func:`enum_key_guide` 同法：**由契约快照生成，不手抄**。
+    与 :func:`enum_key_guide` 同法：**由契约快照生成，不手抄**。编外字段在此追加一节，
+    口径同样逐字取自登记表（原先的契约原文），并在每行标出「不回传」。
     """
     lines = ["## 目标字段清单（默认全部覆盖，确实无关的可留空）", ""]
-    current = None
+    current: str | None = None
     for entry in nc.RAW_CONFIGS:
         category = entry.get("category") or ""
         if category != current:
@@ -1069,6 +1100,18 @@ def field_inference_guide() -> str:
         name = entry.get("attribute_name") or ""
         field_type = entry.get("field_type") or "text"
         description = (entry.get("description") or "").strip()
+        lines.append(f"- `{key}`（{name}，{field_type}）：{description}")
+        note = FIELD_SOURCE_NOTES.get(key)
+        if note:
+            lines.append(f"  - 取证范围：{note}")
+
+    # ---- 编外字段：照样取证，但不回传（契约里已经没有它们，不列出来模型就不会去找）
+    lines.append("")
+    lines.append("### 内部字段（照常取证，但**不写入 Notes**，供销售策略与画像卡使用）")
+    for key in inf.EXTRACTION_ONLY_KEYS:
+        name = inf.name_of(key)
+        field_type = inf.field_type_of(key)
+        description = inf.description_of(key)
         lines.append(f"- `{key}`（{name}，{field_type}）：{description}")
         note = FIELD_SOURCE_NOTES.get(key)
         if note:
@@ -1698,10 +1741,10 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
         detail = entry.get("reasoning_detail") or {}
 
         # ---- 2 枚举合法性（未降级的非法取值）
-        if nc.is_enum(key) and str(basis.get(key) or "") != proj.INFERRED_LOW:
+        if inf.is_enum(key) and str(basis.get(key) or "") != proj.INFERRED_LOW:
             for item in _enum_values(value):
-                if nc.legal_keys(key) and item not in nc.legal_keys(key):
-                    if not nc.display_to_key(key, item):
+                if inf.legal_keys(key) and item not in inf.legal_keys(key):
+                    if not inf.display_to_key(key, item):
                         enum_illegal.append({"attribute": key, "value": item})
 
         # ---- 3 无锚点 fact
@@ -2291,6 +2334,49 @@ WORKFLOW = WorkflowDef(
                     "claims_json": "claims_json",
                 },
             },
+        ),
+        # ---------------------------------------------------------- v2 回传（旁支）
+        make_node(
+            CALLBACK_BUILD,
+            "回传体构造",
+            "code",
+            after=(PRODUCTION,),
+            inputs={
+                "phone": (START, "phone_number"),
+                "batch_id": (START, "batch_id"),
+                "facts_json": (L2_PROJECT, "facts_json"),
+                "notes_updates_json": (L2_REVIEW, "notes_updates_json"),
+                # 表达层的 section 产物（resistances / emotion_state / overall_tag 从这里取）。
+                # ``result1`` 是**字符串**：由 callback_build 内部二次解析。
+                "express_json": (PRODUCTION, "result1"),
+            },
+            outputs=("callback_json",),
+            # 指向 ``main`` 而不是 ``build_analysis_result``：后者返回的是 JSON **字符串**，
+            # 而 ``execute_code`` 要求 code 函数返回字段字典（``executors_misc.py:141-144``
+            # 对非 Mapping 直接抛「返回值应为字段字典」）。``main`` 把那个串包成
+            # ``{"callback_json": ...}``，正是节点出参的形状。
+            function="customer_profile.callback_build:main",
+        ),
+        make_node(
+            CALLBACK_WRITE,
+            "画像回写",
+            "http-request",
+            after=(CALLBACK_BUILD,),
+            outputs=("body", "status"),
+            **{
+                # 请求体形状：顶层三键（phone / batch_id / analysis_result），
+                # 其中 analysis_result 必须是**对象**。@body_template 恒把引用渲染成字符串，
+                # 产不出对象，因此这里整段取自绑定值（@body_ref）。
+                "@body_ref": True,
+                "@service": "profile",
+                "@method": "post",
+                "@path": f"{PROFILE_API_PREFIX}callback/update-profile",
+                "@auth": True,
+                # 生产回写：WRITEBACK_ENABLED=false（缺省）时不发送，只产出「已跳过」的结果。
+                "@writeback": True,
+                "@outputs": {"body": "$text", "status": "$status"},
+            },
+            inputs={"@body_ref": (CALLBACK_BUILD, "callback_json")},
         ),
         make_node(
             END,
