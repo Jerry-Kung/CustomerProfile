@@ -69,8 +69,9 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser \
     && chown -R appuser:appuser /app
 USER appuser
 
-# 8000 内部只读面（运行台与查询），8099 对外写面（接收任务队列推送）。
-EXPOSE 8000 8099
+# 18173 内部只读面（运行台与查询，实际端口由 API_PORT 决定），8099 对外写面（接收任务队列推送）。
+# EXPOSE 只是声明，不改变容器内实际的监听端口；换端口改 .env 的 API_PORT 即可。
+EXPOSE 18173 8099
 
 # 缺省起 API；worker 与 inbound 由 compose 覆盖 command。
 CMD ["python", "-m", "customer_profile.main"]

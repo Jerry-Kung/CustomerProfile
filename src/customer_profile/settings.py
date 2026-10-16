@@ -16,6 +16,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 """仓库根目录（`src/customer_profile/settings.py` 上溯三层）。"""
 
+DEFAULT_API_PORT = 18173
+"""运行台 / API 的缺省端口。
+
+由 8000 改来（V0.5.6）：8000 是各框架的开发端口，部署机上常被别的服务占用，
+而原先它写死在 `main.py` 里，撞端口只能改代码。常量在此处定义是为了让字段缺省值与
+「空值回落」两处引同一个数，不会各改一半。
+"""
+
 
 class Settings(BaseSettings):
     """全部运行期配置。缺省值取向：保守、可解释、不静默失败。"""
@@ -78,6 +86,33 @@ class Settings(BaseSettings):
     截断因此能静默通过并在下游解析时炸掉。
     """
 
+    # ------------------------------------------------------------ 运行台 / API（V0.5.6）
+    api_host: str = "0.0.0.0"
+    api_port: int = DEFAULT_API_PORT
+    """运行台与 API 的监听地址与端口。
+
+    **这两个值必须可配。** 原先 ``main.py`` 把端口写成 ``8000`` 字面量，与
+    ``docker-compose.yml`` 的端口映射各写一份，部署机上 8000 被占用时只能改代码。
+    缺省由 8000 改为 **18173**：8000 是各框架的开发端口，测试机上极易被别的服务占用。
+
+    与 ``inbound_port``（8099）分开：那是**对外写面**，这里是**内部只读面**。
+    容器部署时宿主机映射与健康检查都跟着本值走（compose 用 ``${API_PORT:-18173}``）。
+    """
+
+    @field_validator("api_port", mode="before")
+    @classmethod
+    def _api_port_blank_means_default(cls, value: Any) -> Any:
+        """``API_PORT=`` 留空时回落到缺省端口。
+
+        不能复用 ``_blank_means_unset``：那个把空串归一成 ``None``，而本字段是纯 ``int``，
+        于是 ``Settings()`` 直接构造失败——一个空配置行就能阻断开机。部署侧从
+        ``.env.example`` 复制模板后最容易留下的就是这种空行，宁可按缺省值起，也不要起不来。
+        写成 ``str`` 分支是为了兼容 ``.env``（空串）与 compose（``${API_PORT:-…}``）。
+        """
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return DEFAULT_API_PORT
+        return value
+
     # ------------------------------------------------------------ 外部服务
     auc_base_url: str = "https://openspeech.bytedance.com/api/v3/auc/bigmodel"
     """AUC 语音识别服务的基地址。
@@ -126,7 +161,7 @@ class Settings(BaseSettings):
 
     inbound_host: str = "0.0.0.0"
     inbound_port: int = 8099
-    """对外任务接口的监听地址与端口。与运行台的 8000 分开：那是内部只读面，这是对外写面。"""
+    """对外任务接口的监听地址与端口。与运行台的 ``api_port`` 分开：那是内部只读面，这是对外写面。"""
 
     # ------------------------------------------------------------ HTTP 策略
     http_connect_timeout: float = 10.0
@@ -229,6 +264,8 @@ class Settings(BaseSettings):
         "llm_tpm_burst",
         "llm_enable_thinking",
         "llm_max_tokens",
+        "api_port",
+        "inbound_port",
         mode="before",
     )
     @classmethod

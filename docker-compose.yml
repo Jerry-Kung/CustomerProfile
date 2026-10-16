@@ -40,10 +40,12 @@ services:
       # 崩溃恢复由 worker 自己做（worker.py 的启动恢复）。
       INTERRUPT_ON_START: "false"
     ports:
-      # 8000 是内部只读面、无鉴权：只该在内网暴露。
-      - "8000:8000"
+      # 端口取自 .env 的 API_PORT（缺省 18173），容器内监听同一个值。
+      # 8000 曾是缺省值，但那是各框架的开发端口，部署机上常被别的服务占用；
+      # 那时只能改代码，现在改 .env 即可：API_PORT=xxxx 后 docker compose up -d。
+      - "${API_PORT:-18173}:${API_PORT:-18173}"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${API_PORT:-18173}/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

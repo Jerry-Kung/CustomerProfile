@@ -30,7 +30,7 @@ git add frontend/dist
 
 ```bash
 npm install
-npm run dev          # Vite dev server，API 请求按 vite.config.ts 的 proxy 转给 127.0.0.1:8000
+npm run dev          # Vite dev server，API 请求按 vite.config.ts 的 proxy 转给 127.0.0.1:18173
 ```
 
 后端另起：`python -m customer_profile.main`。

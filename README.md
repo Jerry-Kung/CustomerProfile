@@ -37,7 +37,7 @@ python -m customer_profile.main
 两种方式都起好后，提交一次任务：
 
 ```
-curl -X POST localhost:8000/runs \
+curl -X POST localhost:18173/runs \
   -H 'content-type: application/json' \
   -d '{"workflow_id":"customer_profile_pipeline","inputs":{"phone_number":"13800000000"},"business_ref":"13800000000"}'
 ```

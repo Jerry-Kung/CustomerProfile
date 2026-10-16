@@ -2,6 +2,26 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-10-16 — 运行台端口由写死 8000 改为可配，缺省 18173
+
+分支 `dev-business-opt01`。测试环境打包时报
+`Bind for 0.0.0.0:8000 failed: port is already allocated`：部署机上 8000 已被别的服务占用。
+
+- **根因不在前端。** 前端 `api/client.ts` 走相对路径（同源托管），构建产物里 `8000`
+  出现 0 次；审计页面没有端口可配项，也不需要——它不选后端地址。真正写死的是
+  `main.py` 的 `uvicorn.run(..., port=8000)`，而 compose 的端口映射又照抄了一遍，
+  两处各写一份，撞端口只能改代码重打镜像。
+- **新增配置项 `API_HOST` / `API_PORT`**（新增 §7.1），缺省 `0.0.0.0:18173`。
+  `main.py` 与 `docker-compose.yml` 都取该值（compose 用 `${API_PORT:-18173}` 插值），
+  健康检查跟着走。**改 .env 的 `API_PORT` 即换端口**，不必碰代码。
+  缺省不再用 8000：那是各框架的开发端口，测试机上极易被占用。
+- **`API_PORT=` 留空回落缺省值**，不复用 `_blank_means_unset`——那个把空串归一成 `None`，
+  而本字段是纯 `int`，会让 `Settings()` 构造失败、服务起不来。空配置行不该成为开机失败的原因。
+- 同步位置：`.env.example` §7.1、`frontend/vite.config.ts` 的 dev proxy、
+  `docs/runbooks/部署.md`、`docs/design/对外任务接口.md`、两份 README。
+- **前端产物无需重建**：本次只改 `vite.config.ts` 的 dev proxy（构建时被替换，不进产物），
+  `frontend/dist` 保持原样。
+
 ## 2026-10-16 — 部署改容器化：Dockerfile + docker compose
 
 分支 `dev-business-opt01`。上线测试环境的部署方式由「手工装依赖起三个进程」改为容器编排，
