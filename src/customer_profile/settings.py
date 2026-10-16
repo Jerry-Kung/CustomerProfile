@@ -113,6 +113,21 @@ class Settings(BaseSettings):
     mhero_base_url: str = "https://mhero.dfmc.com.cn/customer_profile/m2m_api"
     profile_mhero_api_key: str = ""
 
+    # ------------------------------------------------------------ 对外任务接口（V0.5.5）
+    inbound_api_key: str = ""
+    """对外任务接口（``python -m customer_profile.inbound``）的**入站**密钥，请求头 ``X-API-Key``。
+
+    **独立于 ``profile_api_key``，不复用。** 那个是我们主动调用生产回写服务的**出站**凭据；
+    同一个值身兼两用，会把「谁能调我们的接口」与「我们能写生产库」并成同一个泄露面。
+
+    置空表示**关闭接口**——全部请求返回 503，而不是关闭校验。空密钥若被当作「不校验」，
+    这个端口就是任何人可写的入口：一条外部请求会变成一次真实算力消耗与一次生产回写。
+    """
+
+    inbound_host: str = "0.0.0.0"
+    inbound_port: int = 8099
+    """对外任务接口的监听地址与端口。与运行台的 8000 分开：那是内部只读面，这是对外写面。"""
+
     # ------------------------------------------------------------ HTTP 策略
     http_connect_timeout: float = 10.0
     http_read_timeout: float = 600.0
