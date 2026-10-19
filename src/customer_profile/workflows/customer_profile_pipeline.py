@@ -1610,6 +1610,15 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
     ``empty`` 不产出任何断言（保守模板，``端到端方案.md`` §3.6）。
     """
     claims, _ = _claims_payload(claims_json)
+
+    def _num(value) -> float | None:
+        """L1 自报置信度：解析成 0–1 的浮点；缺省或非法返回 ``None``（由投影层给默认值）。"""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, min(1.0, number))
+
     def _hints(raw: dict) -> tuple[str, ...]:
         value = raw.get("basis_of_inference") or ()
         if isinstance(value, str):
@@ -1653,15 +1662,22 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
                 source_quote=str(raw.get("source_quote") or "").strip(),
                 # v3.1 改造一：推导链透传到 Notes 的 ``steps``（与 ``evidence`` 分料）。
                 reasoning_steps=_steps(raw),
+                # v3.5：L1 自报的置信度透传到出口，作为字段级打分的基准
+                # （旧实现按档位给固定值，模型 0.3–0.95 的真实打分被整条丢弃）。
+                confidence=_num(raw.get("confidence")),
             )
         )
     result = proj.project(ledger, context=_projection_context(ledger))
 
     updates = result.notes_updates
+    # 姓名条目在任何档位都保留：「未知」或白名单来源的真名都必须交代给销售，
+    # thin/empty 档删掉它等于让下游分不清「没查」与「没提取」。
+    name_updates = [u for u in updates if u.get("attribute_key") == "customer_name"]
     if tier == "empty":
-        updates = []
+        updates = name_updates
     elif tier != "sufficient":
-        updates = _registry_only(updates)
+        kept = _registry_only(updates)
+        updates = kept + [u for u in name_updates if u not in kept]
 
     # 候选集必须与 updates **同口径**：``thin`` 档刻意只留登记档坐实的字段，
     # 若兜底仍按全量候选裁决，它就能把该档排除掉的非登记字段重新写回去——
@@ -1720,8 +1736,9 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
         key = item["attribute_key"]
         # 缺字段补全恒为软值（inferred_low），置信度必须低于「候选集内裁决」，
         # 否则销售分不清「三条来源同向汇出来的」与「表里什么都没有、模型补的空」。
+        # v3.5：软补全从 0.4 降到 0.25——它基本等于纯猜（用户口径：20–30%）。
         soft = bool(item.get("missing"))
-        confidence = 0.4 if soft else 0.8
+        confidence = 0.25 if soft else 0.8
         reason = item.get("reason") or ""
         # v3.3：移除 reason 中的工程术语措辞（问题2修复）。
         # L2 提示词已规范，但为防止模型偶发漏出，代码再清洗一遍。
@@ -1810,7 +1827,12 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
         key = str(entry.get("attribute_key") or "")
         value = entry.get("attribute_value")
         # ---- 1 无效占位清除
-        if key in PLACEHOLDER_VALUES or _is_placeholder_value(value):
+        # 「未知」对姓名字段是**明确的业务结论**（查遍记录也没有可靠姓名），不是占位串，
+        # 不得按占位删掉——用户口径：查不到姓名时固定输出「未知」。
+        if (
+            key != "customer_name"
+            and (key in PLACEHOLDER_VALUES or _is_placeholder_value(value))
+        ):
             placeholder_removed.append(key)
             continue
         detail = entry.get("reasoning_detail") or {}

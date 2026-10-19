@@ -476,17 +476,22 @@ def test_project_claims_notes_shape_matches_baseline():
 
 
 def test_project_claims_thin_tier_keeps_registry_only():
-    """thin 档只输出登记档坐实的字段。"""
+    """thin 档只输出登记档坐实的字段；姓名的「未知」交代不受档位影响。"""
     result = pipe.project_claims(
         claims_json(claim(attribute="occupation", value="教师", record_channel="小红书主页截图信息")),
         tier="thin",
     )
-    assert result["notes_count"] == 0
+    assert result["notes_count"] == 1
+    notes = json.loads(result["notes_updates_json"])
+    assert [n["attribute_key"] for n in notes] == ["customer_name"]
 
 
-def test_project_claims_empty_tier_outputs_nothing():
+def test_project_claims_empty_tier_outputs_only_name():
     result = pipe.project_claims(claims_json(claim(attribute="occupation", value="教师")), tier="empty")
-    assert result["notes_count"] == 0
+    assert result["notes_count"] == 1
+    notes = json.loads(result["notes_updates_json"])
+    assert notes[0]["attribute_key"] == "customer_name"
+    assert notes[0]["attribute_value"] == "未知"
 
 
 def test_project_claims_old_car_forces_replacement():
