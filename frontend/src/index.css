@@ -282,6 +282,23 @@ button {
   color: var(--accent);
 }
 
+/* 阶段芯片（L0–L3，取自节点标题前缀）与执行成本芯片（纯代码 / LLM）。
+   两者都是**弱化**信息：比通用类别芯片更浅一档，不与它抢注意力。 */
+.chip-stage {
+  background: transparent;
+  border: 1px solid var(--accent-line);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.chip-cost {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-soft);
+}
+
 .dot-sep {
   color: var(--border-strong);
   padding: 0 2px;
@@ -916,6 +933,37 @@ button {
   border-bottom: 1px solid var(--border);
 }
 
+/* 回写跳过：中性说明，不是错误，也不是成功。
+   用 info 色调而非 ok/danger——「未写入」是设计内的正常态。 */
+.rv-notice {
+  background: var(--tone-info-bg);
+  border: 1px solid var(--tone-info-line);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+}
+
+.rv-notice-title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.rv-notice-body {
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 6px 0 0;
+}
+
+.rv-notice-meta {
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 12px;
+  margin: 8px 0 0;
+  word-break: break-all;
+}
+
 .rv-node-name {
   color: var(--text-soft);
   font-size: 12.5px;
@@ -1244,6 +1292,46 @@ button {
   min-height: 0;
   overflow-y: auto;
   padding: 18px 20px 24px;
+}
+
+/* 聚合结果里的两份产物：画像卡（result1）与回传体。各自可折叠，默认展开。 */
+.result-block + .result-block {
+  border-top: 1px solid var(--border);
+  margin-top: 20px;
+  padding-top: 20px;
+}
+
+.result-block-summary {
+  align-items: baseline;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  font-size: 14px;
+  font-weight: 600;
+  gap: 10px;
+  list-style: none;
+  margin-bottom: 14px;
+}
+
+.result-block-summary::-webkit-details-marker {
+  display: none;
+}
+
+.result-block-summary::before {
+  color: var(--text-faint);
+  content: '▸';
+  font-size: 11px;
+  transition: transform 120ms ease;
+}
+
+.result-block[open] > .result-block-summary::before {
+  transform: rotate(90deg);
+}
+
+.result-block-note {
+  color: var(--text-faint);
+  font-size: 12px;
+  font-weight: 400;
 }
 
 /* ---------------------------------------------------------------- 任务列表 */

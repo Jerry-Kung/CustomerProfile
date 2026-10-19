@@ -2,6 +2,442 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-10-19 — 业务优化与 Compose 部署整合
+
+将业务优化工作线合入部署工作线：主入口改为 `customer_profile_pipeline`，采用 v2 回传体，
+新增鉴权接单进程，同时保留统一中文日志、独立 worker 与优雅停机。
+
+- 部署统一为 `compose.yaml` 的 API / worker / inbound 三个服务，移除重复配置。
+- 沿用 `customer-profile` 项目名、`profile-data` 数据卷与 UID/GID；运行台缺省端口 18173，
+  兼容 `CP_API_PORT` 宿主机映射，对外接口缺省 8099。
+- 旧入口不再接收任务，历史记录与定义快照保留；`outputs.result1` 仍为 JSON 字符串，
+  内部结构改为 v2 回传契约。旧调用方升级与部署验收见 `runbooks/部署.md`。
+
+验证：后端 736 passed / 81 既有 skipped，前端构建与源码 lint 通过（5 条既有警告）；
+镜像构建与独立 Compose 项目验收通过，覆盖旧库升级、独立 worker、鉴权接单、重启状态
+与三进程日志。验收使用临时数据卷、固定响应或模拟回写，未触发真实业务回写。
+
+## 2026-10-19 — 证据链与推理链可读性整改（v3.4）
+
+分支 `dev-business-opt01`。测试环境逐案核读发现：部分字段「信源原文匹配」
+只写渠道名、「逻辑推导链」写「来自某渠道」；「行业」的信源与结论看起来毫不相干。
+
+- **渠道拆分**：`手机号归属地信息` 改接 `phonenumber_analysis_result`，
+  `关联企业信息` 继续接 `company_analysis_result`。此前两条渠道接的是同一份企业注册
+  信息，「珠宝首饰零售」因此挂在归属地名下。
+- **定位容错**：`_locate` / `_occurrences` 增加忽略 Markdown 标记的匹配（`**国标行业**`
+  与 `国标行业`），切片仍按原文下标还原。锚点失败时用字段取值在**同一渠道**回查补证据，
+  置信档仍按原规则降级。
+- **对客渲染**：证据位不再输出裸渠道名或「来自{渠道}」；第三方画像标签输出
+  「第三方画像标签“预测年龄段”给出“50岁及以上”」；注入字段输出具体取值
+  （「客户留资手机号：138****0000」）。
+- **L2 兜底**：补出来的字段把理由里的事实部分填进 `evidence`，不再固定为空。
+- **提示词**：L1 两层要求锚点为原文连续片段（禁字段名、记录编号、Markdown 标记）；
+  第三方标签的 `basis_of_inference` 必须带标签取值；推导链「能一句说清就一句」，
+  复杂推理才分步。
+- 方案与实测数据见 `docs/design/证据链与推理链可读性优化方案.md`。全量测试通过。
+
+## 2026-10-19 — 回传输出侧三项修正（意向等级 / 空分类填充 / result1 接线）
+
+分支 `dev-business-opt01`。测试环境实测发现：画像「购车意向等级」恒为空；
+「换车动因」「对比车型」经常整块缺失；运行台「结果」页展示的仍是九板块旧结构。
+
+- **意向等级**：`deal_level` 此前不在 L1《目标字段清单》里（既非契约字段，也不在编外
+  登记表），facts 恒无此键，`ai_insight.purchase_intent_level` 因此从未产出。现登记为
+  **画像卡字段**（`internal_fields.CARD_ONLY_KEYS`，A/B/C/D 枚举），取证照常、仍不进
+  Notes 白名单。
+- **空分类填充**：「换车动因」「对比车型」缺料时各给一条「暂无换车动因」/「暂无对比
+  车型」填充项（置信度 0.3），不再整块缺席；其余四类缺料仍按原语义整个不出现。
+- **旧车证据**：`old_car_model="无"` 这类占位取值不再被当作旧车证据，首购客户不会被
+  改写为换购。
+- **`result1` 接线**：业务测试臂 `END` 改挂 `callback_build`，运行台展示 v2 回传体；
+  L3 九板块旧结构仍留在 `pipeline_production` 出参里备查。
+
+## 2026-10-19 — 主入口未传 batch_id 时补 batch_001
+
+分支 `dev-business-opt01`。测试环境实跑发现：照 README 的 curl 示例只传 `phone_number`
+提交，运行在 `pipeline_production` 节点以
+`KeyError: 节点 pipeline_start 未产出字段 batch_id` 失败（40 节点中 36 成功、3 阻断），
+而**提交本身返回 200**——调用方看不出问题。
+
+- **根因**：`start` 节点把 `batch_id` 声明为可选（`required_batch_id=False`），但
+  `execute_start` 只输出「声明了且调用方传了」的字段，不传时该键根本不出现；下游
+  `pipeline_production` 取 `(START, "batch_id")` 直接 KeyError。定义里的缺省值
+  （`default_inputs()` 返回空串）在 `/runs` 提交路径上从未被套用。
+- **修法（最小）**：提交入口 `POST /runs` 对主入口补缺省值——未传或传空白时写入
+  `batch_id = "batch_001"`（`api.DEFAULT_BATCH_ID`）。显式传值原样保留。
+  不在 `execute_start` 里改：那里语义是「原样暴露调用方入参」，给所有工作流的可选入参
+  凭空补值会改变其它工作流的既有行为。
+- **影响面**：前端提交页本就总是发 `batch_id`（空也发空串），行为不变，只是空串现在会被
+  补成 `batch_001` 而不是空串；对外任务接口（8099）要求 `batch_id` 必填，不受影响。
+- **测试**：`tests/test_api.py` 新增三条——不传补缺省、空白串补缺省、显式值保留。
+- 验证：测试环境带 `batch_id` 提交实测 `succeeded`（42 节点全成功，442 s）。
+
+## 2026-10-16 — 运行台端口由写死 8000 改为可配，缺省 18173
+
+分支 `dev-business-opt01`。测试环境打包时报
+`Bind for 0.0.0.0:8000 failed: port is already allocated`：部署机上 8000 已被别的服务占用。
+
+- **根因不在前端。** 前端 `api/client.ts` 走相对路径（同源托管），构建产物里 `8000`
+  出现 0 次；审计页面没有端口可配项，也不需要——它不选后端地址。真正写死的是
+  `main.py` 的 `uvicorn.run(..., port=8000)`，而 compose 的端口映射又照抄了一遍，
+  两处各写一份，撞端口只能改代码重打镜像。
+- **新增配置项 `API_HOST` / `API_PORT`**（新增 §7.1），缺省 `0.0.0.0:18173`。
+  `main.py` 与 `docker-compose.yml` 都取该值（compose 用 `${API_PORT:-18173}` 插值），
+  健康检查跟着走。**改 .env 的 `API_PORT` 即换端口**，不必碰代码。
+  缺省不再用 8000：那是各框架的开发端口，测试机上极易被占用。
+- **`API_PORT=` 留空回落缺省值**，不复用 `_blank_means_unset`——那个把空串归一成 `None`，
+  而本字段是纯 `int`，会让 `Settings()` 构造失败、服务起不来。空配置行不该成为开机失败的原因。
+- 同步位置：`.env.example` §7.1、`frontend/vite.config.ts` 的 dev proxy、
+  `docs/runbooks/部署.md`、`docs/design/对外任务接口.md`、两份 README。
+- **前端产物无需重建**：本次只改 `vite.config.ts` 的 dev proxy（构建时被替换，不进产物），
+  `frontend/dist` 保持原样。
+
+## 2026-10-16 — 部署改容器化：Dockerfile + docker compose
+
+分支 `dev-business-opt01`。上线测试环境的部署方式由「手工装依赖起三个进程」改为容器编排，
+新文件 `Dockerfile`、`.dockerignore`、`docker-compose.yml`。运维要点见 `docs/runbooks/部署.md` §1.1。
+
+- **一个镜像承载三个进程**，compose 服务 `api` / `worker` / `inbound` 只覆盖 `command`。
+  三份几乎相同的镜像各自构建会互相漂移，因此不拆多个 Dockerfile。
+- **依赖源全部换清华镜像**（apt 与 pip），替换方式取自仓库里的 `Dockerfile.example`。
+  apt 侧同时处理 deb822 的 `debian.sources` 与旧式 `sources.list`：只改前者的话，将来换
+  基础镜像标签会让替换静默失效、退回官方源（慢但不出声）。
+- **未照抄示例里的 ffmpeg**：本项目音频走云端 URL，仓库内无 ffmpeg / ffprobe / pydub 调用，
+  装它只增体积。只装 `curl`（健康检查）与 `ca-certificates`（对外 HTTPS）。
+- **镜像内不做 npm 构建**。`frontend/dist` 本就随仓库入库（`.gitignore` 的例外），
+  直接 `COPY`；前端改动需先 `npm run build` 再 `docker build`。
+- **配置仍以 `.env` 为唯一入口**，compose 用 `env_file` 注入，与 `settings.py` 自己读 `.env`
+  取值一致。compose 只覆盖两项随形态变化的：`SERVE_UI=true`，以及 API 服务的
+  `INLINE_WORKER=false`——否则 API 与 worker 两个容器会抢同一个队列。
+- **命名卷 `cp-data` 挂 `/app/data`**，落在本机磁盘，满足「SQLite 不可放网络挂载」这条
+  硬约束（WAL 依赖 `-shm`，网络文件系统上会锁失效并可能损坏库）。
+- **停止宽限期按进程分别设**：api 90s、inbound 30s、**worker 30 分钟**。一次画像约 21 分钟，
+  缺省的 10 秒宽限会在停机时把在飞运行砍成 `interrupted`。
+- **`init: true`**：uvicorn 与 worker 都靠信号优雅停机，让 shell 当 PID 1 会让信号转发不可靠。
+
+## 2026-10-16 — 上线测试环境准备：新增对外任务接口（8099）
+
+分支 `dev-business-opt01`。上线业务测试前补对外面：运行台（8000）是**内部只读面**，
+提交任务只是它顺带提供的入口、无鉴权，而任务此后由前端任务队列批量推送。
+新增独立进程 `python -m customer_profile.inbound`，监听 **8099**，只做接单。
+契约见 `docs/design/对外任务接口.md`，运维与验收步骤见 `docs/runbooks/部署.md` §9。
+
+- **接单接口** `POST /api/v1/tasks`，入参 `phone_number` + `batch_id`（**均必填**），
+  请求头 `X-API-Key` 鉴权。收到即 `Service.submit` 持久化入队并返回 200
+  （`{"status":"accepted","run_id":…}`），**不执行、不查询、不轮询**——执行由 worker 做，
+  结果由回写接口送到业务系统。
+- **`batch_id` 在接口层必填**，尽管工作流定义里它可选。它会被原样填进回写体顶层
+  `batch_id`，前端据此判断任务来源；空值会让来源丢失。定义层保持可选是刻意的——
+  跑批脚本传空串（它透传进 `result1`，填批次号会污染与基线的可比性），那条路径不经本接口。
+  新增用例 `tests/test_inbound.py` 同时钉住「入参进库」与「定义层绑到回写体」两段，
+  缺任一段都会漏掉一类静默失效。
+- **密钥独立新增 `INBOUND_API_KEY`，不复用 `PROFILE_API_KEY`。** 后者是我们主动调用生产回写
+  服务的**出站**凭据；同一个值身兼两用会把「谁能调我们的接口」与「我们能写生产库」并成
+  同一个泄露面。**未配置时接口整体关闭（全部请求 503），而不是关闭校验**——对外写面的空
+  密钥若被当作「不校验」，端口就是任何人可写的入口。比较走 `secrets.compare_digest`。
+- **接单进程不执行工作流，也不动别人的运行状态。** `inline_worker` 与 `interrupt_on_start`
+  由 `inbound_settings()` 强制关掉（不经 `.env`，不是可调参数）：前者会让 21 分钟的工作流
+  拖住接单能力；后者会与运行台、worker 共用的同一个 SQLite 上，把**别的进程**正在跑的
+  运行标成 `interrupted`。`scripts/run_baseline.py` 为同样的理由显式关掉它。
+- **错误码**：401 未带密钥 / 403 密钥不符（与既有回写服务的语义一致）/ 422 入参非法 /
+  429 队列已满（带 `Retry-After`）/ 503 接口未启用。
+- **配置**：`.env` 与 `.env.example` 新增 `INBOUND_API_KEY` / `INBOUND_HOST` / `INBOUND_PORT`
+  （缺省 `0.0.0.0:8099`）。
+- **测试**：`tests/test_inbound.py` 14 项（鉴权三态、接口关闭不放行、接单落库、
+  `batch_id` 必填与进库、手机号形态与既有契约同形、进程定位两条、定义层接线、回传体三键）。
+- **对接文档** `docs/对外任务接口对接文档.md`：写给前端任务队列的**联调说明**——怎么调、
+  响应码各自该怎么做、多久出结果、批量推送的排队与 429 退避、一份自检清单。与
+  `docs/design/对外任务接口.md` 分工：那份记设计取舍（为什么 401/403 分开、为什么未配密钥
+  是 503），这份讲**怎么用**。前端团队已读的 `AI画像远程回传接口数据结构说明.md` 是同体裁先例，
+  两份放在同一层。
+- **密钥生成脚本** `scripts/gen_inbound_key.py`：一条命令产出 `INBOUND_API_KEY` 并可直接落盘。
+  **默认只打印、不动文件**；写 `.env` 需显式 `--write`；**已有非空值则拒绝覆盖**（换密钥要两端
+  同时动作，对端还持旧值时它的请求会全部 403），`--force` 才覆盖。只改该键那一行并按原行尾
+  回写，不产出无关 diff；拒绝信息与日志**不含旧值**。用 hex 而非 base64：这个值要在 `.env`、
+  `curl -H`、前端配置三处手工出现，base64 的大小写与 `+`/`/` 容易被改写。新增
+  `tests/test_gen_inbound_key.py` 24 项钉住上述每条（含 CRLF 保持、末尾无换行时不粘连、
+  拒绝时不回显旧值、以及「跑一次生成脚本，仓库 `.env` 必须原封不动」）。
+
+**上线前验证（2026-10-16，单号真回写）**：四类响应码实测正确（401 无头 / 403 错密钥 /
+422 手机号非法 / 422 `batch_id` 空白），被拒的请求在库里零运行记录；合法请求返回 200 且
+落库为 `queued`；worker 领走后跑完，父运行 `succeeded`（129.4 s）。
+
+- **取数侧**：`GET /api/v1/remote/data/history/13415100087` → 200。任务数据确实来自正式接口。
+- **回写侧**：`POST /api/v1/remote/callback/update-profile` → **200**，线上返回
+  `{"msg":"Profile updated successfully via remote webhook."}`。回写体顶层三键
+  `phone` / `batch_id` / `analysis_result` 齐全，`batch_id = verify-single-20261016`
+  与推送值逐字一致，`analysis_result` 六键齐全（`basic_notes_updates` 44 项 /
+  `purchase_decisions` 4 类 / `deal_battle` 两数组 / `decision_psychology` 4 项）。
+- **L-003 就此销案**（已从遗留问题清单删除）：线上收的就是**顶层三键**，契约文档正确；
+  现役基线臂的 `data[]` 信封是待下线的旧实现，不是线上真实契约。
+- **留痕不含凭据**：`request_attempts` 里 `X-API-Key` 记为 `***REDACTED*`（既有脱敏逻辑）。
+- **验证用独立库** `data/verify_inbound.db`：运行台主进程（PID 11800）仍持共享库
+  `data/customer_profile.db`，故验证不共用库——否则任务会被它以内联 worker、回写关闭领走，
+  验收即失效。**验证期间该号的真实画像已写入生产库**，这是一次有意的、单号的真实副作用。
+
+## 2026-10-16 — 提交入口改指业务测试臂；修复「节点永久停在运行中」
+
+分支 `dev-business-opt01`。两件事：提交页跑的仍是已无用途的旧臂；业务测试臂的运行里
+「极光数据」节点永远显示「运行中」。方案见
+`docs/design/提交臂切换与极光节点卡死修复方案.md`。
+
+- **入口臂切换。** 「提交任务」写死的 `customer_profile_entry`（显示名「客户初始画像」，
+  基线臂）从 `WORKFLOW_MODULES` 摘除：不再加载、不再出现在 `/workflows`、不可提交与跑批。
+  前端提交页与后端入参校验必须同指一个 ID——只改前端会让手机号校验**静默失效**，
+  因此 `api.py` 的 `ENTRY_WORKFLOW_ID` 一并改指 `customer_profile_pipeline`（业务测试臂）。
+  该臂历史运行连同子运行树共 **248 条运行 / 3199 条节点行 / 293 条尝试记录**已从留痕库清除
+  （3 份不再被引用的定义快照一并删除）；
+  `experiments/batches/baseline-39-dsv41-noThink/` 自带 `trace.db`，**不受影响**。
+  `run_baseline.py` 的 `--workflow-id` 缺省值同步改指业务测试臂——原缺省是基线臂，
+  正是《跑批可靠性》A5 记录的「漏传参数导致整批白烧」那个坑。
+  模块文件保留：`tests/test_contract.py` 等仍以它为样本图，且它是基线臂**可复位**的前提。
+- **节点永久停在运行中（真实缺陷，非脏数据）。** `_RunRecord.call_path` 被当成跨节点的
+  可变字段：`scheduler.py` 为循环体临时改写它，`tracker.py` 的 `node_finished` 又以
+  `execution.call_path or run.call_path` 回落取值，而顶层节点的 `execution.call_path` 是空串。
+  运行内节点是**并发**的，于是循环体覆盖期间结束的**兄弟节点**把终态写进了另一条调用路径，
+  自己那条 `running` 行再无人更新——界面因此永久显示「运行中」。
+  **修法**：调用路径在本次执行上定死（`NodeExecution.call_path`），并显式传给
+  `node_started`；循环体改用 `ContextVar` 取基路径，嵌套迭代的路径重复段一并消除。
+- **回归用例**：`tests/test_iteration_call_path.py`。**修复前失败**（实测复现
+  `[('', 'running'), ('/iter:n_iter/0', 'succeeded')]`），修复后通过。库里 4 处孤儿节点行
+  按「终态回填 + 删错位行」修复（动手前整库备份 `data/customer_profile.db.bak-20261016`）。
+
+## 2026-10-16 — 运行台对齐 v2 回传：双产物并列、链路分层、回写状态可读
+
+分支 `dev-business-opt01`。回传旁支落地后，运行台（`frontend/`）的展示口径没跟上——
+它只认 `result1` 一个产物、只按节点类型分类、把「回写已跳过」渲染成一段生英文 JSON。
+本轮把这三处对齐到设计稿的分段与双产物口径。**只改前端**，不动执行逻辑、提示词、
+存储与接口。方案与验收见 `docs/design/运行台对齐v2回传方案.md`。
+
+- **聚合结果改为双产物并列。** 设计稿 §5 明确本轮对外产物有**两份**：`result1`（画像卡九板块）
+  与回传体（六键 `analysis_result`）。此前浮层只读**运行级** `outputs`，而它只有 `result1`；
+  回传体只存在于构造节点的产出里。现从**定义快照**定位回写节点（`config['@writeback']`）
+  → 取上游构造节点的 `callback_json` → 解析后与 `result1` 并列呈现。
+  **判据不写死工作流名或节点 ID**，换臂或改名仍成立。
+- **节点行新增阶段与成本芯片。** 阶段取自标题前缀（`L0`/`L1`/`L2`/`L3`，`L1-1a` 归 `L1`），
+  成本标签取自节点类型（`code`/`start`/`end` 等 → 「纯代码」，`llm` → 「LLM」）。
+  取不到阶段时不显示该芯片，**不用节点 ID 硬编码去补**——那会把展示层绑死在某一条工作流上。
+  `tool` 与 `http-request` 不标成本：前者是子流程、后者是外部接口，硬归一类会是错的。
+- **「回写已跳过」改为中文可读。** 判据是产出里存在 `writeback_skipped` 键，不绑定工作流。
+  摘要一行「回写已跳过（WRITEBACK_ENABLED=false）」；详情渲染成中性说明并明写
+  **运行显示成功不等于画像已写进生产库**；原始 JSON 仍留在下方可查。
+- **后端零改动。** 现有 `/runs/{id}/graph` 与 `/runs/{id}` 已足够：定义快照里带节点 `config`，
+  回写节点因此可在前端识别。`result1` 的对外契约未动。
+- **构建产物随源码同批入库**（本项目的既有决策：未装 node 的机器要能直接起）。
+  `npm run build` 通过（27 modules），产物内已含新逻辑。
+
+**验证**：`npm run build` 与 `oxlint src/` 通过（退出码 0；现存告警均为改动前既有的
+`react(set-state-in-effect)`，落在未改动的组件上）；构建产物中 `chip-stage` / `chip-cost` /
+`result-block` / `rv-notice` 及中文文案均已出现。前端无测试框架，故以构建与 lint 为静态门。
+
+## 2026-10-16 — business_opt01：AI 画像 v2 回传改造（P0–P5 编码完成）
+
+分支 `dev-business-opt01`。前端（业务架构师侧）指定了新的回传契约：`analysis_result`
+六键 + 一份 45 字段的 Notes 清单。本轮把业务测试臂（原「实验臂」）的产物对齐到该契约，
+**调测期不做真实回传**——回写节点存在、可被断言、但恒不发请求。
+方案与验收标准见 `docs/design/AI画像v2回传改造方案.md`。
+
+- **P0 契约快照重建。** `scripts/snapshot_note_contract.py` 重写为
+  `--from-response <线上 payload>` 模式：签名由契约内容摘要得出（不再是逐进程随机的
+  `hash()`），分类名未登记即报错而不是静默回落。`notes_contract.py` 随之重生成：
+  **45 字段 / 7 分类**，签名 `b36e78edf9a2`，来源 `docs/Notes_new.txt`，
+  `--check` 可复现。`notes_contract_extension.json` 清空——线上 payload 本身就是完整契约。
+- **P1 编外字段机制（`internal_fields.py`）。** 新增「取证照旧全量、回传只走契约」的白名单层。
+  17 个下线字段分三类处置：编外 11 个（`old_car_model` / `company` / `seating_requirement` …）、
+  迁移 4 个（`emotion` / `communication_rhythm` / `personality_and_preferences` → `decision_psychology`；
+  `resistances` → `deal_battle.loss_conditions`）、舍弃 2 个（抖音/小红书账号）。
+  另新增编外字段 `purchase_nature`。
+  **顺带修掉一处静默退化**：编外身份字段（`company` 等）离开契约后，
+  归属过滤与销售顾问值形态门不再认它们，实测有 `subject=unknown` 的「我们单位也要买一个」
+  被当作客户企业写出——现由 `IDENTITY_GUARD_KEYS` 取并集补回。
+- **P2 跨字段规则随枚举换血改写。** 新契约的 `purchase_type` 只剩个户/公户，
+  换购判定的落点改到编外字段 `purchase_nature`，否则会写进一个只认两个值的单选字段并被静默丢弃。
+  编外枚举（`emotion` 等）在 L2 归一、L1 附录、L3 枚举门三处一并接上。
+- **P3 四区块投影（`callback_build.py`，0 token）。** `ai_insight` / `purchase_decisions` /
+  `deal_battle` / `decision_psychology` 由**代码**从 facts 投影，不由表达层 LLM 归类
+  （L-002 的定论）。id 由内容摘要生成（同输入恒同 id），并跑一次同客户全局唯一性断言——
+  重复即抛错而非静默去重。每条的 `reasoning_detail` 复用 Notes 那一条的措辞，同一事实
+  在卡片与 Notes 上不会有两种说法。契约语义一并守住：**缺料的分类整个不出现**，
+  而不是给 `items: []`（后者会清空客户已有数据）。
+- **P4 回写节点接入业务测试臂。** 新增 `@body_ref`：请求体**整段取自绑定值**，
+  绕过文本替换——`@body_template` 恒把引用渲染成字符串，产不出契约要求的
+  `analysis_result` **对象**。与 `@body_template` 互斥，解析失败抛错而不发坏载荷。
+  管线新增 `pipeline_callback_build` → `pipeline_callback_writeback` 旁支，
+  `END` 仍挂 L3，`result1` 的对外契约一个字不改。显示名改「业务测试臂」，
+  `workflow_id` 不动（跑批入口与既有批次的可比性判据以它为准）。
+- **P5 调测（零真实回传）。** 回归用例钉住：回写节点存在、带 `@writeback` 与 `@body_ref`、
+  缺省设置下一个请求都不发且产出 `writeback_skipped: true`；开关打开时请求体是对象而非字符串。
+  `@body_ref` 另附 5 条解析语义用例（含互斥与无绑定两处报错）。
+
+**验收（四条全部取证）**：
+
+- **A1** 契约快照 `--check` 通过（45 字段 / 7 分类 / 签名 `b36e78edf9a2`，来源 `docs/Notes_new.txt`）；
+- **A2** 单号产出的 `basic_notes_updates` 为 45 条、45 唯一键，零越界——每个 `attribute_key`
+  都落在契约 45 键内，编外字段一个都没漏进回传体；
+- **A3** 同客户 20 个 id / 键全局唯一（用例覆盖 + 真实载荷复核双证）；
+- **A4** 调测期零真实回传：全库零条 `update-profile` 请求，回写节点产出
+  `{"writeback_skipped": true, "reason": "WRITEBACK_ENABLED=false"}` / `status: 0`。
+
+单号（`customer_profile_pipeline`，号码 `13415100087`）端到端 `succeeded`：40 个节点、
+16 次子运行、106.7 秒，`result1` 仍为字符串。四区块结构复核：`purchase_decisions` 只产出
+非空的三类（到店动因 / 核心关注 / 决策阻力），`decision_psychology` 四键与契约
+`PSYCHOLOGY_KEYS` 逐字一致，`reasoning_detail` 全为 `{summary, steps, evidence, confidence}` 四键。
+测试 **655 passed / 80 skipped**。
+
+**顺带修一处脚本缺口（非本次改造引入）**：`scripts/smoke_run.py` 原先只为
+`customer_profile_entry` 补 `batch_id` 默认值，业务测试臂漏掉时 `pipeline_start` 不产出该字段，
+而 `pipeline_production` 的 `(START, "batch_id")` 绑定早已存在，解析即 `KeyError`。
+改为无条件补齐，与 `run_baseline.py`（对任何 `--workflow-id` 都显式传 `batch_id`）同口径。
+
+**一处未决**：画像卡原有的 `inferred_tags` / `usage_scenarios` / `communication_strategies` /
+`purchase_motivations` / `product_preferences` 五节在新契约六键里没有落点，本轮刻意不动
+`SECTION_KEYS`（一动 `result1` 形状即变）。登记为 `docs/遗留问题清单.md` L-006。
+L-005（契约快照生成器缺失）已随 P0 解除并删除。
+
+## 2026-10-15 — business_opt01_v2 第三轮（v3.3）：跑批可靠性四项修复 + 全量 39 案验收
+
+分支 `dev-business-opt01-v2`。本轮是「事实账本管线」（实验臂 `customer_profile_pipeline`）
+的**收口批次**：跑通全量 39 案并完成第三方审核，余下优化点转入下一轮。
+
+**可靠性四项（`docs/runbooks/v3.3-可靠性改进.md`）**
+
+- **A4 异常落库**：`request_attempts` 表新增 `anomaly` / `finish_reason` 两列（migration
+  自动补列）。此前 `LlmAttempt.anomaly` 只在内存里用，重试成功后前几次的异常原因永久丢失。
+- **A3 输出量下限闸门**：`detect_output_anomaly()` 新增 `output_too_short` 与
+  `suspicious_finish_reason`。起因是 `171****0673` 案输出从 12k 字符塌陷到 575 字符
+  （22 倍），而 `finish_reason` 仍是 `stop`、无语法错误，被判成功——静默降级。
+  本轮把 `min_completion_tokens` 从 `llm_call()` 一路接到 **executor 层**
+  （`src/customer_profile/execution/{llm,executors_llm}.py`）：节点在 `config` 里声明阈值，
+  可写非法值**报错而非忽略**（静默降级正是要修的那类「看着在守、实际没守」）。
+  **缺省不启用**——短输出不总是故障，信息稀薄的案子合法返回 `{"fields": []}`
+  （`167****3251` 只有 5 token）。故阈值由**知道自身输入规模**的节点按节点给，
+  不在公共层设全局值。
+- **A2 失败案自动重跑**：`run_baseline.py --retry-failed N`（默认 0，退避 60 秒，
+  `manifest.json` 记 `retry_rounds`）。v3.2 首跑 4/8 案因上游瞬断失败，靠人工 `--resume` 救回。
+- **A5 参数错配防护**：批次 ID 以 `A-` 开头但 `workflow_id` 不是实验臂时告警；转写缓存
+  目录为空且有输入待跑时提示可能配错路径。两个坑都实际浪费过整批产物。
+
+**验收工具修正**
+
+- `scripts/validate_v3.3_results.py`：原先读 `result["customer_profile_card"]`——该路径
+  **不存在**，真实层级是 `result.json` → `result1`（JSON **字符串**）→ `analysis_result`。
+  错路径让它对每个成功用例都报「字段缺失」，39 案报出 25 条假问题。改为按 10 个段落
+  **全量**核查（不抽样），并把「段落留空」与「结构缺失」分开报告：前者在事实簿稀疏时
+  属正常，交人工确认；后者才算缺陷。
+
+**全量跑批与审核**
+
+- 全量 39 案两臂对照。读数：Notes 字段 1005 → **1564**，契约字段覆盖 914 → **1524** 字段次；
+  LLM 调用 897 → **317**，token 14.72M → **7.09M**，单案耗时中位 281.4s → **117.3s**；
+  异常留痕 0 条，重试救回 4 案。
+- 产出两份第三方审核报告（`docs/business_opt01_v3/审核报告-{业务,销售}视角.md`，
+  **含客户原话，不入库**），逐案核读 26/39 案。已确认的最高优先级缺陷：**L2 审查层
+  「能判但不拦」**——审查已能报出枚举违规（如 `payment_method=公司采购`），
+  判定结果却未落到装配动作上，违规值照样进最终 Notes。判据现成，只差执行。
+- 其余已确认缺陷（销售的话被当成客户的话、沟通策略同模板复读、客户明说的地域/语言被丢弃、
+  产品参数由模型内部知识补全、L3 同源守卫误报率 114/115）逐条记在两份报告里，
+  连同各自**证据底稿**（`docs/business_opt01_v3/ab对照-v3.3/review/`）留作下一轮输入。
+
+**工作区整改**
+
+- 管线设计写成**给人看的**文档：`docs/design/客户人设画像管线设计.md`。
+- `experiments/` 从 2152 MB 精简到 **857 MB**：删除旧 AB 场地 `abexperiments/`（906 MB）、
+  失败批次 `FAILED-template-miss-*`（254 MB）、`batches/batches/`（60 MB）、
+  `A-pipeline-L8-v3.2-*`（71 MB）、`_smoke/`。保留**基线臂**、**v3.3 实验臂**与
+  **转写归档** `transcript_cache/`（跨批次共用，删掉等于毁掉复用设计）。
+  批次目录规范化：`batches/baseline-39-dsv41-noThink/`（基线臂）与
+  `batches/pipeline-v3.3-39/`（实验臂）。批次数据**不在 `docs/` 下留存**，只此一份。
+- 删除已收口的中间文档：v3/v3.1/v3.2/v3.3 方案设计与交付说明、`docs/specs/` 四份任务书、
+  `old_templates/`（84 份 = `src/templates/` 现有版本 + 5 份仅属**已删节点**的孤儿模板，
+  `REMOVED_NODES` 可查）、一次性脚本与探针共 9 个。
+- **`old_templates/` 的判定依据**：模板完整性守卫
+  `tests/test_llm_template_bindings.py` 扫描 `llm` + `template-transform` 两类节点并要求
+  每个引用都能解析，全量测试通过即证明 `src/templates/` 自足。该守卫本身正是为此拓宽过的
+  ——一次清理把 83 个模板删到 5 个时，被删的 29 个只被 `template-transform` 引用，
+  守卫因只扫 `llm` 而全程绿灯，直到 39/39 跑批失败才暴露。
+
+
+## 2026-10-14 — business_opt01_v2：画像卡四节大面积缺失（表达层嵌套 + 装配层静默补空）
+
+分支 `dev-business-opt01-v2`。用户审查 v3.1 批（`A-pipeline-L8-v3.1-20261014`，8 案）时发现
+画像卡 `purchase_motivations` / `product_preferences` / `resistances` / `emotion_state`
+四节大面积留白。排查结论：**不是数据丢失，是产物位置错 + 装配层静默抹平**。
+
+- **根因**：`l3_express` 提示词把第 6/7/8 节的标题挤在同一行（`### 6. …（数组）7. …（数组）
+  8. …（数组）`），紧跟在第 5 节 `customer_overview`（对象型）之后。模型据此把这三节连同
+  第 9 节当成第 5 节的**子键**，写进了 `customer_overview` 内部。
+- **静默点**：`assemble_l3` 只按顶层键抄 9 个 section，嵌套的值不认，随后 `setdefault`
+  补成空数组/空对象。全程无异常、无留痕。`section_count` 又是**补空之后**统计的，恒等于 9，
+  所以回归绿着、卡片空着。
+- **实测规模**：8 案中 **5 案**触发（`13415100087` / `13435844484` / `13527911093` /
+  `13530559591` / `19820803068`），非空节合计 52/72。基线 39 案无此问题——基线那 4 节由
+  `customer_profile_production` 的独立 LLM 节点各自产出顶层 JSON，没有嵌套余地。
+- **已排除**：不是事实表稀疏导致的合并。八案 facts 键数 24/35/32/17/29/39/38/36，与成败
+  无单调关系（17 键的失败、29 键的成功，而 36 键者照样失败）。
+- **修复（三处，零 token）**：
+  1. 模板拆行——第 6/7/8 节各自独立成 `### N.` 标题，并补一条「9 个键**平级**，一律平铺在
+     `analysis_result` 之下，不得嵌进别的板块」的硬规则；
+  2. 装配层**上提归位**——`assemble_l3` 把被嵌进其它 section 里的节搬回顶层（顶层已有该节
+     时就地清除嵌套副本，不覆盖）；
+  3. **报警**——`section_count` 改为统计**实到节数**（补空之前），新增
+     `sections_missing` / `sections_hoisted` 两个输出；缺节从此是可见事件。
+- **归属**：该挤压行由 `ab68a1d`（v2.1 优化代码落地）引入，v3 / v3.1 / v3.2 三批提交均未
+  碰过这份模板——是 v2.1 起就存在的老缺陷，只是 v2.1 那轮跑的是 production 图，未暴露。
+
+验证：对 v3.1 八案**已有产物回放**真实 `assemble_l3`，非空节 **52 → 72/72**，八案全部
+`count=9`、`missing=[]`——**无需重跑批次即可救回**。全量 `pytest` **600 passed / 37 skipped**。
+
+
+分支 `dev-business-opt01-v2`。上游是 v3.1 四项整改（批 `A-pipeline-L8-v3.1-20261014`，8 案齐）。
+用户审查 v3.1 输出后发现**两处信息丢失**，v3.2 据此修：
+
+- **变更一 · 第三方画像标签准入**：L1-1a 由「只收两类」改为**三类**，把第三方画像标签
+  （极光）收作第三类；某字段仅由它单独支撑时记 `inferred_high`（不再降 `inferred_low`）。
+  口径依据：这批标签是**采购的商用画像数据**，在客户无试驾、无沟通记录时是唯一可靠的画像
+  信源。投影层规则 b、`_basis_of`、`Claim.effective_basis` 同步改档——预测渠道**封顶
+  `inferred_high`**，仍**不等于** `fact`。实测案例：`13530559591` 的 `occupation` 此前
+  全程为空，根因是孤立标签既不算 fact 也不算「≥2 条同向」，不是数据缺失。
+- **变更二 · 汽车品牌归属路由 + 契约补挂**：L1 提示词显式区分**意向车型**与**竞品**
+  （对比品牌/车型、试驾过的车型、本品牌顾虑），并明确品牌辨识**先以 LLM 原生汽车知识
+  为准**（知识库待建）。决定性的修正在契约层——`_to_notes_updates` 只遍历契约字段，而
+  原 42 字段契约**没有竞品字段**，竞品信息无处可放。
+- **对外契约变更（需评审）**：42 字段 / 5 分类 → **46 字段 / 6 分类**，新增「竞品对比」
+  一类共 4 个文本字段（`competing_brand` / `competing_model` / `test_driven_models` /
+  `brand_concerns`）。落法是**增量补挂**：基线快照不动，新增走
+  `src/customer_profile/notes_contract_extension.json`，由 `scripts/snapshot_note_contract.py`
+  合并生成（生成器与 `--check` 已扩展）。**未**整表换用线上 45 字段——线上同时下线了
+  16 个现役字段（`old_car_model` 被确定性注入依赖等），整表替换会静默打掉既有功能。
+
+验证：全量 `pytest` **597 passed / 37 skipped**（零 token）；契约快照 `--check` 与批次 +
+补充文件一致。**新批次的 LLM 效果验证须另跑真实批次（消耗 token），不在本次收口内。**
+
+设计与契约见 `docs/business_opt01_v2/v3.2-方案设计.md`。
+
+## 2026-10-12 — business_opt01_v2：事实账本管线（P1–P5 编码完成）
+
+分支 `dev-business-opt01-v2`。把「先取证成文、再事后校对」的旧链路，改为
+**L0 记录 → L1 字段级取证 → L2 代码投影 + 受约束兜底 → L3 校验与表达** 的四层结构。
+
+- **L0/L1（P1/P2）**：取数侧三个「产物无人消费」的 LLM 节点以**纯识别变体**关闭
+  （新增 `audio_content_extract_pure`、`moments_info_pure`、`test_drive_audio_pure`、
+  `outbound_call_audio_pure`，原定义逐字保留供基线臂使用）。L1 由「抽取断言」改为
+  「字段级直出 + 三分类 `fact` / `inferred_high` / `inferred_low`」，并把 42 字段的
+  契约清单渲染进提示词输入。
+- **L2（P3）**：投影规则由「拒绝即丢弃」改为「**降级保留**」——枚举归一失败、身份字段
+  仅由预测或社媒支撑，都不再丢字段，改为写入 + 降档 + 转人工确认。新增一个**受约束的
+  LLM 兜底节点**（`pipeline_l2_fallback`），只能裁决候选集、**不得新增取值**，越界一律
+  拒收留痕。
+- **L3（P4）**：新建 `customer_profile_l3`（11 节点 / 1 个 LLM）替代 production 的成文
+  职责。**9 个画像 section 与 Notes 读同一份 `facts`**（旧链里两者各自生成、无人对齐，
+  是本项目「卡片与 Notes 不一致」的根源）；6 个业务资产按**原名**引用，正文一字未改。
+- **P5**：删除管线的旧证据整理链与兼容覆写节点。管线终态 **35 节点 / 2 个 LLM 节点**。
+
+验证（**零 token 离线**，AB 按用户要求待完工后单独开展）：13 案批次回放 + 全量单元测试。
+9 节齐全 13/13、无依据确定值率 0、图校验 0 错误。回放测得的 Notes 字段数与基线仍有差，
+经归因**卡在 L1 覆盖率**（回放无法体现新提示词的效果），该判据留待 AB 闭合。
+施工记录见 `docs/specs/business_opt01_v2-施工计划.md` §6。
+
 ## 2026-10-05 — 系统优化：运行台改「概览 + 双栏」版式
 
 分支 `dev-system-opt`。依据第三方设计交付件（`docs/design/Workflow_UI_Implementation_Guide.md`

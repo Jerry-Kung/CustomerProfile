@@ -207,3 +207,262 @@ async def test_audio_body_template_nodes_use_resolvable_references():
             assert field in available, (
                 f"{node.node_id} 引用了 {ref}，但 {source_id} 只产出 {sorted(available)}"
             )
+
+
+# ---------------------------------------------------------------- ``@body_ref``：整段取值
+
+CALLBACK_AS_JSON = """
+import json
+
+def main(body: str) -> dict:
+    payload = {
+        "phone": "13500000000",
+        "batch_id": "b-1",
+        "analysis_result": {"profile_summary": {"name": "陈"}},
+    }
+    return {"callback_json": json.dumps(payload, ensure_ascii=False)}
+"""
+
+CALLBACK_AS_DICT = """
+def main(body: str) -> dict:
+    return {"callback_json": {
+        "phone": "1",
+        "batch_id": "",
+        "analysis_result": {"profile_summary": {}},
+    }}
+"""
+
+CALLBACK_NOT_JSON = """
+def main(body: str) -> dict:
+    return {"callback_json": "这不是 JSON"}
+"""
+
+
+def _ref_workflow(
+    *, code_function: str, outputs: tuple[str, ...],
+    bind: bool = True, declare: bool = True, also_template: bool = False,
+) -> WorkflowDef:
+    """``@body_ref`` 的验证图：请求体**整段取自** code 节点的产出。
+
+    与 :func:`_workflow` 的分工：那个验证文本模板里的**引用语义**（该补引号还是只转义），
+    本图验证**整段取值**——后者是唯一能产出「请求体里有一个对象字段」的走法，
+    因为文本模板恒把引用渲染成带引号的字符串。
+
+    ``declare`` 与 ``bind`` 分开是有意的：要验证「声明了却漏了绑定」，就得让配置标志为真
+    而绑定为空。两者用同一个开关控制的话，那个用例验证的其实是「什么都没声明」，
+    执行器会安安静静走默认路径——用例看着是通过的，前提却不成立。
+    """
+    config: dict = {
+        "@service": "profile",
+        "@method": "post",
+        "@path": "/callback/update-profile",
+        "@ssl_verify": False,
+        "@outputs": {"body": "$text", "status": "$status"},
+    }
+    if declare:
+        config["@body_ref"] = True
+    if also_template:
+        config["@body_template"] = '{"phone": {{#bt_code.callback_json#}}}'
+    return WorkflowDef(
+        workflow_id="body_ref_probe",
+        display_name="请求体取值验证图",
+        source_dsl=None,
+        entries=(START,),
+        exits=(END,),
+        outputs={"status": "status"},
+        nodes=(
+            make_node(START, "输入", "start", variables=("body",)),
+            _field_outputs(code_function, outputs),
+            make_node(
+                SUBMIT,
+                "提交",
+                "http-request",
+                after=(CODE,),
+                inputs={"@body_ref": (CODE, "callback_json")} if bind else {},
+                outputs=("body", "status"),
+                **config,
+            ),
+            make_node(
+                END, "输出", "end", after=(SUBMIT,),
+                inputs={"status": (SUBMIT, "status")}, outputs=("status",),
+            ),
+        ),
+    )
+
+
+def _error_text(outcome, node_id: str) -> str:
+    """节点错误优先，其次才是运行级错误。"""
+    node = outcome.node(node_id)
+    return ((node.error if node else None) or outcome.error or "")
+
+
+async def test_body_ref_parses_a_json_string_into_an_object_body(tmp_path):
+    """``@body_ref`` 取到 JSON 串时要**解析成对象**，不能原样透传。
+
+    这条用例钉住的正是这个能力存在的理由：契约要求 ``analysis_result`` 是**对象**，
+    而 ``@body_template`` 恒把引用渲染成带引号的字符串，产不出对象。上游 ``code``
+    节点的产出又恒是字符串，所以「解析」这一步不可省——省掉它，发出去的
+    ``analysis_result`` 会是一个被引号包住的串，服务端只会回一个笼统的 4xx。
+    """
+    path = _register(CALLBACK_AS_JSON, "bt_test_callback_json")
+    workflow = _ref_workflow(code_function=path, outputs=("callback_json",))
+    outcome, transport = await _run(workflow, {"body": ""}, tmp_path)
+
+    assert outcome.succeeded, outcome.error
+    assert len(transport.bodies) == 1
+    body = transport.bodies[0]
+    assert isinstance(body, dict), f"请求体应为对象，实际 {type(body).__name__}"
+    assert isinstance(body["analysis_result"], dict), "analysis_result 必须是对象"
+    assert body["phone"] == "13500000000"
+    assert body["analysis_result"]["profile_summary"] == {"name": "陈"}
+
+
+async def test_body_ref_sends_a_dict_untouched(tmp_path):
+    """值本来就是 dict 时原样发出，不做二次包装、不转成字符串。"""
+    path = _register(CALLBACK_AS_DICT, "bt_test_callback_dict")
+    workflow = _ref_workflow(code_function=path, outputs=("callback_json",))
+    outcome, transport = await _run(workflow, {"body": ""}, tmp_path)
+
+    assert outcome.succeeded, outcome.error
+    assert transport.bodies == [
+        {"phone": "1", "batch_id": "", "analysis_result": {"profile_summary": {}}}
+    ]
+
+
+async def test_body_ref_rejects_unparsable_value_without_sending(tmp_path):
+    """取值不是合法 JSON 时报错，**不发坏载荷**。
+
+    发出去一个坏载荷比让这次运行失败更糟：服务端可能回 200 并把一份坏数据落库。
+    """
+    path = _register(CALLBACK_NOT_JSON, "bt_test_callback_bad")
+    workflow = _ref_workflow(code_function=path, outputs=("callback_json",))
+    outcome, transport = await _run(workflow, {"body": ""}, tmp_path)
+
+    assert not outcome.succeeded
+    assert "不是合法 JSON" in _error_text(outcome, SUBMIT)
+    assert transport.bodies == [], "解析失败时一个请求都不该发出"
+
+
+async def test_body_ref_and_body_template_are_mutually_exclusive(tmp_path):
+    """同时声明 ``@body_ref`` 与 ``@body_template`` 即报错，而不是悄悄挑一个。
+
+    两者语义不同（整段取值 vs 文本替换），挑一个执行会让作者以为自己是另一种语义——
+    这类「静默择一」是回写体形状出错最难查的来源。
+    """
+    path = _register(CALLBACK_AS_JSON, "bt_test_callback_conflict")
+    workflow = _ref_workflow(
+        code_function=path, outputs=("callback_json",), also_template=True
+    )
+    outcome, transport = await _run(workflow, {"body": ""}, tmp_path)
+
+    assert not outcome.succeeded
+    assert "互斥" in _error_text(outcome, SUBMIT)
+    assert transport.bodies == []
+
+
+async def test_body_ref_without_binding_is_rejected(tmp_path):
+    """声明了 ``@body_ref`` 却没有对应绑定 → 报错，而不是退回去发空请求体。"""
+    path = _register(CALLBACK_AS_JSON, "bt_test_callback_nobind")
+    workflow = _ref_workflow(code_function=path, outputs=("callback_json",), bind=False)
+    outcome, transport = await _run(workflow, {"body": ""}, tmp_path)
+
+    assert not outcome.succeeded
+    assert "没有对应绑定" in _error_text(outcome, SUBMIT)
+    assert transport.bodies == []
+
+
+# ---------------------------------------------------------------- 回写闸门（缺省零真实回传）
+
+def _writeback_probe_workflow() -> WorkflowDef:
+    """用**业务测试臂里那个回写节点的真实配置**造一张最小图。
+
+    **为什么不直接跑整张臂**：那条链要从取数层开始，十几路真实调用，跑一次既不快也不
+    该在单测里发生。这里把真实节点的 ``config`` 原样搬过来（``@writeback`` / ``@body_ref``
+    / ``@path``），只把上游换成一个小 code 节点——**验证的正是「配置对不对」**，
+    而不是「整条臂能不能跑」。
+
+    真实节点若被改回 ``@body_template``、丢掉 ``@writeback``、或换了路径，这里会立刻红。
+    """
+    from customer_profile.workflows import customer_profile_pipeline as pipe
+
+    real = {n.node_id: n for n in pipe.WORKFLOW.nodes}[pipe.CALLBACK_WRITE]
+    path = _register(CALLBACK_AS_JSON, "bt_test_writeback_body")
+    return WorkflowDef(
+        workflow_id="writeback_probe",
+        display_name="回写闸门验证图",
+        source_dsl=None,
+        entries=(START,),
+        exits=(END,),
+        outputs={"status": "status"},
+        nodes=(
+            make_node(START, "输入", "start", variables=("body",)),
+            _field_outputs(path, ("callback_json",)),
+            make_node(
+                SUBMIT,
+                real.title,
+                "http-request",
+                after=(CODE,),
+                inputs={"@body_ref": (CODE, "callback_json")},
+                outputs=real.outputs,
+                # 原样沿用真实节点的配置（不含绑定），这是本图存在的全部意义
+                **{k: v for k, v in real.config.items()},
+            ),
+            make_node(
+                END, "输出", "end", after=(SUBMIT,),
+                inputs={"status": (SUBMIT, "status")}, outputs=("status",),
+            ),
+        ),
+    )
+
+
+async def test_writeback_node_skips_the_call_by_default(tmp_path):
+    """缺省设置（``WRITEBACK_ENABLED=false``）下回写节点**不发请求**，只产出可解释结果。
+
+    这是「调测阶段 API 回传接口仅预留代码、不做真实回传」这条要求在测试层面的落地。
+    两件事一起断言：
+
+    - **一个请求都没发出**（``transport.bodies`` 为空）——只看运行状态会误判，
+      被跳过的运行**仍然显示 succeeded**；
+    - 产出里的 ``body`` 明说「已跳过」，而不是一个假装成功的空响应，下游据此知道
+      这次没有任何生产副作用。
+    """
+    workflow = _writeback_probe_workflow()
+    outcome, transport = await _run(workflow, {"body": ""}, tmp_path)
+
+    assert outcome.succeeded, outcome.error
+    assert transport.bodies == [], "WRITEBACK_ENABLED=false 时不得发出任何回写请求"
+
+    node = outcome.node(SUBMIT)
+    assert node is not None
+    body = json.loads(node.outputs["body"])
+    assert body["writeback_skipped"] is True
+    assert body["reason"] == "WRITEBACK_ENABLED=false"
+    assert body["url"].endswith("callback/update-profile")
+    assert node.outputs["status"] == 0
+
+
+async def test_writeback_node_sends_when_the_switch_is_on(tmp_path):
+    """开关打开时请求真的发出去，且请求体是**对象**（``analysis_result`` 不是字符串）。
+
+    这一条是上面那条的反面：若两道闸门同时失效（``@writeback`` 丢了 + 请求体退化），
+    只有这条能发现。它同时钉住 ``@body_ref`` 的解析语义在真实配置下仍然成立。
+    """
+    workflow = _writeback_probe_workflow()
+    settings = make_settings(tmp_path, writeback_enabled=True)
+    transport = _RecordingTransport()
+    limiter = asyncio.Semaphore(4)
+    runtime = NodeRuntime(
+        settings=settings,
+        request_limiter=limiter,
+        llm=LlmClient(settings, request_limiter=limiter),
+        http=HttpClient(settings, transport=transport, request_limiter=limiter),
+        extra={},
+    )
+    scheduler = Scheduler(build_default_registry(), runtime, max_active_nodes=8)
+    outcome = await scheduler.run(RunRequest(workflow=workflow, inputs={"body": ""}))
+
+    assert outcome.succeeded, outcome.error
+    assert len(transport.bodies) == 1
+    sent = transport.bodies[0]
+    assert isinstance(sent["analysis_result"], dict)
+    assert sent["phone"] == "13500000000"

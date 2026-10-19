@@ -19,7 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, type RunDetailPayload, type RunGraph } from '../api/client'
 import { NodeDetail } from './NodeDetail'
 import { NodeList } from './NodeList'
-import { executionKey } from '../lib/nodeSummary'
+import { callbackPayloadOf, executionKey, parseJsonLoose } from '../lib/nodeSummary'
 import { ResultView } from './ResultView'
 import { RunOverview } from './RunOverview'
 
@@ -97,6 +97,18 @@ export function RunDetail({ runId, onDrillDown, onBack }: RunDetailProps) {
   )?.display_name
 
   const hasResult = payload !== null && Object.keys(payload.outputs ?? {}).length > 0
+
+  // 历史运行可能将回传体保留为第二份产物；新运行的 result1 已直接指向回传体。
+  const callbackPayload = useMemo(
+    () => callbackPayloadOf(definitionNodes, executions),
+    [definitionNodes, executions],
+  )
+  const callbackAlreadyShown = useMemo(() => {
+    if (!callbackPayload) return false
+    const result = payload?.outputs?.result1
+    const parsed = typeof result === 'string' ? parseJsonLoose(result) : result
+    return JSON.stringify(parsed) === JSON.stringify(callbackPayload)
+  }, [payload, callbackPayload])
 
   const copyResult = useCallback(async () => {
     if (!payload) return
@@ -205,7 +217,23 @@ export function RunDetail({ runId, onDrillDown, onBack }: RunDetailProps) {
               </button>
             </header>
             <div className="modal-body">
-              <ResultView outputs={payload.outputs} />
+              {/* 兼容历史双产物；新运行的最终结果已是回传体时只展示一次。 */}
+              <details className="result-block" open>
+                <summary className="result-block-summary">
+                  最终结果（result1）
+                  <span className="result-block-note">工作流出口，对外契约</span>
+                </summary>
+                <ResultView outputs={payload.outputs} />
+              </details>
+              {callbackPayload && !callbackAlreadyShown ? (
+                <details className="result-block" open>
+                  <summary className="result-block-summary">
+                    回传体（analysis_result 六键）
+                    <span className="result-block-note">回写节点的上游产物</span>
+                  </summary>
+                  <ResultView outputs={callbackPayload} />
+                </details>
+              ) : null}
             </div>
           </div>
         </div>

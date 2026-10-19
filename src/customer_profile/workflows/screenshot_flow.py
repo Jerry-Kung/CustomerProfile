@@ -71,6 +71,17 @@ class ScreenshotFlow:
     workflow_id: str
     """Python 侧的工作流 ID（英文）。"""
 
+    summary_llm: bool = True
+    """是否保留「多图片内容总结」这个 LLM 节点。
+
+    ``True``（缺省）是迁移前的定义形状：多图分支的最后一步由 LLM 把逐图解析结果**汇总**成
+    一份报告。7 个截图流程全部用它，**原件不得改动**。
+
+    ``False`` 是 v2 的纯识别变体：多图分支只把逐图解析结果按序拼接，不再过 LLM。
+    汇总是一次**有损压缩**，而 v2 的口径是「原文必须逐字进入 L1、取数侧不做有损压缩」，
+    因此这一步在 v2 链路里既无消费方、也违背口径，应予关闭。
+    """
+
 
 def template_name(slug: str, node_id: str) -> str:
     """模板资源文件名（不含扩展名）。与模板资源文件命名一致。"""
@@ -78,9 +89,39 @@ def template_name(slug: str, node_id: str) -> str:
 
 
 def build_screenshot_workflow(flow: ScreenshotFlow) -> WorkflowDef:
-    """按共用图结构构造一个截图工作流的定义。"""
+    """按共用图结构构造一个截图工作流的定义。
+
+    ``flow.summary_llm=False`` 时产出纯识别变体：去掉「多图片内容总结」节点，
+    多图分支直接把逐图解析结果拼接成输出（见 :attr:`ScreenshotFlow.summary_llm`）。
+    """
     slug = flow.slug
     template = lambda node_id: template_name(slug, node_id)  # noqa: E731
+
+    if flow.summary_llm:
+        summary_nodes: tuple[Any, ...] = (
+            make_node(
+                SUMMARY_LLM,
+                "多图片内容总结",
+                "llm",
+                after=(JOIN_TEMPLATE,),
+                # 提示词正文里有 ``{{#1775811655657.output#}}``（多图聚合结果），必须绑定，
+                # 否则渲染期报「模板变量未提供」。绑定用 ``@`-less 的普通名即可——
+                # 渲染时变量表按 **来源** ``node_id.field`` 建键，目标名不参与匹配。
+                inputs={"arr": (JOIN_TEMPLATE, "output")},
+                outputs=("text",),
+                template=template(SUMMARY_LLM),
+            ),
+        )
+        aggregate_after: tuple[str, ...] = (SUMMARY_LLM, VISION_SINGLE)
+        aggregate_sources: tuple[tuple[str, str], ...] = (
+            (SUMMARY_LLM, "text"),
+            (VISION_SINGLE, "text"),
+        )
+    else:
+        # 纯识别：多图侧改为直接收「多张图片内容聚合」的拼接结果，单图侧不变。
+        summary_nodes = ()
+        aggregate_after = (JOIN_TEMPLATE, VISION_SINGLE)
+        aggregate_sources = ((JOIN_TEMPLATE, "output"), (VISION_SINGLE, "text"))
 
     nodes = (
         make_node(
@@ -256,12 +297,13 @@ def build_screenshot_workflow(flow: ScreenshotFlow) -> WorkflowDef:
             },
             iteration_id=ITERATION,
         ),
+        *summary_nodes,
         make_node(
             AGGREGATE_2,
             "图片解析结果汇总",
             "variable-aggregator",
-            after=(SUMMARY_LLM, VISION_SINGLE),
-            variables=((SUMMARY_LLM, "text"), (VISION_SINGLE, "text")),
+            after=aggregate_after,
+            variables=aggregate_sources,
             outputs=("output",),
         ),
         make_node(
@@ -272,18 +314,6 @@ def build_screenshot_workflow(flow: ScreenshotFlow) -> WorkflowDef:
             inputs={"arr": (ITERATION, "output")},
             outputs=("output",),
             template=template(JOIN_TEMPLATE),
-        ),
-        make_node(
-            SUMMARY_LLM,
-            "多图片内容总结",
-            "llm",
-            after=(JOIN_TEMPLATE,),
-            # 提示词正文里有 ``{{#1775811655657.output#}}``（多图聚合结果），必须绑定，
-            # 否则渲染期报「模板变量未提供」。绑定用 ``@`-less 的普通名即可——
-            # 渲染时变量表按 **来源** ``node_id.field`` 建键，目标名不参与匹配。
-            inputs={"arr": (JOIN_TEMPLATE, "output")},
-            outputs=("text",),
-            template=template(SUMMARY_LLM),
         ),
     )
 

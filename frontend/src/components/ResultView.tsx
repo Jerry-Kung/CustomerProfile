@@ -16,7 +16,7 @@
 import { useState } from 'react'
 
 import { Markdown } from './Markdown'
-import { parseJsonLoose, primaryOutput, summarizeValue } from '../lib/nodeSummary'
+import { parseJsonLoose, primaryOutput, summarizeValue, writebackPayload } from '../lib/nodeSummary'
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -260,6 +260,41 @@ export function ResultView({ outputs, emptyHint }: ResultViewProps) {
   }
 
   const primary = primaryOutput(outputs)
+
+  // 回写跳过是一个**有明确业务含义的正常态**（调测期不回传），不是通用结构化数据。
+  // 单独渲染成中文说明，避免它按通用路径铺成一段英文键值（键名英文、布尔未中文化、
+  // 理由被截断）。原始 JSON 仍留在下方可查。
+  const skipped = writebackPayload(outputs)
+  if (skipped) {
+    const reason = typeof skipped.reason === 'string' ? skipped.reason.trim() : ''
+    const url = typeof skipped.url === 'string' ? skipped.url.trim() : ''
+    return (
+      <div className="rv">
+        <div className="rv-notice">
+          <p className="rv-notice-title">回写已跳过，本次未向生产库写入。</p>
+          <p className="rv-notice-body">
+            {reason
+              ? `原因：${reason}。`
+              : '本轮未开启回写。'}
+            画像回写节点按设计只产出「已跳过」的可解释结果——**运行显示成功不等于画像已写进生产库**。
+          </p>
+          {url ? <p className="rv-notice-meta">目标接口：{url}</p> : null}
+        </div>
+        <button
+          type="button"
+          className="rv-raw-toggle"
+          onClick={() => setShowRaw((value) => !value)}
+        >
+          {showRaw ? '收起原始 JSON' : '查看原始 JSON'}
+        </button>
+        {showRaw ? (
+          <pre className="rv-fallback rv-fallback-full">
+            {JSON.stringify(outputs, null, 2)}
+          </pre>
+        ) : null}
+      </div>
+    )
+  }
   const rest = primary
     ? Object.fromEntries(Object.entries(outputs).filter(([key]) => key !== primary.key))
     : outputs

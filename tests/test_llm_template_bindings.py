@@ -41,12 +41,26 @@ def _template_text(repo: TemplateRepository, name: str) -> str:
     return template.text if hasattr(template, "text") else str(template)
 
 
-def _llm_nodes_with_templates():
+TEMPLATE_NODE_TYPES = ("llm", "template-transform")
+"""会从 ``templates/`` 加载正文的节点类型。
+
+**``template-transform`` 必须在内**（2026-10-15 补）。此前本用例只扫 ``llm``，
+而 ``template-transform`` 同样持有 ``config['template']`` 并在运行期
+``repository.render(...)``。两者的模板是同一批资源文件、由同一个
+``TemplateRepository`` 加载，只守一半等于没守：
+
+一次清理把 83 个模板删到 5 个时，被删的 44 个里有 29 个**只被
+``template-transform`` 引用**。本用例因为只看 ``llm`` 而全程绿灯，直到 39 用例
+全量跑批 39/39 失败（``FileNotFoundError: 模板 ... 不存在``）才暴露。
+"""
+
+
+def _nodes_with_templates():
     repo = TemplateRepository()
     found = []
     for workflow_id, workflow in sorted(load_all().items()):
         for node in workflow.nodes:
-            if node.node_type != "llm":
+            if node.node_type not in TEMPLATE_NODE_TYPES:
                 continue
             name = node.config.get("template")
             if not name:
@@ -55,7 +69,7 @@ def _llm_nodes_with_templates():
     return found
 
 
-LLM_NODES = _llm_nodes_with_templates()
+LLM_NODES = _nodes_with_templates()
 
 
 def test_the_scan_is_not_vacuous():

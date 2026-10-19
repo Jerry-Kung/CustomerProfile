@@ -96,7 +96,15 @@ async def execute_llm(
     images = _collect_images(node, ctx, inputs)
     image_detail = node.config.get("image_detail")
 
+    min_completion_tokens = _resolve_min_completion_tokens(node)
+
     expect_json = bool(node.config.get("expect_json", False))
+    output_format = str(node.config.get("output_format") or "").strip().lower()
+    if not output_format:
+        output_format = "json" if expect_json else "text"
+    if output_format in ("json", "jsonl"):
+        expect_json = output_format == "json"
+    expect_jsonl = output_format == "jsonl"
     output_field = node.config.get("output", "text")
 
     node_ref = _NodeRef(ctx, node)
@@ -106,8 +114,26 @@ async def execute_llm(
         images=images,
         detail=image_detail,
         expect_json=expect_json,
+        expect_jsonl=expect_jsonl,
         node_ref=node_ref,
+        min_completion_tokens=min_completion_tokens,
     )
+
+    if expect_jsonl:
+        # ``jsonl``：一行一个 JSON 值。``records`` 是成功解析的列表，``dropped_lines``
+        # 是坏行明细——**坏行只丢那一行**，不整段作废（v3 任务书 P1）。
+        # ``text`` 与 ``parsed_json`` 按 json 分支同口径给出，供既有消费方沿用。
+        payload = raw if isinstance(raw, dict) else {"records": [], "dropped_lines": []}
+        records = payload.get("records") or []
+        return ExecutionOutcome(
+            outputs={
+                output_field: json.dumps(records, ensure_ascii=False),
+                "records": records,
+                "dropped_lines": payload.get("dropped_lines") or [],
+                "parsed_json": records,
+            },
+            meta={"expect_jsonl": True},
+        )
 
     if expect_json:
         # ``text`` 必须是**字符串**，不是解析后的对象。
@@ -131,6 +157,36 @@ async def execute_llm(
             meta={"expect_json": True},
         )
     return ExecutionOutcome(outputs={output_field: coerce_to_text(raw)})
+
+
+def _resolve_min_completion_tokens(node: NodeDef) -> int | None:
+    """读 ``config['min_completion_tokens']``：输出量下限，缺省不启用。
+
+    跑批可靠性 A3 的接线点。语义与取舍：
+
+    - **缺省 ``None`` = 不设闸门**，此时行为与接线前完全一致。绝大多数节点该如此，
+      因为「输出短」本身不是判据。
+    - 只有**知道自身输入规模**的节点才该声明它：输入二十几 KB 却回十几个 token，
+      是截断的典型形态。这种节点的作者知道正常输出至少多长。
+    - 因此阈值按节点配置给，不由公共层拍一个全局值。全局阈值会把「事簿信息稀薄」
+      的合法短输出（如 ``{"fields": []}``）误判成截断并白烧两次重试。
+
+    非法取值（非整数、非正数）**报错而不是忽略**：静默降级会让作者以为闸门开着，
+    而实际上一次也没触发——这正是本次接线要修的那类「看着在守、实际没守」。
+    """
+    raw = node.config.get("min_completion_tokens")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise NodeExecutionError(
+            f"llm 节点 {node.node_id} 的 min_completion_tokens 必须是整数，"
+            f"实际为 {type(raw).__name__}：{raw!r}"
+        )
+    if raw <= 0:
+        raise NodeExecutionError(
+            f"llm 节点 {node.node_id} 的 min_completion_tokens 必须为正数，实际为 {raw}"
+        )
+    return raw
 
 
 def _collect_images(

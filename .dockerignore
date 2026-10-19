@@ -1,6 +1,6 @@
 # Allow only runtime code, dependencies, and the committed UI bundle into builds.
 # In particular, .env, Git history, customer data, and local replay recordings
-# never enter the build context.
+# never enter the build context; only the checked-in sample fixture is allowed.
 **
 !Dockerfile
 !requirements.txt
@@ -9,6 +9,10 @@
 !frontend/
 !frontend/dist/
 !frontend/dist/**
+!tests/
+!tests/fixtures/
+!tests/fixtures/replay/
+!tests/fixtures/replay/human_corrected_info.json
 
 **/__pycache__/
 **/*.py[cod]

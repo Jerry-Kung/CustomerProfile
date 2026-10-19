@@ -20,12 +20,14 @@ import type { ChildRunBrief, GraphNode, NodeExecution } from '../api/client'
 import { NODE_STATUS_LABEL, formatDuration, labelOf, nodeStatusTone } from '../lib/format'
 import {
   completionOrderKey,
+  costLabelOf,
   displayTitle,
   executionKey,
   nodeCategory,
   resultState,
   resultSummary,
   searchTextOf,
+  stageOf,
 } from '../lib/nodeSummary'
 
 type Filter = 'all' | 'withResult' | 'abnormal'
@@ -154,6 +156,11 @@ export function NodeList({
           const child = childRuns[execution.node_id]
           const state = resultState(execution)
           const selected = key === selectedKey
+          // 阶段与成本都**取不到就不显示**，不用节点 ID 硬编码去补：
+          // 标题前缀不覆盖全部节点（如「确定性字段注入」属 L1 却无前缀），
+          // 硬编码会把展示层绑死在某一条工作流上。
+          const stage = stageOf(title)
+          const cost = costLabelOf(execution.node_type)
 
           return (
             <button
@@ -180,6 +187,8 @@ export function NodeList({
                 <span className="node-row-line2">{resultSummary(execution)}</span>
 
                 <span className="node-row-line3">
+                  {stage ? <span className="chip chip-stage">{stage}</span> : null}
+                  {cost ? <span className="chip chip-cost">{cost}</span> : null}
                   <span className="chip">{nodeCategory(execution.node_type, Boolean(child))}</span>
                   {execution.branch ? (
                     <span className="chip chip-quiet">分支 {execution.branch}</span>
