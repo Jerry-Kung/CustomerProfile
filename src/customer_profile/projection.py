@@ -86,6 +86,12 @@ ANCHOR_NORMALIZED = "normalized"
 """坐标形态·当归：值经 ASR 纠错 / 归一产生，原文里无字面匹配，``source_quote`` 记原文
 （v3 接口一，如「安安I60」→「埃安」）。"""
 
+INJECTED_PHONE_CHANNEL = "客户留资手机号"
+"""``phone_number`` 的注入来源名（登记档）。取值就是入参手机号，不来自任何渠道原文。"""
+
+INJECTED_LICENSE_CHANNEL = "试驾与置换记录"
+"""``driver_license_status`` 的注入来源名（登记档）。试驾或有旧车本身即需驾照。"""
+
 BASIS_ORDER: dict[str, int] = {FACT: 0, INFERRED_HIGH: 1, INFERRED_LOW: 2}
 """三分类由强到弱。"""
 
@@ -1057,7 +1063,7 @@ def _salesperson_marked(claim: Claim) -> bool:
 
 
 def _readable_evidence(sources: Sequence[Claim]) -> list[str]:
-    """证据串：**原文切片优先**，其次当归型事实的原文，再次推断依据，最后才退到渠道名。
+    """证据串：**原文切片优先**，其次当归型事实的原文，再次推断依据。
 
     v2.1 硬约束（设计稿 §1）：证据锚点要精确到客户原始数据中的某段内容。v3 接口一
     在此基础上再分两类：
@@ -1066,10 +1072,21 @@ def _readable_evidence(sources: Sequence[Claim]) -> list[str]:
     - ``normalized``：值经纠错/归一（安安 → 埃安），呈「原文『安安I60』」（标明是原文，
       值本身是字段取值）——销售一眼能分清「客户说的」与「模型改的」。
 
+    **渠道名不再作为证据**（2026-10-19 可读性整改）：裸渠道名只回答了「取自哪里」，
+    没回答「原文是什么」，销售看不懂。没有原文与依据时证据位留空，由前端不渲染该区块。
+
+    第三方画像标签另有专门形态：标签名（``quote``）+ 取值，呈
+    「第三方画像标签“预测年龄段”给出“50岁及以上”」。
+
     结论型依据（``_is_conclusion``）一律剔除，不留任何占位符。
     """
     evidence: list[str] = []
     for claim in sources:
+        tag = _prediction_tag_text(claim)
+        if tag:
+            if tag not in evidence:
+                evidence.append(tag)
+            continue
         if claim.quote:
             text = f"{claim.channel}：{claim.quote}" if claim.channel else claim.quote
             if text not in evidence:
@@ -1084,11 +1101,46 @@ def _readable_evidence(sources: Sequence[Claim]) -> list[str]:
             text = _strip_conclusion(hint)
             if text and text not in evidence:
                 evidence.append(text)
-        if not claim.basis_of_inference and claim.channel:
-            text = _plain_text(claim.channel)
-            if text and text not in evidence:
-                evidence.append(text)
+        injected = _injected_evidence(claim)
+        if injected and injected not in evidence:
+            evidence.append(injected)
     return evidence
+
+
+def _injected_evidence(claim: Claim) -> str:
+    """注入类字段的证据句：注入值本身就是事实，直接写出来。
+
+    ``phone_number`` / ``driver_license_status`` 的取值由代码按入参或试驾记录定，
+    不来自任何渠道原文，因此此前证据位只有一个渠道名（「客户留资手机号」）。
+    这里把取值与依据一并写出，销售能直接核对。
+    """
+    if claim.channel == INJECTED_PHONE_CHANNEL:
+        value = _as_text(claim.value).strip()
+        return f"客户留资手机号：{value}" if value else ""
+    if claim.channel == INJECTED_LICENSE_CHANNEL:
+        return "到店试驾或有旧车，驾驶资格成立"
+    return ""
+
+
+def _prediction_tag_text(claim: Claim) -> str:
+    """第三方画像标签的证据句：标签名 + 取值。
+
+    提示词已要求 ``basis_of_inference`` 写全「标签名 + 取值」，但旧产物与模型抖动都可能
+    只给标签名（实测 163/163 条证据只到标签名）。这里用断言自身的 ``quote``（标签名）
+    与 ``value`` 兜底拼出完整句，保证销售看得到标签给出了什么。
+    """
+    if claim.tier != PREDICTION:
+        return ""
+    tag = _as_text(claim.quote).strip()
+    value = _as_text(claim.value).strip()
+    display = inf.display_map(claim.attribute).get(value)
+    if display:
+        value = display
+    if not tag or not value:
+        return ""
+    if value in tag:
+        return f"第三方画像标签“{tag}”"
+    return f"第三方画像标签“{tag}”给出“{value}”"
 
 
 def _readable_steps(sources: Sequence[Claim]) -> list[str]:
@@ -1123,8 +1175,8 @@ def _readable_steps(sources: Sequence[Claim]) -> list[str]:
         return ["经语义纠错归一并核对后得出该结论"]
     if any(claim.basis_of_inference for claim in sources):
         return ["综合上述线索归纳得出该结论"]
-    channel = next((c.channel for c in sources if c.channel), "")
-    return [f"来自{channel}" if channel else "据现有记录归纳"]
+    # **不再输出「来自{渠道}」**（2026-10-19 可读性整改）：它只复述了出处，没给出推导。
+    return ["据现有记录归纳"]
 
 
 def _readable_summary(sources: Sequence[Claim]) -> str:
@@ -1135,7 +1187,7 @@ def _readable_summary(sources: Sequence[Claim]) -> str:
     hint = next((_strip_conclusion(h) for c in sources for h in c.basis_of_inference if _strip_conclusion(h)), "")
     if hint:
         return f"由多条线索推断：{hint}"
-    return "由渠道记录归纳得出"
+    return "据现有记录归纳得出"
 
 
 def _to_notes_updates(

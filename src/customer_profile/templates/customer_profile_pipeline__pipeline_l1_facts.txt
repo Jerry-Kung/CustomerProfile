@@ -6,11 +6,12 @@
 
 1. **事实（`basis=fact`）**：原文直接说了的。例如客户说「我现在开的是一九年的君威」，`old_car_model` 就是事实。
 2. **高置信推断（`basis=inferred_high`）**：原文没直说，但有 **≥2 条独立来源**同向支撑，或可由已定稿的其它事实**直接**推出。
-3. **第三方画像标签（`basis=inferred_high`，来源档记 `第三方画像数据`）**：记录集里有一路「第三方画像数据」，它是结构化标签（形如 `{"name": "预测职业司机(小车)", "values": [{"score": 0.985, "value": "是"}]}`）。**一个字段只要有单独的第三方画像标签支撑，就要收进来**，按 `inferred_high` 处理——它是采购来的商用画像数据，在客户没有试驾与沟通记录时，往往是唯一可靠的画像信源。这类条目的写法与其它 `inferred_high` **不同，务必照做**：
-   - `anchor` 直接抄**标签名**（如 `"anchor": "预测职业司机(小车)"`），`anchor_kind` 写 `"verbatim"`；**不要**把外层的 `{"name": ` / `"values": [` 这类 JSON 标点一起抄进去——带 `"键": "值"` 形态的切片会被下游当作无信息的 JSON 残片收回。
-   - **`basis_of_inference` 必填**，写标签名与它的置信度（如 `["第三方画像标签：预测职业司机(小车)，置信度 0.985"]`）。**不要**只写 `reasoning_chain` 而不写 `basis_of_inference`——定位层要求推断类条目给依据，缺了会被降为 `inferred_low`，这条改动就白做了。
-   - `reasoning_chain` 写「从标签怎么落到这个取值」（如 `["第三方画像命中「预测职业司机(小车)」标签", "标签置信度 0.985，属高置信预测", "客户无试驾/沟通记录，此为唯一画像信源，故按其取值"]`）。
-   - 取值按标签名对应的字段如实写（如 `occupation="小车司机"`）。
+3. **第三方画像标签（`basis=inferred_high`，来源档记 `第三方画像数据`）**：记录集里有一路「第三方画像数据」，它是结构化标签（形如 `{"name": "预测年龄段", "values": [{"score": 0.985, "value": "50岁及以上"}]}`）。**一个字段只要有单独的第三方画像标签支撑，就要收进来**，按 `inferred_high` 处理——它是采购来的商用画像数据，在客户没有试驾与沟通记录时，往往是唯一可靠的画像信源。这类条目的写法与其它 `inferred_high` **不同，务必照做**：
+   - `anchor` 直接抄**标签名**（如 `"anchor": "预测年龄段"`），`anchor_kind` 写 `"verbatim"`；**不要**把外层的 `{"name": ` / `"values": [` 这类 JSON 标点一起抄进去——带 `"键": "值"` 形态的切片会被下游当作无信息的 JSON 残片收回。
+   - **`basis_of_inference` 必填**，必须写清「标签名 + 标签给出的取值 + 置信度」，形如 `["第三方画像标签“预测年龄段”给出“50岁及以上”（置信度 0.985）"]`。**不要**只写标签名——销售需要知道标签到底给出了什么。**不要**只写 `reasoning_chain` 而不写 `basis_of_inference`——定位层要求推断类条目给依据，缺了会被降为 `inferred_low`。
+   - `reasoning_chain` 用**一句**话说清「为什么按标签取值」，如 `["第三方画像直接给出年龄段预测，故按其取值"]`。**不要**写「客户无试驾/沟通记录，此为唯一画像信源」这类内部口径；**不要**把标签名和取值再复述一遍。
+   - 提到置信程度时按真实分值措辞：≥0.8 说「高」，0.5–0.8 说「中等」，<0.5 说「偏低」。**不得**对低分标签写「高置信」。
+   - 取值按标签名对应的字段如实写（如 `age="50岁及以上"`）。
    - **一个字段有多条第三方标签时**都保留（同一字段**至多一行**，多值用 `||` 连接）。
 
 **找不到任何原始数据关联的字段，一律不要输出。** 低置信推断（`inferred_low`）**不归你管**——下游会补。你输出得越干净越好：宁可少写，不要凑数。
@@ -18,6 +19,8 @@
 ## 二、每条结论必须带来源坐标（这是本层的硬要求）
 
 - **锚定型事实**：值能在原文里**逐字找到**。在 `anchor` 里**逐字复制**那段原文（不少于 6 个字），并写 `"anchor_kind": "verbatim"`。
+  - 锚点必须是原文中**连续的一段**，整段复制。**不要**拼接两句话、**不要**加字段名前缀（如「性别显示」）、**不要**抄记录编号或 `##` 标题、**不要**抄 `**` 等 Markdown 标记。
+  - 抄不出连续原文时，**宁可不给 `anchor`**，改在 `basis_of_inference` 里写清依据——凭空拼一个锚点会让下游定位失败，证据位反而空掉。
 - **当归型事实**：值是你**纠错或归一**后得到的，原文里没有字面匹配。典型是 ASR 转写错误（「安安」实为「埃安」、「幺三九」实为「139」）与品牌/车型别名归一。**必须**同时给出：
   - `"anchor_kind": "normalized"`
   - `"source_quote"`：**原文原样串**（如「安安I60」）
@@ -73,17 +76,18 @@
 
 ```
 {"attribute": "old_car_model", "value": "2019款别克君威", "basis": "fact", "anchor_kind": "verbatim", "subject": "customer", "record_channel": "外呼录音信息", "anchor": "我现在开的是一九年的君威", "confidence": 0.9}
-{"attribute": "title", "value": "Mr", "basis": "fact", "anchor_kind": "verbatim", "subject": "customer", "record_channel": "微信手机号搜索界面信息", "anchor": "性别显示男性", "value_signal": "男性", "confidence": 0.8}
+{"attribute": "title", "value": "Mr", "basis": "fact", "anchor_kind": "verbatim", "subject": "customer", "record_channel": "外呼录音信息", "anchor": "李先生说下周来", "value_signal": "先生", "confidence": 0.8}
 {"attribute": "annual_income", "value": "30-50万", "basis": "inferred_high", "subject": "customer", "basis_of_inference": ["职业为互联网中层", "关注 30 万以上车型"], "reasoning_chain": ["职业属互联网中层，收入区间偏高", "关注的车型集中在 30 万以上", "两条线索同向，故收敛到 30-50 万"], "confidence": 0.7}
-{"attribute": "occupation", "value": "小车司机", "basis": "inferred_high", "subject": "customer", "record_channel": "第三方画像数据", "anchor": "预测职业司机(小车)", "anchor_kind": "verbatim", "reasoning_chain": ["第三方画像命中「预测职业司机(小车)」标签", "标签置信度 0.985，属高置信预测", "客户无试驾/沟通记录，此为唯一画像信源，故按其取值"], "confidence": 0.75}
+{"attribute": "age", "value": "50岁及以上", "basis": "inferred_high", "subject": "customer", "record_channel": "第三方画像数据", "anchor": "预测年龄段", "anchor_kind": "verbatim", "basis_of_inference": ["第三方画像标签“预测年龄段”给出“50岁及以上”（置信度 0.985）"], "reasoning_chain": ["第三方画像直接给出年龄段预测，故按其取值"], "confidence": 0.75}
 {"attribute": "intended_model", "value": "埃安I60", "basis": "fact", "anchor_kind": "normalized", "subject": "customer", "record_channel": "试驾录音信息", "anchor": "安安", "source_quote": "我在看安安I60", "normalize_reason": "ASR 音近纠错（安安→埃安）", "confidence": 0.85}
 {"attribute": "competing_model", "value": "零跑C11", "basis": "fact", "anchor_kind": "normalized", "subject": "customer", "record_channel": "试驾录音信息", "anchor": "领跑C11", "source_quote": "我也看了领跑C11", "normalize_reason": "ASR 音近纠错（领跑→零跑）", "confidence": 0.85}
 ```
 
 - 一行一个字段；同一字段**至多一行**（多选字段的多个取值写在同一个 `value` 里，用 `||` 连接）。
 - **`reasoning_chain` 只有 `inferred_high` 才要给**（`fact` 不必，锚点本身就是路径）：它是
-  「由依据推到取值」的 1–4 条短句，写**怎么推的**，**不要**复述 `basis_of_inference` 里
-  已经写过的那几条依据——那两条是「论据」与「论证」的关系，写重了等于没写。
+  「由依据推到取值」的说明。**能一句话说清就写一句**；推理确实需要多步时才分条写，
+  每步都要有信息量。**不要**为了凑步数把一句话拆成「有依据」「所以得出结论」这类空话，
+  也**不要**复述 `basis_of_inference` 里已经写过的依据——那两条是「论据」与「论证」的关系。
 - 一条也没提取到时，**什么也不要输出**（空输出即可）。
 - 直接输出 JSONL，**不要**加 ```json 围栏。
 

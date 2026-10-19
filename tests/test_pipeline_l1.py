@@ -799,3 +799,104 @@ def test_steps_do_not_restate_quote_when_no_chain():
     note = next(n for n in json.loads(result["notes_updates_json"]) if n["attribute_key"] == "occupation")
     steps = note["reasoning_detail"]["steps"]
     assert all("我以前做充电桩的" not in s for s in steps), steps
+
+
+# ------------------------------------------- v3.4 证据链可读性整改
+
+def test_markdown_bold_anchor_still_localizes():
+    """原文把登记字段加粗（``**国标行业**``）时，锚点按忽略 Markdown 匹配并切回原文。"""
+    body = "## 工商登记\n- **国标行业**：珠宝首饰零售(F5245)\n- **企业类型**：个体工商户"
+    result = pipe.localize_claims(
+        records_json(record("关联企业信息", body)),
+        claims_json(
+            claim(
+                attribute="industry",
+                value="珠宝首饰零售",
+                record_channel="关联企业信息",
+                anchor="国标行业：珠宝首饰零售(F5245)",
+            )
+        ),
+    )
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert "quote" in entry, "加粗差异不得导致定位失败"
+    assert "珠宝首饰零售(F5245)" in entry["quote"]
+    assert entry["quote"] in body, "切出的引文必须是原文切片"
+
+
+def test_anchor_failure_backfills_quote_from_value_in_same_channel():
+    """锚点拼错时，用字段取值在同一渠道原文里回查补证据；置信档仍按降级处理。"""
+    body = "（销售）家用有旧车吗？\n（客户）首购"
+    result = pipe.localize_claims(
+        records_json(record("外呼录音信息", body, kind="transcript")),
+        claims_json(
+            claim(
+                attribute="current_vehicle_info",
+                value="无车",
+                record_channel="外呼录音信息",
+                anchor="家用有旧车吗？首购",
+            )
+        ),
+    )
+    entry = json.loads(result["claims_json"])["fields"][0]
+    assert entry.get("quote") in (None, "") or entry["quote"] in body
+    # 取值「无车」不在原文里，因此没有可回查的片段；降级必须发生
+    assert entry["basis"] == "inferred_low"
+
+
+def test_notes_steps_never_emit_channel_only_fallback():
+    """证据与推理都缺料时，不得再输出「来自{渠道}」或裸渠道名。"""
+    result = pipe.project_claims(
+        claims_json(
+            claim(
+                attribute="hobbies",
+                value="爬山",
+                record_channel="外呼录音信息",
+                anchor="",
+                basis="inferred_low",
+            )
+        )
+    )
+    note = next(n for n in json.loads(result["notes_updates_json"]) if n["attribute_key"] == "hobbies")
+    detail = note["reasoning_detail"]
+    assert not any(str(s).startswith("来自") for s in detail["steps"])
+    assert "外呼录音信息" not in detail["evidence"]
+
+
+def test_third_party_tag_evidence_carries_value():
+    """第三方画像标签的证据必须写出标签取值，不能只到标签名。"""
+    result = pipe.project_claims(
+        claims_json(
+            claim(
+                attribute="age",
+                value="50岁及以上",
+                record_channel="第三方画像数据",
+                anchor="预测年龄段",
+                basis="inferred_high",
+                basis_of_inference=["第三方画像标签“预测年龄段”给出“50岁及以上”"],
+                reasoning_chain=["第三方画像直接给出年龄段预测，故按其取值"],
+            )
+        )
+    )
+    note = next(n for n in json.loads(result["notes_updates_json"]) if n["attribute_key"] == "age")
+    detail = note["reasoning_detail"]
+    assert any("50岁及以上" in str(e) for e in detail["evidence"]), detail["evidence"]
+    assert detail["steps"] == ["第三方画像直接给出年龄段预测，故按其取值"]
+
+
+def test_injected_phone_evidence_carries_number():
+    """注入类字段的证据要写出取值本身，而不是只写渠道名。"""
+    result = pipe.project_claims(
+        claims_json(
+            {
+                "attribute": "phone_number",
+                "value": "15308826588",
+                "basis": "fact",
+                "subject": "customer",
+                "record_channel": pipe.INJECTED_PHONE_CHANNEL,
+            }
+        )
+    )
+    note = next(
+        n for n in json.loads(result["notes_updates_json"]) if n["attribute_key"] == "phone_number"
+    )
+    assert any("15308826588" in str(e) for e in note["reasoning_detail"]["evidence"])

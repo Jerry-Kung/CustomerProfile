@@ -424,6 +424,7 @@ def bundle_channels(
     chat_history=None,
     feedback=None,
     phone_company=None,
+    phone_location=None,
     jiguang=None,
     test_drive_transcript=None,
     outbound_transcript=None,
@@ -435,6 +436,12 @@ def bundle_channels(
     录音渠道给两样东西：``*_transcript``（逐字原文，来自 ``audio_content_extract``）
     与 ``*_report``（压缩报告，来自「录音信息提取」子流程）。L0 取原文，
     报告只作兜底——**不**让压缩产物覆盖原文。
+
+    **手机号归属地与企业信息分开接**（2026-10-19 可读性整改）：此前两条都指向
+    ``company_analysis_result``，于是「手机号归属地信息」下面的正文其实是企业注册信息，
+    L1 把「珠宝首饰零售」这一行业结论挂在归属地名下，信源与结论看起来毫不相干。
+    归属地接 ``phonenumber_analysis_result``，企业接 ``company_analysis_result``。
+    参数名 ``phone_company`` 保留原义（企业信息），接线处不再复用它。
     """
     channels = {
         "朋友圈截图内容信息": moments,
@@ -447,7 +454,7 @@ def bundle_channels(
         "客户留存在我方销售数据系统中的信息记录": mengshi_it,
         "客户与我方销售人员的聊天记录信息": chat_history,
         "销售人员对当前客户历史画像数据的反馈记录": feedback,
-        "手机号归属地信息": phone_company,
+        "手机号归属地信息": phone_location,
         "关联企业信息": phone_company,
         "第三方画像数据": jiguang,
     }
@@ -954,8 +961,9 @@ def _is_noisy_anchor(quote: str) -> bool:
 def _occurrences(content: str, anchor: str) -> int:
     """数 ``anchor`` 在 ``content`` 里出现几次（与 :func:`_locate` 同口径）。
 
-    逐字匹配优先；一次都没命中时按**忽略空白**再数一次——与 ``_locate`` 的回落一致，
-    否则会出现「``_locate`` 找得到、这里数不到」的错位，短锚会被白白丢掉。
+    逐字匹配优先；一次都没命中时按**忽略空白**、再按**忽略 Markdown 标记**各数一次——
+    与 ``_locate`` 的回落一致，否则会出现「``_locate`` 找得到、这里数不到」的错位，
+    短锚会被白白丢掉。
     """
     if not content or not anchor:
         return 0
@@ -966,7 +974,26 @@ def _occurrences(content: str, anchor: str) -> int:
     compact_anchor = "".join(c for c in anchor if not c.isspace())
     if not compact_anchor:
         return 0
-    return compact_content.count(compact_anchor)
+    count = compact_content.count(compact_anchor)
+    if count:
+        return count
+    return "".join(c for c, _ in _strip_markdown(content)).count(
+        "".join(c for c, _ in _strip_markdown(anchor))
+    )
+
+
+MARKDOWN_MARKERS = frozenset("*_")
+"""定位容错要忽略的 Markdown 标记。"""
+
+
+def _strip_markdown(text: str) -> list[tuple[str, int]]:
+    """去掉 Markdown 强调标记，返回 ``[(字符, 原串下标)]`` 以便映射回原文。"""
+    pairs: list[tuple[str, int]] = []
+    for index, char in enumerate(text):
+        if char in MARKDOWN_MARKERS:
+            continue
+        pairs.append((char, index))
+    return pairs
 
 
 def _locate(content: str, anchor: str) -> tuple[int, int, str] | None:
@@ -974,6 +1001,10 @@ def _locate(content: str, anchor: str) -> tuple[int, int, str] | None:
 
     先按逐字匹配；失败再按**忽略空白**匹配一次——ASR 转写里同一句话的断字与空格
     常与模型抄写有出入，只认逐字会误杀本来正确的断言。
+
+    v3.4 增加第三档：**忽略 Markdown 标记**（``**国标行业**`` 与 ``国标行业``）。
+    实测单这一档救回 7 条（「行业」「企业名称」等结构化登记字段的锚点都由渲染层
+    加了加粗）。切片仍按原文下标还原，marker 一并留在引文里，销售可原样核对。
 
     **坐标一律由这里算出，模型不誊抄整段引文**——这正是「锚点可回溯率 100%」的含义：
     留下的引文全都是原文的切片，不可能出现模型自造的句子。
@@ -984,21 +1015,31 @@ def _locate(content: str, anchor: str) -> tuple[int, int, str] | None:
     if index >= 0:
         return index, index + len(anchor), anchor
 
-    compact_chars: list[str] = []
-    compact_index: list[int] = []
-    for position, char in enumerate(content):
+    compact_flat = "".join(c for c in content if not c.isspace())
+    compact_anchor = "".join(c for c in anchor if not c.isspace())
+    if compact_anchor:
+        found = compact_flat.find(compact_anchor)
+        if found >= 0:
+            positions = [i for i, c in enumerate(content) if not c.isspace()]
+            start = positions[found]
+            end = positions[found + len(compact_anchor) - 1] + 1
+            return start, end, content[start:end]
+
+    flat_chars: list[str] = []
+    flat_index: list[int] = []
+    for char, original in _strip_markdown(content):
         if char.isspace():
             continue
-        compact_chars.append(char)
-        compact_index.append(position)
-    compact_anchor = "".join(c for c in anchor if not c.isspace())
-    if not compact_anchor:
+        flat_chars.append(char)
+        flat_index.append(original)
+    flat_anchor = "".join(c for c, _ in _strip_markdown(anchor) if not c.isspace())
+    if not flat_anchor:
         return None
-    found = "".join(compact_chars).find(compact_anchor)
+    found = "".join(flat_chars).find(flat_anchor)
     if found < 0:
         return None
-    start = compact_index[found]
-    end = compact_index[found + len(compact_anchor) - 1] + 1
+    start = flat_index[found]
+    end = flat_index[found + len(flat_anchor) - 1] + 1
     return start, end, content[start:end]
 
 
@@ -1273,6 +1314,19 @@ def localize_claims(records_json, claims_json, min_anchor: int = 8) -> dict:
                 len(anchor) < MIN_SHORT_ANCHOR or _occurrences(content, anchor) != 1
             )
             if located is None:
+                # v3.4：锚点抄不出连续原文时，用**字段取值**在**同一渠道**原文里回查。
+                # 只查同渠道——跨渠道会把别的渠道里恰好同值的文字误当成证据。
+                # 回查命中只补证据位，置信档仍按原规则降级，不因此升级。
+                value_text = str(raw.get("value") or "").strip()
+                signal_text = str(raw.get("value_signal") or "").strip()
+                for probe in (signal_text, value_text):
+                    if not probe:
+                        continue
+                    hit = _locate(content, probe)
+                    if hit is not None:
+                        entry["quote"] = hit[2]
+                        entry["span"] = [hit[0], hit[1]]
+                        break
                 _downgrade("anchor_not_found")
             elif ambiguous:
                 _downgrade("anchor_too_short")
@@ -1334,15 +1388,11 @@ def localize_claims(records_json, claims_json, min_anchor: int = 8) -> dict:
     }
 
 
-INJECTED_PHONE_CHANNEL = "客户留资手机号"
-"""``phone_number`` 的注入来源名（记登记档，见 ``projection.CHANNEL_TIER``）。
+INJECTED_PHONE_CHANNEL = proj.INJECTED_PHONE_CHANNEL
+"""``phone_number`` 的注入来源名（登记档，与投影层共用同一常量）。"""
 
-本字段的真值就是本案入参手机号，不来自任何渠道记录，因此**必须**用登记档标注，
-否则会因「非登记来源」被降为 ``inferred_low``（v3.1 改造四）。
-"""
-
-INJECTED_LICENSE_CHANNEL = "试驾与置换记录"
-"""``driver_license_status`` 的注入来源名（同样记登记档）。"""
+INJECTED_LICENSE_CHANNEL = proj.INJECTED_LICENSE_CHANNEL
+"""``driver_license_status`` 的注入来源名（登记档）。"""
 
 TEST_DRIVE_SOURCE_NAME = "试驾录音信息"
 """判定「有没有试驾」看的渠道：到店试驾本身即驾照的充分证据（没驾照不能试驾）。"""
@@ -1679,6 +1729,9 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
             lead = f"根据已有信息推断：{reason}" if reason else "据已有事实归纳（低置信，供核对）"
         else:
             lead = reason if reason else "多条来源同向，取一致结论"
+        # 证据位填**理由里的事实部分**（结论从句之前的那段），而不是留空让前端整块不渲染。
+        # 兜底补的字段本就没有原文锚点，这是能给到销售的最接近「依据」的内容。
+        factual = proj._strip_conclusion(reason) if reason else ""
         existing = by_key.get(key)
         if existing is not None:
             existing["attribute_value"] = item["attribute_value"]
@@ -1686,6 +1739,8 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
             detail["confidence"] = confidence
             steps = detail.setdefault("steps", [])
             steps.append(lead)
+            if factual and not detail.get("evidence"):
+                detail["evidence"] = [factual]
         else:
             updates.append(
                 {
@@ -1695,10 +1750,10 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
                         "summary": (
                             "由已有信息归纳补充（低置信，供核对）"
                             if soft
-                            else "由 L2 兜底在候选集内裁决得到"
+                            else "由多条来源同向归纳得到"
                         ),
                         "steps": [lead],
-                        "evidence": [],
+                        "evidence": [factual] if factual else [],
                         "confidence": confidence,
                     },
                 }
@@ -2095,6 +2150,7 @@ WORKFLOW = WorkflowDef(
                 "chat_history": (CHAT_HISTORY, "result"),
                 "feedback": (FEEDBACK, "result"),
                 "phone_company": (PHONE_COMPANY, "company_analysis_result"),
+                "phone_location": (PHONE_COMPANY, "phonenumber_analysis_result"),
                 "test_drive_transcript": (TEST_DRIVE_ITER, "output"),
                 "outbound_transcript": (OUTBOUND_ITER, "output"),
             },

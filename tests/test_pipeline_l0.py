@@ -162,6 +162,20 @@ def test_raw_payload_is_used_when_producer_text_is_a_sentinel():
     assert "某某电力局" in record_for(records, "关联企业信息")["content"]
 
 
+def test_phone_location_and_company_use_different_payloads():
+    """手机号归属地与关联企业是两份产出，不得再接成同一份内容。"""
+    records = build(
+        manifest(entry("RelatedEnterpriseInfo", raw='{"company": "某某电力局"}')),
+        phone_company="## 二、工商登记\n- **企业类型**：个体工商户",
+        phone_location="**归属地**：云南省德宏州",
+    )
+    location = record_for(records, "手机号归属地信息")["content"]
+    company = record_for(records, "关联企业信息")["content"]
+    assert "云南省德宏州" in location
+    assert "个体工商户" in company
+    assert location != company
+
+
 # ---------------------------------------------------------------- 判据二：原文逐字留存
 
 def test_transcript_is_kept_verbatim_from_auc_result():
