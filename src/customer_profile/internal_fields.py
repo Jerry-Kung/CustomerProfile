@@ -143,6 +143,17 @@ INTERNAL_ENUM_SPECS: dict[str, dict[str, Any]] = {
         },
         "multiple_value": False,
     },
+    # 画像卡字段：``ai_insight.purchase_intent_level`` 只认 A/B/C/D 四个值。
+    # 不给枚举定义，L1 会输出「高意向」「B级客户」之类的自由文本，归一失效后整项消失。
+    "deal_level": {
+        "items": {
+            "A": "A",
+            "B": "B",
+            "C": "C",
+            "D": "D",
+        },
+        "multiple_value": False,
+    },
 }
 """编外字段里**仍是枚举**的那些。
 
@@ -166,6 +177,7 @@ INTERNAL_FIELD_NAMES: dict[str, str] = {
     "emotion": "沟通风格",
     "communication_rhythm": "沟通节奏",
     "personality_and_preferences": "性格偏好",
+    "deal_level": "购车意向等级",
 }
 """编外字段的中文名（L1《目标字段清单》渲染用；契约里已无 ``attribute_name`` 可读）。"""
 
@@ -208,6 +220,11 @@ INTERNAL_FIELD_DESCRIPTIONS: dict[str, str] = {
         "判断用户购车性格：理性型关注参数、逻辑、数据；感性型关注颜色、氛围、直观感受；"
         "社交型关注排场、圈层；实用型关注性价比。"
     ),
+    "deal_level": (
+        "判定客户的购车意向等级（A / B / C / D），供销售按等级排序跟进。"
+        "A＝近期明确要买；B＝有意向、时间窗较近；C＝在比较、暂无时间窗；D＝线索质量低。"
+        "综合购车时间窗、看车进度、预算明确度、竞品比对状态判定；无法判定时不输出该字段。"
+    ),
 }
 
 INTERNAL_FIELD_NOTE = "内部字段：不写入 Notes，供画像卡与销售策略使用。"
@@ -228,12 +245,26 @@ EXTRACTION_ONLY_KEYS: tuple[str, ...] = INTERNAL_ONLY_KEYS + (
 因此不该出现在取证目标清单里（列进去只会诱导模型去原文里找一段本就没有的话）。
 """
 
-EXTRACTION_KEYS: tuple[str, ...] = nc.ALL_KEYS + EXTRACTION_ONLY_KEYS
-"""L1 的**取证目标**全集：契约字段 + 编外字段。
+CARD_ONLY_KEYS: tuple[str, ...] = ("deal_level",)
+"""**画像卡字段**：不在 Notes 契约里，但**是正式回传字段的取值来源**。
+
+``deal_level`` 是购车意向等级：契约把它放在 ``ai_insight.purchase_intent_level``
+（后台再派生同步到 ``customer_profile_main.deal_level``），`Notes 的 45 字段里没有它。
+它既不是「无回传位的编外字段」（``INTERNAL_ONLY_KEYS``），也不能从 Notes 取——它是
+回传体另一块的**输入**。v3 从生产图迁到业务测试臂时，旧模板里的「客户质量等级 A/B/C」
+没有跟着进入《目标字段清单》，导致 facts 恒无此键、``ai_insight`` 只剩
+``customer_segment``，前端「购车意向等级」长期空白。
+
+与 ``CALLBACK_KEYS`` 的分工同编外字段：**取证有它，Notes 白名单仍不含它**。
+"""
+
+EXTRACTION_KEYS: tuple[str, ...] = nc.ALL_KEYS + EXTRACTION_ONLY_KEYS + CARD_ONLY_KEYS
+"""L1 的**取证目标**全集：契约字段 + 编外字段 + 画像卡字段。
 
 与 ``CALLBACK_KEYS``（即 :data:`notes_contract.ALL_KEYS`）的分工是本模块存在的全部理由：
 **取证照旧全量，回传只走契约**。L1 若只按契约取证，编外字段会立刻掉空，
-``purchase_decisions`` / ``deal_battle`` / ``decision_psychology`` 也就失去料。
+``purchase_decisions`` / ``deal_battle`` / ``decision_psychology`` 也就失去料；
+画像卡字段掉空则 ``ai_insight.purchase_intent_level`` 整个消失。
 """
 
 CALLBACK_KEYS: tuple[str, ...] = nc.ALL_KEYS
@@ -348,3 +379,8 @@ def field_type_of(attribute_key: str) -> str:
 def is_internal_only(attribute_key: str) -> bool:
     """是否为本轮回传**不再包含**的编外字段（渲染时据此加标注）。"""
     return attribute_key in EXTRACTION_ONLY_KEYS
+
+
+def is_card_only(attribute_key: str) -> bool:
+    """是否为画像卡字段：不回传进 Notes，但产出回传体的 ``ai_insight``。"""
+    return attribute_key in CARD_ONLY_KEYS

@@ -1032,7 +1032,11 @@ def enum_key_guide() -> str:
                 )
             else:
                 parts.append(f"{enum_key}={value}")
-        suffix = "　【内部字段，不回传】" if inf.is_internal_only(key) else ""
+        suffix = (
+            "　【内部字段，不回传】" if inf.is_internal_only(key)
+            else "　【画像卡字段，不写入 Notes】" if inf.is_card_only(key)
+            else ""
+        )
         lines.append(f"- `{key}`（{plural}）：" + " / ".join(parts) + suffix)
     return "\n".join(lines)
 
@@ -1100,6 +1104,18 @@ def field_inference_guide() -> str:
         name = entry.get("attribute_name") or ""
         field_type = entry.get("field_type") or "text"
         description = (entry.get("description") or "").strip()
+        lines.append(f"- `{key}`（{name}，{field_type}）：{description}")
+        note = FIELD_SOURCE_NOTES.get(key)
+        if note:
+            lines.append(f"  - 取证范围：{note}")
+
+    # ---- 画像卡字段：不在 Notes 契约里，但产出回传体的分析区块
+    lines.append("")
+    lines.append("### 画像卡字段（照常取证，**不写入 Notes**，直接决定画像卡的意向等级）")
+    for key in inf.CARD_ONLY_KEYS:
+        name = inf.name_of(key)
+        field_type = inf.field_type_of(key)
+        description = inf.description_of(key)
         lines.append(f"- `{key}`（{name}，{field_type}）：{description}")
         note = FIELD_SOURCE_NOTES.get(key)
         if note:
@@ -1487,7 +1503,11 @@ def _projection_context(claims) -> dict:
         ):
             deregistered = True
         if claim.attribute in {"old_car_model", "owned_brand_model", "owned_car_age"}:
-            old_car = True
+            # **「无」不是旧车证据**：客户原话「目前无车」「没有旧车」时 L1 仍可能给出
+            # ``old_car_model="无"``。只看「属性出现过」会把首购客户改写成换购，
+            # 卡片上凭空多出一条「购车性质：换购」。占位取值一律不算凭据。
+            if not _is_placeholder_value(claim.value):
+                old_car = True
         if claim.attribute == "trade_in_requirement" and ("有旧车" in text or "置换" in text):
             old_car = True
     return {"company_deregistered": deregistered, "has_old_car_evidence": old_car}
@@ -2382,8 +2402,11 @@ WORKFLOW = WorkflowDef(
             END,
             "输出",
             "end",
-            after=(PRODUCTION,),
-            inputs={"result1": (PRODUCTION, "result1")},
+            after=(CALLBACK_BUILD,),
+            # ``result1`` 取 **v2 回传体**（``callback_json``）而不是 L3 的九板块旧结构：
+            # 运行台「结果」页展示的是 ``result1``，旧结构会让业务方核对到一份与平台
+            # 实际画像无关的数据。L3 的旧结构仍留在 ``PRODUCTION`` 节点出参里备查。
+            inputs={"result1": (CALLBACK_BUILD, "callback_json")},
             outputs=("result1",),
         ),
     ),

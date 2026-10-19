@@ -52,7 +52,7 @@ L2_PROJECT ──► L2_REVIEW ──► PRODUCTION (L3 子流程)
 
 要点：
 
-- **END 仍挂在 PRODUCTION 上**，`result1` 的来源与形状一个字不改。回写是新长出的一条**旁支**，不是主链的一环。这样 `tests/test_l3.py` 钉住的装配形状、以及业务测试臂既有的 `result1` 对外口径全部不受影响。
+- **END 挂在 `callback_build` 上**（2026-10-19 调整）：运行台「结果」页展示的 `result1` 改取 v2 回传体 `callback_json`，与平台实际画像同源。此前 END 挂 `PRODUCTION`，展示的是 L3 九板块旧结构，核对时容易拿错产物；L3 旧结构仍留在 `PRODUCTION` 节点出参里备查。
 - `callback_build` 只读 facts 与 notes，不产生新事实。
 - `callback_writeback` 带 `@writeback: True`，受既有的 `WRITEBACK_ENABLED` 闸门管辖（`executors_http.py:71`）。
 
@@ -150,12 +150,12 @@ build_analysis_result(phone, batch_id, facts_json, notes_updates_json, express_j
 
 | 区块 | 取值来源 | 备注 |
 |---|---|---|
-| `ai_insight.purchase_intent_level` | facts `deal_level`，经 `normalize_level()` | `value` 为 `A`/`B`/`C`/`D`，**不含「级」字** |
+| `ai_insight.purchase_intent_level` | facts `deal_level`（画像卡字段，L1 取证清单含它） | `value` 为 `A`/`B`/`C`/`D`，**不含「级」字** |
 | `ai_insight.customer_segment` | L3 表达层的自由生成值 | 本轮不约束，见 L-001 |
 | `purchase_decisions` · 到店动因 | `purchase_purpose` + `core_concerns` | |
 | `purchase_decisions` · 当前用车 | `current_vehicle_info` + 编外 `old_car_model` / `owned_brand_model` / `owned_car_age` | |
-| `purchase_decisions` · 换车动因 | 编外 `purchase_nature`=replacement + `pain_points` | |
-| `purchase_decisions` · 对比车型 | `competing_brand` / `competing_model` / `test_driven_models` | |
+| `purchase_decisions` · 换车动因 | 编外 `purchase_nature`=replacement + `pain_points` | 缺料时填「暂无换车动因」 |
+| `purchase_decisions` · 对比车型 | `competing_brand` / `competing_model` / `test_driven_models` | 缺料时填「暂无对比车型」 |
 | `purchase_decisions` · 核心关注 | `core_concerns` | |
 | `purchase_decisions` · 决策阻力 | `brand_concerns` + L3 `resistances` | `resistances` 由 Notes 迁至此 |
 | `deal_battle.win_conditions` | `core_concerns` + `knowledge_of_mengshi`≥basic + `planned_purchase_time` 档位 + `license_plate_status` | |
@@ -203,7 +203,7 @@ build_analysis_result(phone, batch_id, facts_json, notes_updates_json, express_j
 - 新增节点常量 `CALLBACK_BUILD` / `CALLBACK_WRITE`；
 - `callback_build`：`code` 节点，`after=(PRODUCTION,)`，`function="customer_profile.callback_build:build_analysis_result"`，出参 `callback_json`；
 - `callback_writeback`：`http-request`，`after=(CALLBACK_BUILD,)`，`@service: "profile"`、`@method: "post"`、`@path: f"{PROFILE_API_PREFIX}callback/update-profile"`、`@auth: True`、`@body_ref`、`@writeback: True`、`@outputs: {"body": "$text", "status": "$status"}`；
-- `END` 的 `after` **不变**（仍 `(PRODUCTION,)`）；
+- `END` 的 `after` 改挂 `(CALLBACK_BUILD,)`，`result1` 取 `callback_json`（运行台展示与平台画像同源）；
 - `display_name` 改「业务测试臂」，`workflow_id = "customer_profile_pipeline"` **不动**。
 
 `PROFILE_API_PREFIX` 需在 pipeline.py 内自建（production.py 有一份，两文件不互相 import）。

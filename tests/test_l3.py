@@ -420,7 +420,8 @@ def test_pipeline_llm_nodes_are_l1_three_layers_and_l2_fallback():
     assert llm == [pipe.L1_FACTS, pipe.L1_FIELDS, pipe.L1_PERSONA, pipe.L2_FALLBACK]
 
 
-def test_pipeline_end_reads_result1_from_l3():
+def test_pipeline_end_reads_result1_from_the_callback_payload():
+    """``result1`` 取 v2 回传体（``callback_json``），运行台展示与平台画像同源。"""
     end = pipe.WORKFLOW.node_map[pipe.END]
-    assert end.predecessors == (pipe.PRODUCTION,)
-    assert [b.source for b in end.bindings] == [(pipe.PRODUCTION, "result1")]
+    assert end.predecessors == (pipe.CALLBACK_BUILD,)
+    assert [b.source for b in end.bindings] == [(pipe.CALLBACK_BUILD, "callback_json")]

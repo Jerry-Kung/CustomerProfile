@@ -187,11 +187,44 @@ def test_empty_category_is_omitted_not_sent_as_empty_array():
     契约语义是「区块缺失保留原值，显式空数组才清空」——给一个 ``items: []`` 会把
     客户已有的该分类数据清掉。这是四条结构约束里最隐蔽的一条：本地看产物人眼觉得
     「结构完整」，线上却是数据丢失。
+
+    例外是「换车动因」与「对比车型」：两类缺料时给一条「暂无…」填充项，保卡片版式
+    （见 :func:`test_change_and_compare_categories_get_a_filler_when_empty`）；
+    其余四类缺料时连分类本身都不出现。
     """
-    payload = _build(facts=_facts(purchase_type="personal"))  # 只在契约字段，四区块全空
-    assert "purchase_decisions" not in payload["analysis_result"]
+    payload = _build(facts=_facts(purchase_type="personal"))  # 只在契约字段，无任何分块料
+    categories = _categories(payload)
+    assert set(categories) == {"换车动因", "对比车型"}
+    for items in categories.values():
+        assert len(items) == 1
+        assert items[0]["label"].startswith("暂无")
     assert "deal_battle" not in payload["analysis_result"]
     assert "decision_psychology" not in payload["analysis_result"]
+
+
+def test_change_and_compare_categories_get_a_filler_when_empty():
+    """「暂无换车动因」「暂无对比车型」是**填充项**，不是伪造事实。
+
+    - 文案是多字说明，不是单个「无」；
+    - 置信度取低档（``< 0.5``），销售一眼能分辨这是「没查到」而不是「查到了没有」；
+    - id 走内容摘要，同分类每次回传恒定。
+    """
+    first = _categories(_build(facts=_facts(purchase_type="personal")))
+    second = _categories(_build(facts=_facts(purchase_type="personal")))
+    assert first["换车动因"][0]["label"] == "暂无换车动因"
+    assert first["对比车型"][0]["label"] == "暂无对比车型"
+    for items in first.values():
+        assert items[0]["reasoning_detail"]["confidence"] < 0.5
+    assert first == second  # id 与内容稳定
+
+
+def test_filler_does_not_replace_real_items():
+    """有料时不得再塞填充项——「暂无」与真实条目不能同时出现。"""
+    categories = _categories(
+        _build(facts=_facts(competing_model="豹8", purchase_nature="replacement", pain_points="车太小"))
+    )
+    assert [i["label"] for i in categories["对比车型"]] == ["豹8"]
+    assert "暂无换车动因" not in [i["label"] for i in categories["换车动因"]]
 
 
 def test_item_ids_use_the_contract_prefixes():
@@ -238,11 +271,14 @@ def test_change_category_requires_replacement_nature():
 
     首购客户没有换车动因；把他对别的事物的不满写进这一类会误导销售。``pain_points``
     是契约字段，本身不区分「对现有车不满」与「一般用车痛点」，故以购车性质为闸门。
+    闸门不成立时该分类给「暂无换车动因」填充项，而不是把 ``pain_points`` 塞进去。
     """
-    assert "换车动因" not in _categories(_build(facts=_facts(pain_points="车太小")))
-    assert "换车动因" in _categories(
+    first_purchase = _categories(_build(facts=_facts(pain_points="车太小")))
+    assert [i["label"] for i in first_purchase["换车动因"]] == ["暂无换车动因"]
+    replacement = _categories(
         _build(facts=_facts(pain_points="车太小", purchase_nature="replacement"))
     )
+    assert "车太小" in [i["label"] for i in replacement["换车动因"]]
 
 
 def test_current_vehicle_does_not_repeat_the_same_car():
@@ -524,14 +560,19 @@ def test_writeback_node_is_gated_by_the_persistent_switch():
     assert sources["@body_ref"] == (pipe.CALLBACK_BUILD, "callback_json")
 
 
-def test_end_still_hangs_off_production():
-    """``END`` 仍挂 ``PRODUCTION``：回传是旁支，``result1`` 的对外契约一个字不改。"""
+def test_end_reads_result1_from_the_callback_payload():
+    """``END`` 挂 ``CALLBACK_BUILD``：运行台「结果」页展示的 ``result1`` 是 v2 回传体。
+
+    挂 ``PRODUCTION`` 时展示的是 L3 九板块旧结构，与平台实际画像不是同一份数据
+    （实测核对时拿错产物）。L3 的旧结构仍留在 ``PRODUCTION`` 节点出参里备查。
+    """
     from customer_profile.workflows import customer_profile_pipeline as pipe
 
     nodes = {n.node_id: n for n in pipe.WORKFLOW.nodes}
     end = nodes[pipe.END]
-    assert end.predecessors == (pipe.PRODUCTION,)
+    assert end.predecessors == (pipe.CALLBACK_BUILD,)
     assert {b.target for b in end.bindings} == {"result1"}
+    assert [b.source for b in end.bindings] == [(pipe.CALLBACK_BUILD, "callback_json")]
     assert pipe.WORKFLOW.outputs == {"result1": "result1"}
     assert pipe.WORKFLOW.exits == (pipe.END,)
 

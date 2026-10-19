@@ -18,8 +18,10 @@
 
 - **缺失即保留原值，显式空值才清空**（接口文档 §1 兼容策略）。因此某分类没有条目时，
   本模块**整个分类不出现**，而不是给一个 ``items: []``——后者会把客户已有的该分类数据
-  清空。同理 ``deal_battle`` 的两个数组缺料时不给出，``decision_psychology`` 无结论的
-  key 直接不返回（契约本就是「每客户 0~4 条」）。
+  清空。例外是「换车动因」与「对比车型」：这两类缺料时给一条「暂无…」填充项
+  （见 :func:`build_purchase_decisions`），避免卡片出现空白行。同理 ``deal_battle`` 的
+  两个数组缺料时不给出，``decision_psychology`` 无结论的 key 直接不返回（契约本就是
+  「每客户 0~4 条」）。
 - **``reasoning_detail`` 恒为四键**（``summary`` / ``steps`` / ``evidence`` / ``confidence``）。
   ``evidence`` 可以为空列表，由前端决定不渲染该区块。
 """
@@ -480,7 +482,11 @@ def build_purchase_decisions(
     """``purchase_decisions``：六个固定分类，每类一个 ``items[]``。
 
     分类的顺序与取值来源见 :data:`PURCHASE_CATEGORIES` 与各 ``_category_*`` 函数。
-    **某分类无条目时整个分类不出现**——见模块头「缺失即保留原值」。
+
+    **换车动因 / 对比车型缺料时给一条「暂无…」填充项，而不是整个分类不出现。**
+    这两类在销售卡片上是固定的两行，缺少整块会让前端显示空白、业务方以为数据丢了；
+    填充项明确写出「暂无」，既保住了版式，也不伪造事实（置信度取低档）。
+    其余四类缺料仍按「缺失即保留原值」的契约语义整个不出现。
     """
     blocks: list[dict[str, Any]] = []
     for category, items in (
@@ -492,9 +498,48 @@ def build_purchase_decisions(
         (CATEGORY_BARRIER, _category_barrier(view, express)),
     ):
         if not items:
-            continue
+            filler = _filler_item(category)
+            if filler is None:
+                continue
+            items = [filler]
         blocks.append({"category": category, "items": _dedupe(items)})
     return blocks
+
+
+FILLER_LABELS: Mapping[str, str] = {
+    CATEGORY_CHANGE: "暂无换车动因",
+    CATEGORY_COMPARE: "暂无对比车型",
+}
+"""缺料时填入的展示文案。
+
+**不是空串、也不是单个「无」**：卡片是给销售读的，一句话说明「这一类暂时没有内容」
+比一个「无」字更清楚；而 ``items`` 为空或整个分类缺席，前端就只能显示空白。
+"""
+
+
+def _filler_item(category: str) -> dict[str, Any] | None:
+    """给指定分类造一条填充项；不在 :data:`FILLER_LABELS` 里的分类返回 ``None``。
+
+    ``id`` 走同一套内容摘要，因此同分类每次回传的填充项 id 恒定——「先删后建」不会
+    让前端深链每次失配。
+    """
+    label = FILLER_LABELS.get(category)
+    if not label:
+        return None
+    prefix = "change" if category == CATEGORY_CHANGE else "compare"
+    return _item(
+        prefix,
+        category,
+        label,
+        {
+            "summary": f"已定稿事实中未见{category}相关信息",
+            "steps": ["检视已定稿事实，未找到与该分类对应的事实"],
+            "evidence": [],
+            "confidence": 0.3,
+        },
+        1,
+        extra_digest=label,
+    )
 
 
 def _category_visit(view: _FactView) -> list[dict[str, Any]]:

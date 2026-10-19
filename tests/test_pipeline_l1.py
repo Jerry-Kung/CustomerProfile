@@ -293,7 +293,11 @@ def test_field_inference_guide_covers_all_contract_fields():
     }
     assert listed == set(inf.EXTRACTION_KEYS)
     assert set(nc.ALL_KEYS) <= listed
-    assert len(listed) == len(inf.EXTRACTION_KEYS) == 45 + len(inf.EXTRACTION_ONLY_KEYS)
+    assert (
+        len(listed)
+        == len(inf.EXTRACTION_KEYS)
+        == 45 + len(inf.EXTRACTION_ONLY_KEYS) + len(inf.CARD_ONLY_KEYS)
+    )
     # 口径取自登记表：抽两条逐字比对，钉住「不手抄」这条约束。
     # ``planned_purchase_time`` 走契约，``old_car_model`` 走编外登记表——两条通路都要对。
     for key in ("planned_purchase_time", "old_car_model"):
@@ -364,7 +368,11 @@ def test_enum_key_guide_covers_every_enum_field():
     expected = {k for k in inf.EXTRACTION_KEYS if inf.is_enum(k)}
     assert listed == expected
     assert {k for k in nc.ALL_KEYS if nc.is_enum(k)} <= expected
-    assert len(expected) == 24 + len([k for k in inf.EXTRACTION_ONLY_KEYS if inf.is_enum(k)])
+    assert len(expected) == (
+        24
+        + len([k for k in inf.EXTRACTION_ONLY_KEYS if inf.is_enum(k)])
+        + len([k for k in inf.CARD_ONLY_KEYS if inf.is_enum(k)])
+    )
 
 
 def test_enum_key_guide_marks_structured_input_value():
@@ -490,6 +498,22 @@ def test_project_claims_old_car_forces_replacement():
         )
     )
     assert json.loads(result["facts_json"]).get("purchase_nature") == "replacement"
+
+
+def test_placeholder_old_car_value_is_not_evidence():
+    """``old_car_model="无"`` 不是旧车证据：首购客户不得被改写成换购。
+
+    L1 在客户说「目前无车」时仍可能给出 ``old_car_model="无"``。若只按「属性出现过」
+    判定，这类客户的事实与卡片都会变成「换购」，凭空多出一条换车动因。
+    实测 ``15308826588``：原话首购、置换需求为无，facts 却被改成 ``replacement``。
+    """
+    result = pipe.project_claims(
+        claims_json(
+            claim(attribute="old_car_model", value="无", anchor="目前无车"),
+            claim(attribute="purchase_nature", value="first", claim_id="c_002", anchor="第一次买车"),
+        )
+    )
+    assert json.loads(result["facts_json"]).get("purchase_nature") == "first"
 
 
 # ---------------------------------------------------------------- v2.1 R3 渠道塌陷修复
