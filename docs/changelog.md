@@ -2,6 +2,26 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-10-19 — 主入口未传 batch_id 时补 batch_001
+
+分支 `dev-business-opt01`。测试环境实跑发现：照 README 的 curl 示例只传 `phone_number`
+提交，运行在 `pipeline_production` 节点以
+`KeyError: 节点 pipeline_start 未产出字段 batch_id` 失败（40 节点中 36 成功、3 阻断），
+而**提交本身返回 200**——调用方看不出问题。
+
+- **根因**：`start` 节点把 `batch_id` 声明为可选（`required_batch_id=False`），但
+  `execute_start` 只输出「声明了且调用方传了」的字段，不传时该键根本不出现；下游
+  `pipeline_production` 取 `(START, "batch_id")` 直接 KeyError。定义里的缺省值
+  （`default_inputs()` 返回空串）在 `/runs` 提交路径上从未被套用。
+- **修法（最小）**：提交入口 `POST /runs` 对主入口补缺省值——未传或传空白时写入
+  `batch_id = "batch_001"`（`api.DEFAULT_BATCH_ID`）。显式传值原样保留。
+  不在 `execute_start` 里改：那里语义是「原样暴露调用方入参」，给所有工作流的可选入参
+  凭空补值会改变其它工作流的既有行为。
+- **影响面**：前端提交页本就总是发 `batch_id`（空也发空串），行为不变，只是空串现在会被
+  补成 `batch_001` 而不是空串；对外任务接口（8099）要求 `batch_id` 必填，不受影响。
+- **测试**：`tests/test_api.py` 新增三条——不传补缺省、空白串补缺省、显式值保留。
+- 验证：测试环境带 `batch_id` 提交实测 `succeeded`（42 节点全成功，442 s）。
+
 ## 2026-10-16 — 运行台端口由写死 8000 改为可配，缺省 18173
 
 分支 `dev-business-opt01`。测试环境打包时报
