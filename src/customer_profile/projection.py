@@ -43,6 +43,9 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import internal_fields as inf
 from . import notes_contract as nc
+from .income_band import INCOME_BAND_RANGES, normalize_income
+"""档位→区间换算的正身已下沉到 :mod:`customer_profile.income_band`（取数节点也用它）。
+此处保留导出，供离线回放旧产物与直接构造档位断言的调用方沿用。"""
 
 # ====================================================================
 # 来源分级
@@ -557,39 +560,6 @@ def normalize_age(value: Any) -> str | None:
     if opened:
         return f"{int(opened.group(1))} 岁以上"
     return None
-
-
-INCOME_BAND_RANGES: dict[str, str] = {
-    "1": "8-15万",
-    "2": "10-20万",
-    "3": "20-30万",
-    "4": "30-40万",
-    "5": "40-60万",
-    "6": "60万以上",
-}
-"""第三方「预测收入水平」档位 → 年收入区间（业务专家口径，2026-10-20）。
-
-第三方标签只给 ``1档收入`` … ``6档收入`` 这样的档位，销售要的是具体金额。换算口径
-与档位的升降序均由业务方确认：1 档最低、6 档最高，切点如上表。映射只认档位原文，
-客户自己说的金额（``30-50万``）原样透传，不得被改写。
-"""
-
-_INCOME_BAND_PATTERN = re.compile(r"(?:第\s*)?([1-6])\s*档")
-
-
-def normalize_income(value: Any) -> str | None:
-    """把第三方收入档位换成区间数值；不是档位形态的取值返回 ``None``。
-
-    ``None`` 表示「这条取值本来就不是档位」，调用方应保留原值——推断出来的金额、
-    客户自述的金额都不是档位，不能被这张表吞掉。
-    """
-    text = _as_text(value)
-    if not text:
-        return None
-    matched = _INCOME_BAND_PATTERN.search(text)
-    if not matched:
-        return None
-    return INCOME_BAND_RANGES[matched.group(1)]
 
 
 def normalize_level(value: Any) -> str | None:
