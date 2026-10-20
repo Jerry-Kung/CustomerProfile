@@ -43,3 +43,47 @@ def test_worker_can_start_and_stop():
     assert not t.is_alive()
     assert executor.shutdown_requests >= 1
 
+
+
+def test_free_worker_slots_claim_independently_up_to_configured_concurrency():
+    concurrency = 3
+    lock = threading.Lock()
+    all_slots_busy = threading.Event()
+    release_tasks = threading.Event()
+    active = 0
+    peak = 0
+    calls = 0
+
+    class BlockingExecutor:
+        def execute_once(self):
+            nonlocal active, peak, calls
+            with lock:
+                active += 1
+                calls += 1
+                peak = max(peak, active)
+                if active == concurrency:
+                    all_slots_busy.set()
+            try:
+                assert release_tasks.wait(timeout=5)
+                return "succeeded"
+            finally:
+                with lock:
+                    active -= 1
+
+    runner = WorkerRunner(executor=BlockingExecutor(), concurrency=concurrency,
+                          interval_seconds=0.01)
+    thread = threading.Thread(target=runner.run_forever, daemon=True)
+    thread.start()
+    try:
+        assert all_slots_busy.wait(timeout=5)
+        with lock:
+            assert calls == concurrency
+            assert active == peak == concurrency
+        runner.stop()
+    finally:
+        runner.stop()
+        release_tasks.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert active == 0
+    assert calls == concurrency

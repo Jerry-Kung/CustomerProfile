@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import random
 import threading
-import re
 import time
 
 from src.config.observability import elapsed_ms, log_context, mask_phone, safe_text
@@ -17,7 +16,6 @@ from src.domain.task.retry_policy import (
     next_execution_pool,
 )
 from src.domain.task.service import TaskService
-from src.domain.task.profile_routing import ProfileRoutingPolicy, profile_bucket
 from src.infrastructure.workflow.errors import (
     ResumableWorkflowRequestFailed,
     ResumableWorkflowTimeout,
@@ -66,7 +64,6 @@ class WorkerExecutor:
         commercial_queue_gate: CommercialQueueGate | None = None,
         retry_config: RetryConfig | None = None,
         legacy_processing_timeout_seconds: int = 2400,
-        profile_routing: ProfileRoutingPolicy | None = None,
     ):
         if worker_role not in {"local", "commercial"}:
             raise ValueError("worker_role must be local or commercial")
@@ -93,7 +90,6 @@ class WorkerExecutor:
         )
         self._commercial_queue_gate = commercial_queue_gate
         self._retry_config = retry_config or RetryConfig()
-        self._profile_routing = profile_routing or ProfileRoutingPolicy()
         self._legacy_processing_timeout_seconds = legacy_processing_timeout_seconds
         self._retry_recovery_lock = threading.Lock()
         self._last_retry_recovery_monotonic = 0.0
@@ -138,7 +134,6 @@ class WorkerExecutor:
                 task_types=self._worker_task_types,
                 work_envs=self._worker_work_envs,
                 require_profile_identity=self._platform_name == "runner",
-                allow_weighted_new_tasks=allow_unbound_work and self._profile_routing.enabled,
             )
         except Exception:
             self._logger.exception(
@@ -896,15 +891,6 @@ class WorkerExecutor:
         return "failed" if failed else "error"
 
     def _route_reason(self, claimed: TaskRecord) -> str:
-        if (self._profile_routing.enabled and not claimed.attempt_count
-                and claimed.task_type == "customer_profile"
-                and claimed.work_env in self._profile_routing.work_envs
-                and re.fullmatch(r"1[3-9][0-9]{9}", claimed.customer_phonenumber)
-                and claimed.batch_id and 1 <= len(claimed.batch_id) <= 50):
-            runner = self._platform_name == "runner"
-            preferred_runner = profile_bucket(claimed.customer_phonenumber, claimed.batch_id,
-                                               claimed.work_env) < self._profile_routing.runner_percent
-            return ("profile_weighted_" if runner == preferred_runner else "profile_spillover_") + ("runner" if runner else "legacy")
         if claimed.retry_policy_version == SINGLE_TARGET_V1:
             return "single_target_retry" if claimed.attempt_count else "single_target"
         if claimed.retry_policy_version != LOCAL_FIRST_V1:

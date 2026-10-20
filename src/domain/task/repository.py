@@ -36,7 +36,6 @@ class TaskRepository(Protocol):
         task_types: tuple[str, ...],
         work_envs: tuple[str, ...],
         require_profile_identity: bool = False,
-        allow_weighted_new_tasks: bool = False,
     ) -> TaskRecord | None:
         ...
 

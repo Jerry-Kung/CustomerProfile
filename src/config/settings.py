@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
-from src.domain.task.profile_routing import ProfileRoutingPolicy
 
 _DOTENV_LOADED = False
 
@@ -178,7 +177,6 @@ class AppConfig:
     commercial_queue: CommercialQueueConfig = field(default_factory=CommercialQueueConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     runner: ProfileRunnerConfig = field(default_factory=ProfileRunnerConfig)
-    profile_routing: ProfileRoutingPolicy = field(default_factory=ProfileRoutingPolicy)
 
 
 def _default_task_upload_dir() -> Path:
@@ -304,7 +302,6 @@ def load_config() -> AppConfig:
         commercial_queue=commercial_queue_config,
         retry=retry_config,
         runner=runner_config,
-        profile_routing=_profile_routing_config(),
     )
 
 
@@ -472,18 +469,6 @@ def _validated_url(key: str, *, required: bool) -> str:
                 or parsed.query or parsed.fragment):
             raise ValueError(f"{key} must be an HTTP(S) base URL without credentials, query or fragment")
     return value
-
-
-def _profile_routing_config() -> ProfileRoutingPolicy:
-    mode = _env_str("PROFILE_ROUTING_MODE", "parallel").lower()
-    if mode not in {"parallel", "weighted"}:
-        raise ValueError("PROFILE_ROUTING_MODE must be parallel or weighted")
-    return ProfileRoutingPolicy(
-        enabled=mode == "weighted",
-        runner_percent=_env_int("PROFILE_RUNNER_TRAFFIC_PERCENT", 80),
-        spillover_seconds=_env_int("PROFILE_ROUTING_SPILLOVER_SECONDS", 300),
-        work_envs=_csv_values("PROFILE_ROUTING_WORK_ENVS", "production"),
-    )
 
 
 def _positive_env_int(key: str, default: int) -> int:

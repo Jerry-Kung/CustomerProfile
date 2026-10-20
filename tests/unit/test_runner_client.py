@@ -54,7 +54,7 @@ def test_submit_json_maps_fields_and_production_target():
     assert len(seen) == 1
     assert str(seen[0].url) == "http://prod-runner:18000/runs"
     assert json.loads(seen[0].content) == {
-        "workflow_id": WORKFLOW_ID, "inputs": {"phone_number": PHONE, "batch_id": BATCH},
+        "workflow_id": "customer_profile_pipeline", "inputs": {"phone_number": PHONE, "batch_id": BATCH},
         "business_ref": f"cdp:{PHONE}:{BATCH}",
     }
 
@@ -89,7 +89,9 @@ def test_submit_status_classification_does_not_blindly_retry(status, retryable):
 
 
 @pytest.mark.parametrize("body", [{}, {"run_id": "../wrong", "workflow_id": WORKFLOW_ID},
-                                  {"run_id": RUN_ID, "workflow_id": "wrong"}, {"run_id": None}, [1]])
+                                  {"run_id": RUN_ID, "workflow_id": "wrong"},
+                                  {"run_id": RUN_ID, "workflow_id": "customer_profile_entry"},
+                                  {"run_id": None}, [1]])
 def test_malformed_submit_response_is_unknown(body):
     client = RunnerClient(CONFIG, httpx.MockTransport(lambda _: httpx.Response(200, json=body)))
     with pytest.raises(RunnerRequestFailed) as error:
@@ -126,6 +128,17 @@ def test_poll_returns_inner_analysis_result_and_renews_lease():
     assert json.loads(result) == {"profile_summary": {"name": "测试客户"}}
     assert len(heartbeats) >= 3
     assert all(request.method == "GET" and request.url.path == "/runs/" + RUN_ID for request in requests_seen)
+
+
+def test_poll_recovers_a_persisted_run_from_the_retired_entry_without_resubmitting():
+    seen = []
+    def handle(request):
+        seen.append(request)
+        return httpx.Response(200, json=detail(workflow_id="customer_profile_entry"))
+    result = poll(RunnerClient(CONFIG, httpx.MockTransport(handle)))
+    assert json.loads(result) == {"profile_summary": {"name": "测试客户"}}
+    assert len(seen) == 1
+    assert seen[0].method == "GET" and seen[0].url.path == "/runs/" + RUN_ID
 
 
 @pytest.mark.parametrize("status", ["failed", "skipped"])

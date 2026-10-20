@@ -50,15 +50,15 @@ queued -> processing -> succeeded | failed
 
 擎天和 Runner 客户端提供可恢复的提交 / 查询路径。Worker 通过 generation、claim token 和租约保护回写；远端运行 ID 持久化后，只由相同目标 ID 和 revision 恢复查询。提交结果不明时不会盲目重新生成运行。
 
-Runner 使用独立目标 `profile-runner-production`，通过 `customer_profile_entry` 提交原任务的手机号和批次，只处理生产环境客户画像。邀约继续由原工作流处理。Runner 的并发默认 1，生成服务自行排队执行。
+Runner 使用独立目标 `profile-runner-production`，通过 `customer_profile_pipeline` 提交原任务的手机号和批次，只处理生产环境客户画像。邀约继续由原工作流处理。Runner 的并发默认 1，生成服务自行排队执行。
 
 旧 Dify 路径保持自身调用方式。具体目标模式、重试上限、资源池切换和升级顺序以[部署运行指南](deploy-and-run.md)为准。
 
-## 画像首次分流
+## 画像任务竞争领取
 
-`PROFILE_ROUTING_MODE=parallel` 是兼容默认值。全部画像 Worker 升级后，可统一启用 `weighted`：对配置环境中具有有效中国手机号及 1–50 字符批次的画像任务，按手机号、批次和环境计算稳定分配桶。`PROFILE_RUNNER_TRAFFIC_PERCENT` 默认 80，表示 Runner 首次分配占比；旧工作流组合计 20%。
+所有可处理画像任务的 Worker 从同一 MySQL 队列竞争领取，使用 `SELECT ... FOR UPDATE SKIP LOCKED` 避免重复领取。空闲线程主动取任务，各进程的并发数控制在途容量，不再按手机号和批次分桶，也不等待跨组溢出时间。Compose 分别通过 `WORKER_CONCURRENCY`、`COMMERCIAL_WORKER_CONCURRENCY` 和 `PROFILE_RUNNER_CONCURRENCY` 配置三个 Worker；旧资源池使用 `WORKER_ROUTING_MODE=parallel` 即可同时参与。实际处理份额由并发、处理耗时和目标健康状态共同决定。
 
-默认等待 300 秒后另一组可接手未提交任务；失败重试仍沿用原目标选择和次数限制，因此最终完成比例可能偏离首次分配比例。测试环境、邀约和不符合 Runner 入参要求的任务继续走旧 Worker。配置、升级和回滚步骤见 [Runner 接入与部署](profile-runner-integration.md)。
+任务类型、环境及 Runner 入参校验继续限制领取范围。已有远端运行保留原目标 ID、revision 与 run_id，明确失败后的重试沿用原策略及次数上限。旧 `PROFILE_ROUTING_*` 和 `PROFILE_RUNNER_TRAFFIC_PERCENT` 已停用，残留配置不会重新启用比例分流。配置、升级和回滚步骤见 [Runner 接入与部署](profile-runner-integration.md)。
 
 ## 数据库与契约维护
 

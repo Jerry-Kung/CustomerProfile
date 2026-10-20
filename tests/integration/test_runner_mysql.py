@@ -120,9 +120,7 @@ def test_runner_leaves_unsupported_legacy_inputs_for_existing_worker(db):
 
 @pytest.mark.parametrize('first,second', [('local-default', WORKER.target_id), (WORKER.target_id, 'local-default')])
 def test_definite_failure_can_retry_on_other_target_with_same_policy(db, first, second):
-    from src.domain.task.profile_routing import ProfileRoutingPolicy
-    policy = ProfileRoutingPolicy(enabled=True, runner_percent=100 if first == WORKER.target_id else 0)
-    repo = MySQLTaskRepository(db, profile_routing=policy)
+    repo = MySQLTaskRepository(db)
     original = repo.upsert_queued('13800000001', work_env='production', batch_id='business-batch')
     task = claim_target(repo, first)
     assert task.id == original.id and task.retry_policy_version == 'throughput_first_v1'
@@ -220,63 +218,97 @@ def test_scoped_recovery_does_not_abandon_old_targets_submitting_attempts(db):
         assert statuses == {own_unknown:'abandoned',old_unknown:'submitting'}
 
 
-def test_weighted_first_claim_is_shared_by_all_legacy_targets_and_excludes_invitation(db):
-    from src.domain.task.profile_routing import ProfileRoutingPolicy, profile_bucket
-    policy = ProfileRoutingPolicy(enabled=True)
-    expected = {}
-    with cursor(db) as cur:
-        for number in range(200):
-            phone, batch = f"138001{number:05d}", f"split-{number}"
-            cur.execute("""INSERT INTO customer_profile_tasks
-                (customer_phonenumber, task_type, work_env, batch_id, status)
-                VALUES (%s, 'customer_profile', 'production', %s, 'queued')""", (phone, batch))
-            expected[cur.lastrowid] = profile_bucket(phone, batch) < 80
+@pytest.mark.parametrize("kind", ["runner", "legacy_resumable", "legacy_queued", "commercial"])
+def test_any_available_worker_can_claim_all_fresh_eligible_profiles(db, kind):
+    expected = {insert_task(db, number, status="queued", target=None) for number in range(1, 101)}
     invitation = insert_task(db, 901, task_type="invitation_strategy", status="queued", target=None)
     test_task = insert_task(db, 902, work_env="test", status="queued", target=None)
-    repo = MySQLTaskRepository(db, profile_routing=policy)
-    runner_ids, legacy_ids = [], []
-    while task := claim_target(repo, WORKER.target_id):
-        runner_ids.append(task.id)
-    while task := claim_target(repo, "local-default"):
-        legacy_ids.append(task.id)
-    assert set(runner_ids) == {task_id for task_id, runner in expected.items() if runner}
-    assert set(legacy_ids) == {task_id for task_id, runner in expected.items() if not runner}
-    assert 145 <= len(runner_ids) <= 175
-    assert not set(runner_ids) & set(legacy_ids)
+    repo = MySQLTaskRepository(db)
+
+    def claim():
+        if kind == "legacy_queued":
+            return repo.claim_next_queued(task_types=("customer_profile",), work_envs=("production",))
+        if kind == "commercial":
+            return repo.claim_next_eligible(
+                lease_seconds=180, execution_pool="commercial", workflow_target_id="commercial-default",
+                workflow_target_revision="v1", allow_new_tasks=True, allow_unbound_retries=True,
+                task_types=("customer_profile",), work_envs=("production",),
+            )
+        return claim_target(repo, WORKER.target_id if kind == "runner" else "local-default")
+
+    actual = []
+    while task := claim():
+        actual.append(task.id)
+    assert len(actual) == len(set(actual)) == len(expected)
+    assert set(actual) == expected
     assert repo.claim_next_queued(task_types=("invitation_strategy",), work_envs=("production",)).id == invitation
     assert repo.claim_next_queued(task_types=("customer_profile",), work_envs=("test",)).id == test_task
 
 
-def test_overdue_weighted_work_spills_without_reassigning_a_bound_run(db):
-    from src.domain.task.profile_routing import ProfileRoutingPolicy
-    repo = MySQLTaskRepository(db, profile_routing=ProfileRoutingPolicy(enabled=True, runner_percent=100))
+def test_workers_with_different_capacities_compete_without_duplicate_claims(db):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    expected = {insert_task(db, number, status="queued", target=None) for number in range(1, 61)}
+    kinds = ["runner", "runner", "legacy_resumable", "legacy_queued", "commercial"]
+    started = Barrier(len(kinds))
+
+    def consume(kind):
+        repo = MySQLTaskRepository(db)
+        def claim():
+            if kind == "legacy_queued":
+                return repo.claim_next_queued(task_types=("customer_profile",), work_envs=("production",))
+            if kind == "commercial":
+                return repo.claim_next_eligible(
+                    lease_seconds=180, execution_pool="commercial", workflow_target_id="commercial-default",
+                    workflow_target_revision="v1", allow_new_tasks=True, allow_unbound_retries=True,
+                    task_types=("customer_profile",), work_envs=("production",),
+                )
+            return claim_target(repo, WORKER.target_id if kind == "runner" else "local-default")
+
+        import time
+        started.wait(timeout=10)
+        claimed = []
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            task = claim()
+            if task is not None:
+                claimed.append(task.id)
+                continue
+            # SKIP LOCKED may return no row while another claimant holds locks.
+            # Production workers keep polling; no target has a reserved share.
+            with cursor(db) as cur:
+                cur.execute("SELECT COUNT(*) AS queued FROM customer_profile_tasks WHERE status='queued'")
+                if cur.fetchone()["queued"] == 0:
+                    return claimed
+            time.sleep(0.01)
+        pytest.fail("workers did not drain the queue within the deadline")
+
+    with ThreadPoolExecutor(max_workers=len(kinds)) as pool:
+        groups = list(pool.map(consume, kinds))
+    actual = [task_id for group in groups for task_id in group]
+    assert len(actual) == len(set(actual)) == len(expected)
+    assert set(actual) == expected
+
+
+def test_fresh_work_is_immediately_shared_without_reassigning_a_bound_run(db):
+    repo = MySQLTaskRepository(db)
     queued = insert_task(db, 1, status="queued", target=None)
     bound = insert_task(db, 2, status="retry_wait")
     with cursor(db) as cur:
-        cur.execute("UPDATE customer_profile_tasks SET queued_at=NOW()-INTERVAL 10 MINUTE WHERE id=%s", (queued,))
         cur.execute("UPDATE customer_profile_tasks SET workflow_run_id='existing-run', next_retry_at=NOW() WHERE id=%s", (bound,))
     assert claim_target(repo, "local-default").id == queued
     assert claim_target(repo, "local-default") is None
     assert claim_target(repo, WORKER.target_id).workflow_run_id == "existing-run"
 
 
-def test_weighted_share_bypasses_commercial_gate_only_for_eligible_profile_scope(db):
-    from src.domain.task.profile_routing import ProfileRoutingPolicy, profile_bucket
-    repo = MySQLTaskRepository(db, profile_routing=ProfileRoutingPolicy(enabled=True))
+def test_closed_admission_never_claims_unbound_work_but_can_resume_own_run(db):
+    repo = MySQLTaskRepository(db)
     queued = insert_task(db, 1, status="queued", target=None)
-    batch = next(f"batch-{index}" for index in range(1000) if profile_bucket("13800000001", f"batch-{index}") >= 80)
+    bound = insert_task(db, 2, status="retry_wait")
     with cursor(db) as cur:
-        cur.execute("UPDATE customer_profile_tasks SET batch_id=%s WHERE id=%s", (batch, queued))
-    invitation = insert_task(db, 2, task_type="invitation_strategy", status="queued", target=None)
-    test_task = insert_task(db, 3, work_env="test", status="queued", target=None)
-    def claim(mode):
-        return repo.claim_next_eligible(lease_seconds=180, execution_pool="commercial",
-            workflow_target_id="commercial-default", workflow_target_revision="v1", allow_new_tasks=False,
-            allow_weighted_new_tasks=mode, allow_unbound_retries=False,
-            task_types=("customer_profile", "invitation_strategy"), work_envs=("test", "production"))
-    assert claim(False) is None  # draining and circuit-open targets cannot bypass their gate
-    assert claim(True).id == queued
-    assert claim(True) is None
-    with cursor(db) as cur:
-        cur.execute("SELECT COUNT(*) AS n FROM customer_profile_tasks WHERE id IN (%s, %s) AND status='queued'", (invitation, test_task))
-        assert cur.fetchone()["n"] == 2
+        cur.execute("UPDATE customer_profile_tasks SET workflow_run_id='existing-run', next_retry_at=NOW() WHERE id=%s", (bound,))
+    resumed = claim_target(repo, WORKER.target_id, allow_new=False, allow_retries=False)
+    assert resumed.id == bound and resumed.workflow_run_id == "existing-run"
+    assert claim_target(repo, WORKER.target_id, allow_new=False, allow_retries=False) is None
+    assert claim_target(repo, "local-default").id == queued

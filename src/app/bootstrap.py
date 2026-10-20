@@ -36,7 +36,6 @@ def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskServi
         db_client,
         queue_max_waiting=config.task_queue_max_waiting,
         default_retry_policy_version=config.retry.policy_version,
-        profile_routing=config.profile_routing,
         logger=get_logger("task_repository"),
     )
     _warn_if_task_type_column_missing(logger, db_client, repository)
@@ -70,7 +69,6 @@ def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskServi
             )
         ),
         retry_config=config.retry,
-        profile_routing=config.profile_routing,
         # Old pre-005 claims have no lease. Recover them only after the
         # configured QingTian poll timeout plus one recovery-scan interval.
         legacy_processing_timeout_seconds=max(

@@ -4,26 +4,26 @@
 
 `profile-runner-worker` 已合入根目录的 `docker-compose.yml`，与 `api`、`worker`、`commercial-worker` 统一启动。画像生成服务本身仍是外部依赖，需要提前运行。
 
-本次只增加 Runner 适配和画像首次分流，复用现有 001–006 表结构。没有新增表、数据库迁移、批次收据、失败通知进程或回写补偿进程；提交、重复提交以及旧 Dify 的执行方式保持原行为。
+Runner 适配与各 Worker 的竞争领取复用现有 001–006 表结构。没有新增表、数据库迁移、批次收据、失败通知进程或回写补偿进程；提交、重复提交以及旧 Dify 的执行方式保持原行为。
 
-## 分流配置
+## 并发领取配置
 
-所有旧画像 Worker 和新增 Runner Worker 应使用一致配置。业务 API 与 backend API 接口不变，backend API 可以保留现有镜像。先升级全部参与者，再启用 `weighted`；旧镜像不认识这套分配规则，不能只更新新增 Worker。
+Runner 与旧工作流 Worker 从同一 MySQL 队列竞争领取符合自身任务类型和环境条件的任务。每个空闲线程直接领取一条任务，数据库行锁及 `SKIP LOCKED` 防止重复领取。通过各自并发数控制处理容量，无需配置百分比或等待另一组溢出。
 
 ```dotenv
-PROFILE_ROUTING_MODE=weighted
-PROFILE_RUNNER_TRAFFIC_PERCENT=80
-PROFILE_ROUTING_SPILLOVER_SECONDS=300
-PROFILE_ROUTING_WORK_ENVS=production
+WORKER_ROUTING_MODE=parallel
+WORKER_CONCURRENCY=8
+COMMERCIAL_WORKER_CONCURRENCY=1
+PROFILE_RUNNER_CONCURRENCY=1
 ```
 
-`parallel` 是兼容默认值；`weighted` 对生产环境、有有效中国手机号和 1–50 字符批次的画像任务计算稳定分配桶。默认新服务首次分配占 80%，旧工作流组合计 20%，比例可以配置为 0–100。旧组内仍按原目标空闲能力领取；小样本、失败重试和等待超时接手会使实际完成比例偏离首次分配比例。
+以上为默认并发示例，并不保证固定的处理份额；实际完成量还取决于工作流耗时和目标健康状态。Runner 仅领取生产环境中、有有效中国手机号和 1–50 字符业务批次的画像；邀约、测试环境以及不符合其入参要求的画像由支持这些任务的旧 Worker 处理。
 
-等待超过 300 秒后，另一组可接手尚未提交的画像任务。测试环境、邀约和不符合 Runner 入参要求的画像继续走旧 Worker。修改配置后需要重建容器；只执行 `restart` 不会加载新环境变量。
+旧 `PROFILE_ROUTING_*` 与 `PROFILE_RUNNER_TRAFFIC_PERCENT` 已停用，可从部署环境中删除；即使残留 `weighted` 或比例数值，也不会改变新版 Worker 的领取行为。旧版本 Worker 仍可能执行旧的分流规则，升级时需统一更新全部参与画像处理的 Worker。修改并发后需要重建容器；只执行 `restart` 不会加载新环境变量。
 
 ## 原有重试机制
 
-Runner 调用生成服务的 `customer_profile_entry`，使用原队列的手机号及业务批次，并按原机制将 run_id、目标 ID 和 revision 持久化后查询。轮询超时或重启继续查询同一个 run_id，不增加生成次数；明确失败后的次数上限、退避、资源池切换和目标优先策略沿用原 `RETRY_*` 配置。首次分流比例不限制原有失败重试策略，也不更改旧任务已经固化的 retry policy。
+Runner 使用原队列的手机号及业务批次，新任务提交到生成服务的 `customer_profile_pipeline`，并按原机制持久化 run_id、目标 ID 和 revision 后查询。已有 `customer_profile_entry` 运行仍按原 run_id 恢复查询。轮询超时或重启继续查询同一个 run_id，不增加生成次数；明确失败后的次数上限、退避、资源池切换和目标优先策略沿用原 `RETRY_*` 配置。竞争领取不更改旧任务已经固化的 retry policy。
 
 Runner 使用独立目标 ID，默认 `profile-runner-production`，角色为 `local`。旧目标的 ID、revision 和资源池保持原值。旧 Dify 仍使用原调用及重试方式，没有新增 Dify 提交／轮询恢复改造。
 
@@ -66,15 +66,16 @@ docker compose ps
 docker compose logs --tail=100 worker commercial-worker profile-runner-worker
 ```
 
-首次从不支持比例分流的旧版本升级时，先保持 `PROFILE_ROUTING_MODE=parallel` 统一更新全部画像 Worker。旧 Dify 在途任务完成后，停止三个画像 Worker，再在共享 `.env` 中切换为 `weighted`，统一重建：
+从旧的比例分流版本升级时，先等待旧 Dify 在途任务完成，再停止三个画像 Worker，统一构建并重建：
 
 ```bash
 docker compose stop worker commercial-worker profile-runner-worker
-# 编辑 .env，设置 PROFILE_ROUTING_MODE=weighted 以及所需比例
-docker compose up -d --no-deps --force-recreate worker commercial-worker profile-runner-worker
+# 编辑 .env，删除已停用的比例配置，按容量设置三个 Worker 的并发数
+# 保留原目标 ID、revision 与重试配置
+docker compose up -d --build --no-deps --force-recreate worker commercial-worker profile-runner-worker
 ```
 
-新提交继续留在原队列；共享画像与邀约的 Worker 暂停期间，邀约也会短暂等待。保留业务 API 的 `REMOTE_API_URL`，它继续指向 backend 任务接口。核对启动日志中的平台和分流配置，领取原因保存在重试尝试表中。
+新提交继续留在原队列；共享画像与邀约的 Worker 暂停期间，邀约也会短暂等待。保留业务 API 的 `REMOTE_API_URL`，它继续指向 backend 任务接口。核对启动日志中的平台、目标身份和并发数，领取原因保存在重试尝试表中。
 
 ## 从旧独立 Runner 项目迁移
 
@@ -141,7 +142,7 @@ docker image tag OLD_COMMERCIAL_IMAGE_ID customer-profile-commercial-worker:pre-
 
 ## 检验
 
-1. 原 Worker 和新增 Runner 容器均为 running。Runner 启动日志应包含 `workflow_client_selected platform=runner`；所有画像 Worker 的 `config_loaded` 应显示 weighted、80 和 production，无数据库或画像服务连接错误。
+1. 原 Worker 和新增 Runner 容器均为 running。Runner 启动日志应包含 `workflow_client_selected platform=runner`；各 Worker 的 `config_loaded` 应显示预期的 concurrency、目标身份和任务范围，无数据库或画像服务连接错误。
 2. 从原业务入口提交真实画像任务，至少验证一条 Runner 画像、一条旧工作流画像和一条邀约。确认任务成功，业务侧能看到实际画像结果；不要重复提交仍在执行的测试任务。
 3. 按测试手机号检查执行目标、运行 ID、状态、重试次数及错误码：
 
@@ -152,14 +153,13 @@ FROM customer_profile_tasks
 WHERE customer_phonenumber IN ('TEST_PHONE_1', 'TEST_PHONE_2');
 ```
 
-Runner 目标为 `profile-runner-production`。旧擎天沿用原目标 ID；旧 Dify 保留原执行方式，目标字段可能为空。80/20 是首次分配偏好，重试、300 秒超时接手和小样本会使当前完成分布偏离该比例。
+Runner 目标为 `profile-runner-production`。旧擎天沿用原目标 ID；旧 Dify 保留原执行方式，目标字段可能为空。任何可处理画像任务的空闲 Worker 都可立即领取，实际完成量无需符合固定比例。
 
 ## 配置回滚
 
-先让 Runner 停止领取新任务，并让旧 Worker 恢复领取全部新任务。所有画像 Worker 使用的配置改为：
+先让 Runner 停止领取新任务，旧 Worker 继续通过空闲并发领取新任务。修改 Runner 配置：
 
 ```dotenv
-PROFILE_ROUTING_MODE=parallel
 PROFILE_RUNNER_TARGET_MODE=draining
 ```
 
@@ -184,7 +184,7 @@ WHERE workflow_target_id = 'profile-runner-production'
 docker compose stop profile-runner-worker
 ```
 
-只将比例改为 0 仍允许等待超时接手，停用新任务领取应使用 draining。配置回滚无需恢复数据库，也无需更新两个 API。
+停用 Runner 新任务领取使用 `draining`，它仍会恢复同一目标绑定的已有运行。配置回滚无需恢复数据库，也无需更新两个 API。
 
 ## 旧镜像回滚
 

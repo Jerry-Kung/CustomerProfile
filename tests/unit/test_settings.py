@@ -66,24 +66,18 @@ def test_runner_configuration_requires_only_selected_environment(monkeypatch):
     assert config.retry.policy_version == "throughput_first_v1"
 
 
-def test_profile_weighted_defaults_and_explicit_override(monkeypatch):
-    config = _load_with_env(monkeypatch, {"PROFILE_ROUTING_MODE": "weighted"})
-    assert config.profile_routing.enabled
-    assert config.profile_routing.runner_percent == 80
-    assert config.profile_routing.spillover_seconds == 300
-    assert config.profile_routing.work_envs == ("production",)
-    config = _load_with_env(monkeypatch, {"PROFILE_ROUTING_MODE": "weighted", "PROFILE_RUNNER_TRAFFIC_PERCENT": "90"})
-    assert config.profile_routing.runner_percent == 90
-
-
 @pytest.mark.parametrize("extra", [
+    {"PROFILE_ROUTING_MODE": "weighted", "PROFILE_RUNNER_TRAFFIC_PERCENT": "80",
+     "PROFILE_ROUTING_SPILLOVER_SECONDS": "300", "PROFILE_ROUTING_WORK_ENVS": "production"},
     {"PROFILE_ROUTING_MODE": "random"}, {"PROFILE_RUNNER_TRAFFIC_PERCENT": "101"},
     {"PROFILE_RUNNER_TRAFFIC_PERCENT": "-1"}, {"PROFILE_ROUTING_SPILLOVER_SECONDS": "0"},
     {"PROFILE_ROUTING_WORK_ENVS": "invalid"},
 ])
-def test_profile_routing_invalid_configuration_is_rejected(monkeypatch, extra):
-    with pytest.raises(ValueError):
-        _load_with_env(monkeypatch, extra)
+def test_retired_percentage_settings_do_not_change_worker_configuration(monkeypatch, extra):
+    baseline = _load_with_env(monkeypatch, _runner_env(WORKER_CONCURRENCY="3"))
+    config = _load_with_env(monkeypatch, _runner_env(WORKER_CONCURRENCY="3", **extra))
+    assert config == baseline
+    assert config.worker.concurrency == 3
 
 
 def test_runner_default_environment_is_test_and_never_falls_back_to_production(monkeypatch):

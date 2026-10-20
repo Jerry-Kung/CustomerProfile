@@ -17,7 +17,9 @@ from src.config.settings import ProfileRunnerConfig
 from src.infrastructure.runner.errors import RunnerRequestFailed, RunnerTimeout, RunnerWorkflowTerminated
 from src.infrastructure.workflow.errors import WorkflowOutputInvalidJson, WorkflowOutputSchemaMismatch
 
-WORKFLOW_ID = "customer_profile_entry"
+WORKFLOW_ID = "customer_profile_pipeline"
+# Existing runs must remain queryable after switching the submission entry.
+_RECOVERABLE_WORKFLOW_IDS = (WORKFLOW_ID, "customer_profile_entry")
 _FAILURE_STATUSES = {"failed", "cancelled", "interrupted", "skipped"}
 _RUN_ID = re.compile(r"[a-zA-Z0-9_-]{1,64}\Z")
 _log = logging.getLogger(__name__)
@@ -130,7 +132,7 @@ class RunnerClient:
                 try:
                     detail = response.json()
                     if (not isinstance(detail, dict) or detail.get("run_id") != workflow_run_id
-                            or detail.get("workflow_id") != WORKFLOW_ID or detail.get("is_replay") is not False
+                            or detail.get("workflow_id") not in _RECOVERABLE_WORKFLOW_IDS or detail.get("is_replay") is not False
                             or detail.get("business_ref") != f"cdp:{customer_phonenumber}:{batch_id}"
                             or detail.get("inputs", {}).get("phone_number") != customer_phonenumber
                             or detail.get("inputs", {}).get("batch_id") != batch_id):

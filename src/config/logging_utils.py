@@ -56,12 +56,6 @@ def redact_config(config: AppConfig) -> dict[str, Any]:
             "poll_interval_ms": config.runner.poll_interval_ms,
             "poll_timeout_ms": config.runner.poll_timeout_ms,
         },
-        "profile_routing": {
-            "mode": "weighted" if config.profile_routing.enabled else "parallel",
-            "runner_percent": config.profile_routing.runner_percent,
-            "spillover_seconds": config.profile_routing.spillover_seconds,
-            "work_envs": config.profile_routing.work_envs,
-        },
         "mysql": {
             "host": config.mysql.host,
             "port": config.mysql.port,

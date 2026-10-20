@@ -362,4 +362,4 @@ API_E2E_BASE_URL=http://127.0.0.1:8000 ./scripts/api_e2e_curl.sh
 
 ## 新增画像 Runner Worker
 
-`profile-runner-worker` 已合入根目录 `docker-compose.yml`，使用 `docker compose up -d --build` 与其他服务统一启动。配置、首次切换比例分流及旧独立项目迁移见 [Runner 接入与部署](profile-runner-integration.md)。复用现有 001–006 表结构与重试机制，无新增数据库迁移。
+`profile-runner-worker` 已合入根目录 `docker-compose.yml`，使用 `docker compose up -d --build` 与其他服务统一启动。配置、并发领取及旧独立项目迁移见 [Runner 接入与部署](profile-runner-integration.md)。复用现有 001–006 表结构与重试机制，无新增数据库迁移。

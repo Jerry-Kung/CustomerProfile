@@ -46,17 +46,14 @@ API 和三个 Worker 应运行，`migrate` 应以 0 退出，健康检查中的�
 | 变量 | 默认值 | 作用 |
 |---|---|---|
 | `WORKER_CONCURRENCY` | 8 | 旧 Worker 单进程并发 |
+| `COMMERCIAL_WORKER_CONCURRENCY` | 1 | 商用 Worker 单进程并发 |
 | `PROFILE_RUNNER_CONCURRENCY` | 1 | Runner 适配 Worker 并发 |
 | `WORKER_ROUTING_MODE` | parallel | 旧本地／商用目标的普通任务领取策略 |
-| `PROFILE_ROUTING_MODE` | parallel | 画像首次分流；全部画像 Worker 升级后可切换为 weighted |
-| `PROFILE_RUNNER_TRAFFIC_PERCENT` | 80 | weighted 下 Runner 首次分配百分比 |
-| `PROFILE_ROUTING_SPILLOVER_SECONDS` | 300 | 等待超时后允许另一组接手 |
-| `PROFILE_ROUTING_WORK_ENVS` | production | 应用画像比例分流的环境 |
 | `TASK_QUEUE_MAX_WAITING` | 500 | 各任务类型 queued 数量上限 |
 
-仅修改 `.env` 后执行 `docker compose up -d`，让 Compose 重建受影响的容器并加载配置。`restart` 不会重新注入环境变量。首次启用比例分流时，按 [Runner 升级步骤](profile-runner-integration.md#docker-compose-统一启动)统一更新全部画像 Worker。
+仅修改 `.env` 后执行 `docker compose up -d`，让 Compose 重建受影响的容器并加载配置。`restart` 不会重新注入环境变量。从旧的比例分流版本升级时，按 [Runner 升级步骤](profile-runner-integration.md#docker-compose-统一启动)统一更新全部画像 Worker。
 
-默认首次分配为 Runner 80%、旧工作流合计 20%；失败重试和等待超时接手可能改变最终完成比例。邀约继续走旧工作流。
+`WORKER_ROUTING_MODE=parallel` 时，可处理画像任务的空闲 Worker 从同一队列竞争领取，各自并发数控制在途任务容量。没有固定份额或画像等待溢出时间；实际处理量取决于可用并发、耗时和目标健康状态。邀约继续走旧工作流。旧 `PROFILE_ROUTING_*` 和 `PROFILE_RUNNER_TRAFFIC_PERCENT` 已停用，残留环境变量不再影响领取。
 
 ## 4. 日常命令
 
