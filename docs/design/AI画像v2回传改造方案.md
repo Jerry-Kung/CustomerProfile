@@ -150,7 +150,7 @@ build_analysis_result(phone, batch_id, facts_json, notes_updates_json, express_j
 
 | 区块 | 取值来源 | 备注 |
 |---|---|---|
-| `ai_insight.purchase_intent_level` | facts `deal_level`（画像卡字段，L1 取证清单含它） | `value` 为 `A`/`B`/`C`/`D`，**不含「级」字** |
+| `ai_insight.purchase_intent_level` | facts `deal_level`（画像卡字段，由商机定级环节产出） | `value` 为 `H`/`A`/`B`/`C`/待识别，原样回传，**不含「级」字** |
 | `ai_insight.customer_segment` | L3 表达层的自由生成值 | 本轮不约束，见 L-001 |
 | `purchase_decisions` · 到店动因 | `purchase_purpose` + `core_concerns` | |
 | `purchase_decisions` · 当前用车 | `current_vehicle_info` + 编外 `old_car_model` / `owned_brand_model` / `owned_car_age` | |

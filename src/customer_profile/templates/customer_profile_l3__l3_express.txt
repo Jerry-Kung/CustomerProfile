@@ -101,6 +101,7 @@
  "breakthrough_point": {"value": "", "reasoning_detail": {...}}}
 ```
 - `business_opp_level` **必须**与事实表的 `deal_level` 一致（同一个值，不得写出两个等级）；
+  它的 `reasoning_detail` 以事实表里的商机定级结论为准（照实组织，不要另推一套等级）；
 - 其余各项是判断类结论，措辞可以给，但依据只能来自事实表。
 
 ### 6. `purchase_motivations`（数组，0–4 项）

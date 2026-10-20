@@ -402,11 +402,27 @@ def build_basic_notes_updates(notes: Sequence[Any]) -> list[dict[str, Any]]:
 # ====================================================================
 
 
+def _level_detail(view: _FactView) -> dict[str, Any]:
+    """商机等级的 ``reasoning_detail``：优先取定级环节的结构化结论。
+
+    ``deal_level_detail`` 由 ``pipeline_level_apply`` 写入 facts，是 8–15 条推理链 +
+    原文证据 + 关键障碍 + 下一步建议。它不在 Notes 契约里，因此 ``_FactView.detail``
+    取不到它；没有它时退到 Notes 那条（若有），再退到通用说明。
+    """
+    raw = view.raw("deal_level_detail")
+    if isinstance(raw, Mapping):
+        detail = _normalize_detail(raw)
+        if detail["summary"] or detail["steps"]:
+            return detail
+    return view.detail("deal_level", "business_opp_level")
+
+
 def build_ai_insight(view: _FactView, express: Mapping[str, Any]) -> dict[str, Any]:
     """``ai_insight``：意向等级 + 客户群标签，两项都是 ``{value, reasoning_detail}``。
 
-    - ``purchase_intent_level``：取 facts 的 ``deal_level``，经 ``normalize_level()``
-      归一到 ``A`` / ``B`` / ``C`` / ``D``（**不含「级」字**，契约明文）；
+    - ``purchase_intent_level``：取 facts 的 ``deal_level`` 并归一，**按定级规范原样回传**
+      ``H`` / ``A`` / ``B`` / ``C`` / 待识别（前端答复该字段是文本字段，非 ABCD 纯枚举，
+      2026-10-20 撤掉过渡映射，见 L-008）；
     - ``customer_segment``：取表达层自由生成的 ``overall_tag``。本轮不约束取值口径
       （L-001，待业务方给人群标签字典），但**必须**带 ``reasoning_detail``——
       没有它的值在前端就是个不可点击的死值。
@@ -418,7 +434,7 @@ def build_ai_insight(view: _FactView, express: Mapping[str, Any]) -> dict[str, A
     if level:
         insight["purchase_intent_level"] = {
             "value": level,
-            "reasoning_detail": view.detail("deal_level", "business_opp_level"),
+            "reasoning_detail": _level_detail(view),
         }
 
     segment = _as_text(_section_text(express, "overall_tag"))

@@ -244,8 +244,12 @@ LEVEL_KEYS: tuple[str, ...] = ("deal_level", "business_opp_level")
 ``customer_overview.business_opp_level.value``）。基线 39 案里 **4 案**两者不一致，
 销售因此看到两个等级。L2 只保留一个。"""
 
-LEVEL_ORDER: tuple[str, ...] = ("A", "B", "C", "D")
-"""等级由高到低。冲突时取**证据更强者**，无法判定则取较高档并转 ``to_confirm``。"""
+LEVEL_ORDER: tuple[str, ...] = ("H", "A", "B", "C", "D", "待识别")
+"""商机等级由高到低。冲突时取**证据更强者**，无法判定则取较高档并转 ``to_confirm``。
+
+H/A/B/C/待识别 取自业务专家的《客户商机等级定级规范》；``D`` 仅保留给历史批次
+（旧口径「线索质量低」），新流程不再产出。
+"""
 
 AGE_PATTERN = re.compile(r"(\d{1,3})\s*[~—\-－至]\s*(\d{1,3})")
 AGE_OPEN_PATTERN = re.compile(r"(\d{1,3})\s*岁?\s*以上")
@@ -309,6 +313,15 @@ class Claim:
 
     L1 的事实层对 ``inferred_high`` 条目、分析投影层对**每条**结论给出本字段；离线回放
     的旧产物没有它，届时由 :func:`_readable_steps` 退到一句非复述的说明。
+    """
+
+    confidence: float | None = None
+    """L1 模型对这条断言自报的置信度（0–1，v3.5）。
+
+    出口置信度以它为基准做**档位校准**（见 :func:`_confidence_for`），不再按档位
+    给固定值——此前 ``fact`` 恒 0.7、``inferred_low`` 恒 0.5，模型实际给出的
+    0.3–0.95 打分被整条丢弃，字段级分数因此看起来像乱填。离线回放的旧产物没有它，
+    届时由函数按档位给默认值。
     """
 
     quote: str = ""
@@ -530,9 +543,19 @@ def normalize_age(value: Any) -> str | None:
 
 
 def normalize_level(value: Any) -> str | None:
-    """把等级归一到 ``A`` / ``B`` / ``C`` / ``D``。"""
+    """把商机等级归一到 ``H`` / ``A`` / ``B`` / ``C`` / ``D`` / ``待识别``。
+
+    「待识别」是规范里的独立结论（信息不足），**不是 C 级**，因此必须先于单字母
+    匹配判断——否则任何含「待」或「识」的串都会落到字母分支里被误读。
+    """
     text = _as_text(value).upper()
+    if not text:
+        return None
+    if "待识别" in text or "待定" in text or "未知" in text:
+        return "待识别"
     for level in LEVEL_ORDER:
+        if level == "待识别":
+            continue
         if text == level or text.startswith(level):
             return level
     return None
@@ -672,6 +695,19 @@ def project(
             # ``_pick_best`` 里压过一手来源（排序先看 ``basis`` 再看来源档），
             # 白名单就成了摆设。过滤而非放行，是把白名单真正做成硬约束。
             group = allowed
+            # 白名单来源给出的值若只是称呼（先生/女士），同样不是姓名。
+            if all(
+                str(c.value).strip().lower() in NAME_SALUTATION_VALUES for c in group
+            ):
+                result.rejected.append(
+                    {
+                        "attribute": attribute,
+                        "value": [c.value for c in group],
+                        "rule": "name_salutation_value",
+                        "reason": "取值是社交称呼，不是客户姓名",
+                    }
+                )
+                continue
 
         # ``title``（性别 / 称呼）：登记称呼 > 一手自述 > 头像性别标签 > 录音性别标签。
         # 非登记来源（含一手交互）一律降为 inferred_low —— 录音性别标签天生不可靠、
@@ -689,7 +725,9 @@ def project(
             )
 
         weak_only = all(c.tier in WEAK_TIERS for c in group)
-        if attribute in IDENTITY_GUARD_KEYS and weak_only:
+        # ``wechat_id`` 豁免社交降级（v3.5）：它的唯一现实来源就是主页截图，
+        # 且「截图里能明确读出微信号」正是用户口径认定的铁的事实（1.0）。
+        if attribute in IDENTITY_GUARD_KEYS and weak_only and attribute != "wechat_id":
             only_prediction = all(c.is_prediction for c in group)
             if only_prediction:
                 # v3.2：**第三方画像标签单独撑身份字段 → 记为可信的高置信推断**。
@@ -828,6 +866,13 @@ def project(
 
     # ---- 等级唯一化（跨产物字段）
     _unify_level(result)
+
+    # ---- 姓名兜底（v3.5，用户口径）：没有任何可靠来源指向真实姓名时，固定写「未知」。
+    #      留白会让下游误读成「没提取到」，并被 L2 兜底补一个假姓名（线上实测补出过
+    #      ``customer_name="先生"``）。这里一次性落定，兜底层不再经手姓名字段。
+    if "customer_name" not in result.facts:
+        result.facts["customer_name"] = CONFIDENCE_UNKNOWN_NAME
+        result.basis["customer_name"] = INFERRED_LOW
 
     # ---- g 缺失即留白 + 产出 notes_updates
     result.notes_updates = _to_notes_updates(result, group_by_attribute(claims))
@@ -979,15 +1024,74 @@ def serialize_value(attribute: str, value: Any) -> str:
     return _as_text(value)
 
 
-def _confidence_for(result: Projection, key: str, sources: Sequence[Claim]) -> float:
-    """按字段级置信档给 ``reasoning_detail.confidence``。
+CONFIDENCE_UNKNOWN_NAME = "未知"
+"""姓名查不到可靠来源时的固定取值（用户口径 v3.5）。
 
-    被降级的字段给 0.5——这个数**不参与取舍**（取舍看 ``basis``），只供人工复核排序：
-    销售按它一眼能分出「模型很确定的」和「模型只是猜的」。
+姓名与其它字段不同：**没有可靠来源时必须显式说「未知」**，而不是留白，更不是拿
+称呼（先生/女士）、昵称、企业名去凑。留白会让下游（卡片、L3 校验）读成「没提取到」，
+进而被兜底层再补一个假姓名——线上实测补出过 ``customer_name="先生"``。
+"""
+
+NAME_SALUTATION_VALUES: frozenset[str] = frozenset(
+    {
+        "先生", "女士", "小姐", "大哥", "大姐", "帅哥", "美女",
+        "mr", "ms", "mrs", "miss",
+    }
+)
+"""只能当称呼、不能当姓名的取值。
+
+兜底与投影层的值形态门共用：姓名取值命中即拒收。线上实测 L2 兜底把
+「微信资料显示称呼为先生」写成 ``customer_name="先生"``。
+"""
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _confidence_for(result: Projection, key: str, sources: Sequence[Claim]) -> float:
+    """按「事实 / 高可信 / 低置信」三档给字段级置信度（用户口径 v3.5）。
+
+    基准是 **L1 模型自报的 ``confidence``**，按档位校准到可信区间，而不是按档位给
+    固定值——旧实现 ``fact`` 恒 0.7、``inferred_low`` 恒 0.5，把模型 0.3–0.95 的
+    真实打分整条丢弃，字段级分数因此失去排序意义。
+
+    - **铁的事实**：手机号（直接取自原始数据）恒 1.0；微信号在能从截图中明确识别
+      （有原文切片或登记档）时 1.0；其余登记档来源 1.0。其它 ``fact`` 落在 0.85–0.95。
+    - **高可信结论**：多条不同渠道同向 → 0.95；否则按自报分落在 0.70–0.90。
+    - **低置信推断**：按自报分落在 0.40–0.60；自报分低于 0.4 的纯猜测落在 0.20–0.30。
+    - **姓名「未知」** 恒 1.0——「查遍了也没有」本身是确定的事实，不是猜测。
     """
-    if result.basis.get(key) == INFERRED_LOW:
-        return 0.5
-    return 0.9 if sources and sources[0].tier == REGISTRY else 0.7
+    if key == "customer_name" and result.facts.get(key) == CONFIDENCE_UNKNOWN_NAME:
+        return 1.0
+
+    raw = next((c.confidence for c in sources if c.confidence is not None), None)
+    tier = sources[0].tier if sources else ""
+    basis = result.basis.get(key)
+
+    if basis == INFERRED_LOW:
+        if raw is None:
+            return 0.5
+        if raw < 0.4:
+            return round(_clamp(raw, 0.2, 0.3), 2)
+        return round(_clamp(raw, 0.4, 0.6), 2)
+
+    if basis == INFERRED_HIGH:
+        channels = {c.channel for c in sources if c.channel}
+        if len(channels) >= 2:
+            return 0.95
+        return round(_clamp(raw if raw is not None else 0.8, 0.7, 0.9), 2)
+
+    # 事实档
+    if key == "phone_number":
+        return 1.0
+    if key == "wechat_id" and (
+        tier == REGISTRY or any(c.quote or c.source_quote for c in sources)
+    ):
+        return 1.0
+    if tier == REGISTRY:
+        return 1.0
+    return round(_clamp(raw if raw is not None else 0.9, 0.85, 0.95), 2)
 
 
 _AUDIT_TOKENS = tuple(
@@ -1218,16 +1322,27 @@ def _to_notes_updates(
             continue
 
         sources = sorted(grouped.get(key) or [], key=lambda c: c.rank)
+        if key == "customer_name" and result.facts.get(key) == CONFIDENCE_UNKNOWN_NAME:
+            # 姓名查不到可靠来源：固定「未知」，并说清为什么没有——不写「据现有记录归纳」
+            # 这种像是从记录里提取到了什么的措辞。
+            detail = {
+                "summary": "客户信息中未查找到真实姓名",
+                "steps": ["现有记录中没有客户本人的姓名信息", "社交资料中的称呼与昵称不作为姓名"],
+                "evidence": [],
+                "confidence": 1.0,
+            }
+        else:
+            detail = {
+                "summary": _readable_summary(sources),
+                "steps": _readable_steps(sources),
+                "evidence": _readable_evidence(sources),
+                "confidence": _confidence_for(result, key, sources),
+            }
         updates.append(
             {
                 "attribute_key": key,
                 "attribute_value": value,
-                "reasoning_detail": {
-                    "summary": _readable_summary(sources),
-                    "steps": _readable_steps(sources),
-                    "evidence": _readable_evidence(sources),
-                    "confidence": _confidence_for(result, key, sources),
-                },
+                "reasoning_detail": detail,
             }
         )
     return updates
@@ -1257,6 +1372,11 @@ def build_l2_candidates(
     for entry in result.to_confirm:
         attribute = str(entry.get("attribute_key") or "")
         if not attribute:
+            continue
+        if attribute == "customer_name":
+            # 姓名字段**不进兜底**（v3.5）：投影层已把它落定为「未知」或一个白名单来源的
+            # 真名，让兜底再裁决一次，等于把刚拒收的营业执照主体名从候选集里放回来
+            # （线上实测发生）。
             continue
         options: list[dict[str, Any]] = []
         for claim in grouped.get(attribute) or []:
@@ -1342,6 +1462,19 @@ def apply_l2_verdict(
         if not attribute or value is None:
             continue
         as_text = serialize_value(attribute, value)
+        if attribute == "customer_name":
+            # 姓名不归兜底管（v3.5）：投影层已落定为「未知」或白名单来源的真名。
+            # 线上实测兜底凭「微信资料显示称呼为先生」补出过 ``customer_name="先生"``。
+            out_of_bounds += 1
+            rejected.append(
+                {
+                    "attribute": attribute,
+                    "value": value,
+                    "rule": "g_name_not_adjudicated",
+                    "reason": "姓名由投影层定稿，不交给兜底补全",
+                }
+            )
+            continue
         if attribute in missing:
             # 缺字段补全：本就没有候选集，因此**不判越界**，但恒为软值 inferred_low
             # （兜底是「补一个可核对的猜测」，不是「给一个事实」）。

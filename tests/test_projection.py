@@ -96,6 +96,10 @@ def test_attribution_filter_still_blocks_other_identity_fields():
     """
     for key in sorted(nc.IDENTITY_KEYS - {"family_structure"}):
         result = proj.project([claim(key, "值", subject="spouse")])
+        if key == "customer_name":
+            # v3.5：姓名查不到可靠来源时固定输出「未知」，不是把取值写进去。
+            assert result.facts.get(key) == "未知"
+            continue
         assert key not in result.facts, f"{key} 不应接受非客户本人主体的断言"
 
 
@@ -393,7 +397,8 @@ def test_missing_field_is_absent_not_fabricated():
 def test_notes_updates_only_contain_backed_fields():
     result = proj.project([claim("occupation", "教师", channel="试驾录音信息")])
     keys = {u["attribute_key"] for u in result.notes_updates}
-    assert keys == {"occupation"}
+    # v3.5：姓名恒有交代（这里没有姓名断言，故为「未知」）。
+    assert keys == {"occupation", "customer_name"}
     assert keys <= set(nc.ALL_KEYS)
 
 
@@ -428,7 +433,11 @@ def test_normalize_level_variants():
     assert proj.normalize_level("A") == "A"
     assert proj.normalize_level("b") == "B"
     assert proj.normalize_level("C级") == "C"
-    assert proj.normalize_level("未知") is None
+    assert proj.normalize_level("H") == "H"
+    assert proj.normalize_level("h级") == "H"
+    # 待识别是规范的独立结论，不是 C 级（R08）
+    assert proj.normalize_level("待识别") == "待识别"
+    assert proj.normalize_level("未知") == "待识别"
 
 
 def test_split_multi_handles_list_and_string():
@@ -469,8 +478,8 @@ def test_internal_only_fields_never_reach_notes_updates():
     # 取证侧：编外字段必须照常落进 facts，否则 purchase_decisions 与画像卡没有料
     assert result.facts.get("emotion") == ["straightforward", "hate_being_rushed"]
     assert result.facts.get("old_car_model") == "2019 别克"
-    # 回传侧：只有契约字段能出去
-    assert {u["attribute_key"] for u in result.notes_updates} == {"core_concerns"}
+    # 回传侧：只有契约字段能出去（姓名恒有交代，取值为「未知」）
+    assert {u["attribute_key"] for u in result.notes_updates} == {"core_concerns", "customer_name"}
 
 
 def test_structured_enum_serialized_as_json_string():
@@ -725,7 +734,7 @@ def test_customer_name_from_social_source_is_rejected():
     result = proj.project(
         [claim("customer_name", "清CN欢", channel="微信手机号搜索界面信息")]
     )
-    assert "customer_name" not in result.facts
+    assert result.facts.get("customer_name") == "未知"
     assert any(r["rule"] == "name_source_whitelist" for r in result.rejected)
 
 
@@ -734,7 +743,7 @@ def test_customer_name_from_business_registry_is_rejected():
     result = proj.project(
         [claim("customer_name", "汕头市潮南区井都新泽水果店", channel="关联企业信息")]
     )
-    assert "customer_name" not in result.facts
+    assert result.facts.get("customer_name") == "未知"
     assert any(r["rule"] == "name_source_whitelist" for r in result.rejected)
 
 
@@ -788,7 +797,7 @@ def test_salesperson_value_rejected_from_customer_name():
             )
         ]
     )
-    assert "customer_name" not in result.facts
+    assert result.facts.get("customer_name") == "未知"
     assert any(r["rule"] == "a_salesperson_value" for r in result.rejected)
 
 
@@ -839,3 +848,81 @@ def test_customer_own_occupation_survives():
     """客户自己说「我是做销售的」不得被误杀——词表只收精指向词。"""
     result = proj.project([claim("occupation", "做销售的", channel="试驾录音信息")])
     assert result.facts.get("occupation") == "做销售的"
+
+
+# ------------------------------------------- v3.5 置信度口径 / 姓名兜底
+
+def _note(result, key):
+    return next(u for u in result.notes_updates if u["attribute_key"] == key)
+
+
+def test_phone_number_is_full_confidence():
+    """手机号直接取自原始数据，恒 1.0（用户口径）。"""
+    result = proj.project([claim("phone_number", "15308826588", channel="客户留资手机号")])
+    assert _note(result, "phone_number")["reasoning_detail"]["confidence"] == 1.0
+
+
+def test_wechat_id_read_from_screenshot_is_full_confidence():
+    """微信号能从截图中明确识别（有原文切片）时给 1.0。"""
+    result = proj.project(
+        [claim("wechat_id", "wx_abc123", channel="微信主页截图信息", quote="微信号：wx_abc123")]
+    )
+    assert _note(result, "wechat_id")["reasoning_detail"]["confidence"] == 1.0
+
+
+def test_fact_confidence_follows_model_self_report():
+    """事实档不再恒为 0.7：按 L1 自报分校准到 0.85–0.95。"""
+    result = proj.project(
+        [claim("intended_model", "埃安A27", channel="外呼录音信息", confidence=0.8)]
+    )
+    value = _note(result, "intended_model")["reasoning_detail"]["confidence"]
+    assert 0.85 <= value <= 0.95
+
+
+def test_inferred_low_keeps_low_self_report():
+    """低置信推断按自报分落在 0.40–0.60；自报低于 0.4 的纯猜测落在 0.20–0.30。"""
+    result = proj.project(
+        [claim("pain_points", "不喜欢被催促", channel="朋友圈截图内容信息", confidence=0.55)]
+    )
+    assert _note(result, "pain_points")["reasoning_detail"]["confidence"] == 0.55
+
+    guessed = proj.project(
+        [
+            claim(
+                "pain_points",
+                "不喜欢被催促",
+                channel="朋友圈截图内容信息",
+                confidence=0.25,
+            )
+        ]
+    )
+    value = _note(guessed, "pain_points")["reasoning_detail"]["confidence"]
+    assert 0.2 <= value <= 0.3
+
+
+def test_multi_channel_convergence_gives_high_confidence():
+    """多条不同渠道同向的高可信结论给 0.95（用户口径：极高可信）。"""
+    result = proj.project(
+        [
+            claim("occupation", "珠宝零售", channel="关联企业信息", basis="inferred_high", confidence=0.7),
+            claim("occupation", "珠宝零售", channel="外呼录音信息", basis="inferred_high", confidence=0.7),
+        ]
+    )
+    assert result.basis.get("occupation") == proj.INFERRED_HIGH
+    assert _note(result, "occupation")["reasoning_detail"]["confidence"] == 0.95
+
+
+def test_salutation_never_becomes_customer_name():
+    """称呼（先生/女士/大哥）即使来自一手来源也不得写成姓名。"""
+    result = proj.project([claim("customer_name", "先生", channel="外呼录音信息")])
+    assert result.facts.get("customer_name") == "未知"
+    assert any(r["rule"] == "name_salutation_value" for r in result.rejected)
+
+
+def test_unknown_name_note_explains_absence():
+    """姓名「未知」的 Notes 必须说清为什么没有，而不是含糊的「据现有记录归纳」。"""
+    result = proj.project([claim("occupation", "教师", channel="试驾录音信息")])
+    note = _note(result, "customer_name")
+    assert note["attribute_value"] == "未知"
+    assert note["reasoning_detail"]["summary"] == "客户信息中未查找到真实姓名"
+    assert note["reasoning_detail"]["confidence"] == 1.0

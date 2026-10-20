@@ -134,6 +134,24 @@ L2_FALLBACK = "pipeline_l2_fallback"
 L2_APPLY = "pipeline_l2_apply"
 L2_REVIEW = "pipeline_l2_review"
 
+# —— 商机等级定级（独立一次 LLM 调用，v3.6）
+LEVEL_INPUT = "pipeline_level_input"
+"""定级输入装配（纯代码）：判定业务阶段 + 把全部客户记录与已定稿事实拼成提示词输入。
+
+**为什么单列一个阶段**：商机等级对销售的重要程度断档领先其它字段（2026-10-19 业务方
+要求），必须独占一次 LLM 调用、拿到全量原始数据与足够的输出篇幅，不能像普通字段那样
+由 L1 顺带一行产出。阶段判定用现成的 :func:`_has_test_drive`，口径与确定性字段注入一致。
+"""
+LEVEL_ASSESS = "pipeline_level_assess"
+"""商机等级评定（LLM，1 次）：按业务专家《客户商机等级定级规范》输出 H/A/B/C/待识别。"""
+LEVEL_APPLY = "pipeline_level_apply"
+"""定级收口（纯代码）：枚举归一、阶段上限（R04）、证据门槛（R05）、原文定位校验。
+
+**为什么规则必须在代码层再拦一次**：提示词已写明 R04/R05，但模型偶发越界；阶段上限与
+「H/A 必须同时具备时间、需求、行动证据」都是可机器判定的硬规则，交给提示词等于把
+业务红线押在模型自觉上。
+"""
+
 # —— L3 成文段
 PRODUCTION = "pipeline_production"
 
@@ -208,6 +226,9 @@ L2_REVIEW_TEMPLATE = template_name(L2_REVIEW)
 
 审查层对 L1/L2 的产出做合规性复核：枚举合法、无效占位清除、Notes 与 facts 同源、
 fact 必有锚点。**能代码判定的先由代码修**，只有代码判不了的语义问题才走这一次 LLM。"""
+
+LEVEL_ASSESS_TEMPLATE = template_name(LEVEL_ASSESS)
+"""商机等级定级提示词：规范全文要点 + 全量记录 + 已定稿事实，输出结构化定级结论。"""
 
 
 # ====================================================================
@@ -1610,6 +1631,15 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
     ``empty`` 不产出任何断言（保守模板，``端到端方案.md`` §3.6）。
     """
     claims, _ = _claims_payload(claims_json)
+
+    def _num(value) -> float | None:
+        """L1 自报置信度：解析成 0–1 的浮点；缺省或非法返回 ``None``（由投影层给默认值）。"""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, min(1.0, number))
+
     def _hints(raw: dict) -> tuple[str, ...]:
         value = raw.get("basis_of_inference") or ()
         if isinstance(value, str):
@@ -1653,15 +1683,22 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
                 source_quote=str(raw.get("source_quote") or "").strip(),
                 # v3.1 改造一：推导链透传到 Notes 的 ``steps``（与 ``evidence`` 分料）。
                 reasoning_steps=_steps(raw),
+                # v3.5：L1 自报的置信度透传到出口，作为字段级打分的基准
+                # （旧实现按档位给固定值，模型 0.3–0.95 的真实打分被整条丢弃）。
+                confidence=_num(raw.get("confidence")),
             )
         )
     result = proj.project(ledger, context=_projection_context(ledger))
 
     updates = result.notes_updates
+    # 姓名条目在任何档位都保留：「未知」或白名单来源的真名都必须交代给销售，
+    # thin/empty 档删掉它等于让下游分不清「没查」与「没提取」。
+    name_updates = [u for u in updates if u.get("attribute_key") == "customer_name"]
     if tier == "empty":
-        updates = []
+        updates = name_updates
     elif tier != "sufficient":
-        updates = _registry_only(updates)
+        kept = _registry_only(updates)
+        updates = kept + [u for u in name_updates if u not in kept]
 
     # 候选集必须与 updates **同口径**：``thin`` 档刻意只留登记档坐实的字段，
     # 若兜底仍按全量候选裁决，它就能把该档排除掉的非登记字段重新写回去——
@@ -1720,8 +1757,9 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
         key = item["attribute_key"]
         # 缺字段补全恒为软值（inferred_low），置信度必须低于「候选集内裁决」，
         # 否则销售分不清「三条来源同向汇出来的」与「表里什么都没有、模型补的空」。
+        # v3.5：软补全从 0.4 降到 0.25——它基本等于纯猜（用户口径：20–30%）。
         soft = bool(item.get("missing"))
-        confidence = 0.4 if soft else 0.8
+        confidence = 0.25 if soft else 0.8
         reason = item.get("reason") or ""
         # v3.3：移除 reason 中的工程术语措辞（问题2修复）。
         # L2 提示词已规范，但为防止模型偶发漏出，代码再清洗一遍。
@@ -1810,7 +1848,12 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
         key = str(entry.get("attribute_key") or "")
         value = entry.get("attribute_value")
         # ---- 1 无效占位清除
-        if key in PLACEHOLDER_VALUES or _is_placeholder_value(value):
+        # 「未知」对姓名字段是**明确的业务结论**（查遍记录也没有可靠姓名），不是占位串，
+        # 不得按占位删掉——用户口径：查不到姓名时固定输出「未知」。
+        if (
+            key != "customer_name"
+            and (key in PLACEHOLDER_VALUES or _is_placeholder_value(value))
+        ):
             placeholder_removed.append(key)
             continue
         detail = entry.get("reasoning_detail") or {}
@@ -1905,6 +1948,258 @@ def _loads_object(value) -> dict:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+# ====================================================================
+# 商机等级定级（独立 LLM 环节，业务专家《客户商机等级定级规范》）
+# ====================================================================
+
+LEVEL_UNKNOWN = "待识别"
+"""规范里的「信息不足」结论。**不是 C 级**（R08）——不能因为缺证据就认定客户不想买。"""
+
+LEVEL_STAGE_LEAD = "lead"
+LEVEL_STAGE_OPPORTUNITY = "opportunity"
+LEVEL_STAGE_LABEL: dict[str, str] = {
+    LEVEL_STAGE_LEAD: "线索邀约阶段",
+    LEVEL_STAGE_OPPORTUNITY: "转商机阶段",
+}
+
+
+def level_stage(records_json) -> dict:
+    """按规范 §2 判定业务阶段（纯代码，确定性）。
+
+    判定口径与 :func:`inject_deterministic` 的驾照规则同源：**有实质内容的试驾录音**
+    即视为已进入转商机阶段。不要求试驾数据与试驾录音同时存在。客户口头说「准备试驾」
+    不改变阶段（规范 §2.2 明文）。
+    """
+    records = _records_of(records_json)
+    has_drive = _has_test_drive(records)
+    stage = LEVEL_STAGE_OPPORTUNITY if has_drive else LEVEL_STAGE_LEAD
+    return {
+        "stage": stage,
+        "stage_label": LEVEL_STAGE_LABEL[stage],
+        "has_test_drive": has_drive,
+    }
+
+
+def _level_record_sections(records: list[dict]) -> list[str]:
+    """把有内容的记录渲染成分节文本。与 L1 输入同形（来源名 + 记录编号 + 原文）。"""
+    usable = [r for r in records if r.get("status") == OK and (r.get("content") or "").strip()]
+    sections: list[str] = []
+    for record in usable:
+        source_name = record.get("source_name") or record.get("channel") or "未知渠道"
+        header = [
+            f"## {source_name}",
+            f"记录编号：{record.get('record_id') or ''}",
+        ]
+        created_at = str(record.get("created_at") or "").strip()
+        if created_at:
+            header.append(f"采集时间：{created_at}")
+        header.append(f"内容形态：{record.get('content_kind') or 'text'}")
+        sections.append("\n".join(header) + "\n\n" + str(record.get("content")))
+    return sections
+
+
+def build_level_input(records_json, facts_json="{}", claims_json="{}") -> dict:
+    """定级输入装配：业务阶段 + 已定稿事实 + **全部**客户原始记录。
+
+    **为什么带上全部记录而不是只带事实表**：规范要求「尽可能详细地分析客户所有数据」
+    并给出可追溯的判断依据；事实表只有结论，没有客户原话与上下文（例如试驾反馈的
+    语气、客户对竞品的犹豫、顾问提到的交付条件）。定级是销售最看重的一条结论，
+    证据必须比字段级推断更厚。
+
+    **为什么不渲染《字段清单》**：那是 L1 的取证任务书，对定级是纯噪声。
+    """
+    stage = level_stage(records_json)
+    records = _records_of(records_json)
+    facts = _loads_object(facts_json)
+    sections = _level_record_sections(records)
+    body = "\n\n---\n\n".join(sections)
+
+    payload = [
+        f"【业务阶段】{stage['stage_label']}（stage={stage['stage']}）",
+        "",
+        "【已定稿事实（字段键 → 取值）】",
+        json.dumps(facts, ensure_ascii=False, default=str, indent=2, sort_keys=True),
+        "",
+        "【客户原始信息记录（按来源分节）】",
+        body or "（无可用记录）",
+    ]
+    output = "\n".join(payload)
+    return {
+        "output": output,
+        "stage": stage["stage"],
+        "stage_label": stage["stage_label"],
+        "section_count": len(sections),
+        "chars": len(output),
+    }
+
+
+LEVEL_STEP_LIMIT = 8
+"""推理链上限（用户 2026-10-20 口径：5–8 条，只讲等级怎么定出来的）。
+
+提示词已要求精简，这里再兜一道：模型偶尔仍然写长，超出即截断前 8 条——
+保留模型自己的优先级顺序，不改写内容。
+"""
+
+LEVEL_EVIDENCE_MIN_CHARS = 12
+"""证据最短长度。短于此的视为「半句对白」碎片剔除（证据已改为可读化陈述，见模板第五节）。"""
+
+
+def _level_evidence_readable(evidence: str) -> bool:
+    """证据是否像一条可独立阅读的陈述——只挡碎片，不再核对逐字原文。
+
+    **口径变化（2026-10-20）**：此前要求证据逐字出现在原始记录里，后果是外呼录音
+    等 ASR 渠道只剩「家用啊，没有，真够啊。」这类碎片，读者看不出它证明了什么。
+    现按用户要求以可读性优先，证据改为「出处 + 信号 + 指向」的整合陈述，代价是放弃
+    逐字定位。这里只做最轻的一道守卫：过短即碎片。
+    """
+    text = str(evidence or "").strip()
+    return len(text) >= LEVEL_EVIDENCE_MIN_CHARS
+
+
+def _as_list(value) -> list:
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if isinstance(value, str) and value.strip():
+        return [value]
+    return []
+
+
+def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
+    """定级收口（纯代码，0 token）：把模型结论变成可回传的 facts。
+
+    三道收口，每道都对应规范里一条可机器判定的硬规则：
+
+    1. **枚举归一**：只认 ``H`` / ``A`` / ``B`` / ``C`` / 待识别；非法值回落 L1 原等级
+       （L1 也没有就留空），不把自由文本写进 facts。
+    2. **阶段上限（R04）**：阶段由代码判定，线索邀约阶段最高 ``A``，``H`` 强制降级。
+    3. **证据门槛（R05）**：``H`` / ``A`` 必须同时具备需求、时间、行动三类证据，
+       缺任一类降为 ``B``。
+
+    证据只做「碎片剔除 + 去重」，**不再回原文逐字核对**（读性优先，见
+    :func:`_level_evidence_readable`）。推理链截断到 :data:`LEVEL_STEP_LIMIT` 条，
+    且只讲定级本身——关键障碍与下一步建议不再拼进推理链（它们是跟进事项，不是等级依据）。
+
+    解析失败时**不覆盖原等级**：保留 L1 的兜底值并留痕（``parse_ok=False``），
+    而不是把一次失败的调用伪装成「客户被评成了待识别」。
+    """
+    stage_code = str(stage or "").strip()
+    if stage_code not in LEVEL_STAGE_LABEL:
+        stage_code = level_stage(records_json)["stage"]
+
+    facts = _loads_object(facts_json)
+    assess = _loads_object(assess_json)
+    if not assess:
+        return {
+            "facts_json": json.dumps(facts, ensure_ascii=False, default=str),
+            "level": "",
+            "level_detail_json": "{}",
+            "stage": stage_code,
+            "rule_clamped": "",
+            "evidence_fragments_removed": 0,
+            "parse_ok": False,
+        }
+
+    level = proj.normalize_level(assess.get("level"))
+    clamped = ""
+    if level is None:
+        # 模型给了契约外的自由文本：留痕，并回落到 L1 的兜底等级。
+        level = proj.normalize_level(facts.get("deal_level"))
+        clamped = "invalid_level"
+    if level is None:
+        return {
+            "facts_json": json.dumps(facts, ensure_ascii=False, default=str),
+            "level": "",
+            "level_detail_json": "{}",
+            "stage": stage_code,
+            "rule_clamped": "invalid_level",
+            "evidence_fragments_removed": 0,
+            "parse_ok": True,
+        }
+
+    # ---- 2 阶段上限
+    if stage_code == LEVEL_STAGE_LEAD and level == "H":
+        level = "A"
+        clamped = "lead_stage_caps_at_A"
+
+    # ---- 证据清洗：碎片剔除 + 去重（不回原文核对）
+    removed = 0
+
+    def _clean(items) -> list[str]:
+        nonlocal removed
+        out: list[str] = []
+        for item in _as_list(items):
+            text = str(item or "").strip()
+            if not text:
+                continue
+            if not _level_evidence_readable(text):
+                removed += 1
+                continue
+            if text not in out:
+                out.append(text)
+        return out
+
+    dimensions = assess.get("dimensions") if isinstance(assess.get("dimensions"), dict) else {}
+    dim_evidence: dict[str, list[str]] = {}
+    for key in ("want_to_buy", "can_to_buy", "when_to_buy"):
+        entry = dimensions.get(key) if isinstance(dimensions.get(key), dict) else {}
+        dim_evidence[key] = _clean(entry.get("evidence"))
+
+    homework = _clean(assess.get("homework_evidence"))
+    steps = [str(s).strip() for s in _as_list(assess.get("steps")) if str(s).strip()]
+
+    # ---- 3 证据门槛（R05）：H/A 必须同时具备需求、时间、行动三类证据
+    if level in ("H", "A"):
+        has_demand = bool(dim_evidence.get("want_to_buy"))
+        has_time = bool(dim_evidence.get("when_to_buy")) or bool(
+            str(assess.get("time_window") or "").strip()
+        )
+        has_action = bool(homework)
+        if not (has_demand and has_time and has_action):
+            level = "B"
+            clamped = clamped or "insufficient_multidimensional_evidence"
+
+    confidence = assess.get("confidence")
+    try:
+        confidence = float(confidence)
+    except (TypeError, ValueError):
+        confidence = 0.6
+    confidence = max(0.0, min(1.0, confidence))
+
+    all_evidence: list[str] = []
+    for key in ("want_to_buy", "can_to_buy", "when_to_buy"):
+        for item in dim_evidence.get(key) or []:
+            if item not in all_evidence:
+                all_evidence.append(item)
+    for item in homework:
+        if item not in all_evidence:
+            all_evidence.append(item)
+
+    summary = str(assess.get("summary") or "").strip()
+    if not summary:
+        summary = f"综合客户数据，判定商机等级为{level}"
+
+    detail = {
+        "summary": summary,
+        "steps": steps[:LEVEL_STEP_LIMIT],
+        "evidence": all_evidence[:12],
+        "confidence": round(confidence, 2),
+    }
+
+    facts["deal_level"] = level
+    facts["deal_level_detail"] = detail
+    facts["business_opp_stage"] = LEVEL_STAGE_LABEL[stage_code]
+
+    return {
+        "facts_json": json.dumps(facts, ensure_ascii=False, default=str),
+        "level": level,
+        "level_detail_json": json.dumps(detail, ensure_ascii=False, default=str),
+        "stage": stage_code,
+        "rule_clamped": clamped,
+        "evidence_fragments_removed": removed,
+        "parse_ok": True,
+    }
 
 
 def _tool(
@@ -2380,19 +2675,71 @@ WORKFLOW = WorkflowDef(
             ),
             function=f"customer_profile.workflows.{SLUG}:review_notes",
         ),
+        # ---------------------------------------------------------- 商机等级定级（独立 1 次 LLM）
+        # 业务专家的《客户商机等级定级规范》要求「尽可能详细分析全部客户数据」并给出可追溯
+        # 的推理链。这条字段对销售的重要程度断档领先，因此**不随 L1 的字段清单一起产出**，
+        # 而是单开一次调用、独占全量原始记录与足量输出篇幅，再由代码做规则收口。
+        make_node(
+            LEVEL_INPUT,
+            "商机定级输入装配",
+            "code",
+            after=(L2_REVIEW,),
+            inputs={
+                "records_json": (L0_RECORDS, "records_json"),
+                "facts_json": (L2_PROJECT, "facts_json"),
+            },
+            outputs=("output", "stage", "stage_label", "section_count", "chars"),
+            function=f"customer_profile.workflows.{SLUG}:build_level_input",
+        ),
+        make_node(
+            LEVEL_ASSESS,
+            "商机等级评定",
+            "llm",
+            after=(LEVEL_INPUT,),
+            inputs={"arg1": (LEVEL_INPUT, "output")},
+            outputs=("result",),
+            template=LEVEL_ASSESS_TEMPLATE,
+            output="result",
+            expect_json=True,
+            system_text=SYSTEM_TEXT,
+        ),
+        make_node(
+            LEVEL_APPLY,
+            "商机定级收口",
+            "code",
+            after=(LEVEL_ASSESS, LEVEL_INPUT),
+            inputs={
+                "records_json": (L0_RECORDS, "records_json"),
+                "facts_json": (L2_PROJECT, "facts_json"),
+                "assess_json": (LEVEL_ASSESS, "result"),
+                "stage": (LEVEL_INPUT, "stage"),
+            },
+            outputs=(
+                "facts_json",
+                "level",
+                "level_detail_json",
+                "stage",
+                "rule_clamped",
+                "evidence_fragments_removed",
+                "parse_ok",
+            ),
+            function=f"customer_profile.workflows.{SLUG}:apply_level",
+        ),
         # ---------------------------------------------------------- 取证与成文（复用）
         # ---------------------------------------------------------- L3 校验与表达（1 次 LLM）
         # 替代 production：**同一份 facts** 既喂 Notes、又写 9 个 section（设计稿 §7.4）。
         # 输入只有已定稿的事实，没有证据原文——表达层因此**无从新增事实**。
+        # facts 取自 **LEVEL_APPLY**（而非 L2_PROJECT）：商机等级是 L3 之后才定稿的，
+        # 若仍喂 L2 的 facts，卡片上会出现「等级与它的推理链对不上」。
         make_node(
             PRODUCTION,
             "L3 校验与表达",
             "tool",
-            after=(L2_REVIEW,),
+            after=(LEVEL_APPLY,),
             inputs={
                 "phone": (START, "phone_number"),
                 "batch_id": (START, "batch_id"),
-                "facts_json": (L2_PROJECT, "facts_json"),
+                "facts_json": (LEVEL_APPLY, "facts_json"),
                 "basis_json": (L2_PROJECT, "basis_json"),
                 "notes_updates_json": (L2_REVIEW, "notes_updates_json"),
                 "claims_json": (L1_INJECT, "claims_json"),
@@ -2420,7 +2767,7 @@ WORKFLOW = WorkflowDef(
             inputs={
                 "phone": (START, "phone_number"),
                 "batch_id": (START, "batch_id"),
-                "facts_json": (L2_PROJECT, "facts_json"),
+                "facts_json": (LEVEL_APPLY, "facts_json"),
                 "notes_updates_json": (L2_REVIEW, "notes_updates_json"),
                 # 表达层的 section 产物（resistances / emotion_state / overall_tag 从这里取）。
                 # ``result1`` 是**字符串**：由 callback_build 内部二次解析。
@@ -2496,4 +2843,6 @@ CODE_SPECS: dict[str, dict] = {
     L2_PROJECT: {"main": "project_claims", "renames": {}},
     L2_APPLY: {"main": "merge_l2_verdict", "renames": {}},
     L2_REVIEW: {"main": "review_notes", "renames": {}},
+    LEVEL_INPUT: {"main": "build_level_input", "renames": {}},
+    LEVEL_APPLY: {"main": "apply_level", "renames": {}},
 }
