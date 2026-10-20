@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .. import readable as rdb
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "customer_profile_l3"
@@ -250,6 +251,9 @@ def validate_l3(claims_json, facts_json, notes_updates_json, basis_json="{}") ->
     blocking = any(item["severity"] == "error" for item in issues)
     return {
         "facts_json": json.dumps(facts, ensure_ascii=False, default=str),
+        # 表达层读的是这一份：事实喂给模型时必须翻成中文名与非英文取值，
+        # 否则模型会把 ``payment_method=loan`` 这类内部形态照抄进画像卡正文。
+        "facts_readable": rdb.readable_facts(facts),
         "issue_json": json.dumps(issues, ensure_ascii=False, default=str),
         "issue_count": len(issues),
         "fact_count": facts_n,
@@ -563,6 +567,7 @@ WORKFLOW: WorkflowDef = WorkflowDef(
             },
             outputs=(
                 "facts_json",
+                "facts_readable",
                 "issue_json",
                 "issue_count",
                 "fact_count",
@@ -578,7 +583,7 @@ WORKFLOW: WorkflowDef = WorkflowDef(
             "llm",
             after=(VALIDATE, *(node_id for node_id, _ in PRESET_ASSETS)),
             inputs={
-                "facts_output": (VALIDATE, "facts_json"),
+                "facts_output": (VALIDATE, "facts_readable"),
                 "tag_library": (TAG_LIBRARY, "output"),
                 "profile_format": (PROFILE_FORMAT, "output"),
                 "product_info": (PRODUCT_INFO, "output"),

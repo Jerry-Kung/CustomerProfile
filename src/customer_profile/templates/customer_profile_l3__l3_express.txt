@@ -62,7 +62,7 @@
 {"name": "", "gender": "", "age": "", "deal_level": "", "overall_tag": "",
  "personality_summary": "", "profile_summary": ""}
 ```
-- 各字段取自事实表对应键（`customer_name` / `title` / `age` / `deal_level`）；
+- 各字段取自事实表对应项（客户姓名 / 称呼 / 年龄 / 商机等级）；
 - `overall_tag`：一个 6–10 字的总标签；`personality_summary`（60–120 字）与
   `profile_summary`（80–150 字）是**叙述**，只能复述事实表里的内容；
 - 事实表里没有的字段留空串。
@@ -100,7 +100,7 @@
  "core_issue": {"value": "", "reasoning_detail": {...}},
  "breakthrough_point": {"value": "", "reasoning_detail": {...}}}
 ```
-- `business_opp_level` **必须**与事实表的 `deal_level` 一致（同一个值，不得写出两个等级）；
+- `business_opp_level` **必须**与事实表的「商机等级」一致（同一个值，不得写出两个等级）；
   它的 `reasoning_detail` 以事实表里的商机定级结论为准（照实组织，不要另推一套等级）；
 - 其余各项是判断类结论，措辞可以给，但依据只能来自事实表。
 
@@ -134,7 +134,7 @@
  "sales_attitude": {"value": "", "reasoning_detail": {...}},
  "radar_data": {"items": [{"dimension": "", "score": 0}]}}
 ```
-- **只有**当事实表里有情绪/态度相关线索（如 `emotion`、`communication_rhythm`、
+- **只有**当事实表里有情绪/态度相关线索（如沟通风格、沟通节奏、
   沟通记录）时才填；没有就给 `{}`。
 - `radar_data.items` 的 `score` 为 0–100 的整数，维度取「犹豫/信任/可转化/防备/紧迫」这类。
 

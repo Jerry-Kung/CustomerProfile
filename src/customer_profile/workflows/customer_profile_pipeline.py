@@ -49,6 +49,7 @@ from typing import Any
 from .. import internal_fields as inf
 from .. import notes_contract as nc
 from .. import projection as proj
+from .. import readable as rdb
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "customer_profile_pipeline"
@@ -1868,6 +1869,9 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
 
     return {
         "facts_json": json.dumps(result.facts, ensure_ascii=False, default=str),
+        # 喂 LLM 的事实表（L2 兜底）：**必须**是可读化中文，不得 dump 英文键与枚举键
+        # （模型会照抄进理由，进而漏进对客产物）。代码消费仍用 ``facts_json``。
+        "facts_readable": rdb.readable_facts(result.facts),
         "notes_updates_json": json.dumps(updates, ensure_ascii=False, default=str),
         "to_confirm_json": json.dumps(result.to_confirm, ensure_ascii=False, default=str),
         "rejected_json": json.dumps(result.rejected, ensure_ascii=False, default=str),
@@ -2173,10 +2177,10 @@ def build_level_input(records_json, facts_json="{}", claims_json="{}") -> dict:
     body = "\n\n---\n\n".join(sections)
 
     payload = [
-        f"【业务阶段】{stage['stage_label']}（stage={stage['stage']}）",
+        f"【业务阶段】{stage['stage_label']}",
         "",
-        "【已定稿事实（字段键 → 取值）】",
-        json.dumps(facts, ensure_ascii=False, default=str, indent=2, sort_keys=True),
+        "【已定稿事实（中文名 → 取值）】",
+        rdb.readable_facts(facts),
         "",
         "【客户原始信息记录（按来源分节）】",
         body or "（无可用记录）",
@@ -2758,6 +2762,7 @@ WORKFLOW = WorkflowDef(
             },
             outputs=(
                 "facts_json",
+                "facts_readable",
                 "notes_updates_json",
                 "to_confirm_json",
                 "rejected_json",
@@ -2780,7 +2785,9 @@ WORKFLOW = WorkflowDef(
                 "arg1": (L2_PROJECT, "candidates_json"),
                 # 缺字段补全必须**看着事实表**做（v2.1 R2）：缺字段条目没有候选值，
                 # 不给事实表就是让它凭空编——那正是「受约束的裁决者」要避免的。
-                "arg2": (L2_PROJECT, "facts_json"),
+                # 只读可读化事实：原样 ``facts_json`` 里的英文键（``annual_income``）
+                # 与英文枚举键会被抄进 ``reason``，而 ``reason`` 是给销售看的。
+                "arg2": (L2_PROJECT, "facts_readable"),
             },
             outputs=("result",),
             template=L2_FALLBACK_TEMPLATE,
