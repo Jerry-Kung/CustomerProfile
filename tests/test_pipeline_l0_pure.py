@@ -18,6 +18,7 @@ from __future__ import annotations
 from customer_profile.validation import validate
 from customer_profile.workflows import (
     audio_content_extract as ace,
+    audio_content_extract_roled as roled,
     customer_profile_pipeline as pipe,
     moments_info as mi,
     outbound_call_audio as ob,
@@ -174,14 +175,17 @@ def test_pure_variants_reuse_the_original_templates():
 # ---------------------------------------------------------------- 管线接线
 
 def test_pipeline_points_at_the_pure_variants():
-    """管线（v2 实验臂）的四路子流程指向纯变体。"""
+    """管线（业务测试臂）的四路子流程：截图走纯变体，录音走角色标注变体。"""
     declared = {
         n.title: n.config.get("@workflow") for n in pipe.WORKFLOW.nodes if n.node_type == "tool"
     }
     assert declared["朋友圈信息提取"] == pipe.MOMENTS_PURE
     assert declared["试驾录音信息提取"] == pipe.TEST_DRIVE_PURE
     assert declared["外呼录音信息提取"] == pipe.OUTBOUND_CALL_PURE
-    assert pipe.AUDIO_EXTRACT_WORKFLOW == ace.PURE_WORKFLOW_ID
+    # 录音抽取：2026-10-20 起指向角色标注变体（纯识别之上多一次语义角色判定），
+    # 不再是零 LLM 的 ``audio_content_extract_pure``。
+    assert pipe.AUDIO_EXTRACT_WORKFLOW == roled.WORKFLOW_ID
+    assert pipe.AUDIO_EXTRACT_WORKFLOW != ace.PURE_WORKFLOW_ID
 
 
 def test_pipeline_no_longer_references_the_original_shared_children():
@@ -196,3 +200,118 @@ def test_pipeline_no_longer_references_the_original_shared_children():
         ob.WORKFLOW_ID,
     ):
         assert original not in children, f"管线仍在引用原件 {original}"
+
+
+# ---------------------------------------------------------------- 转写产物解析
+
+def bundle(content: str, raw: str, lines: list, corrections: list | None = None) -> str:
+    import json
+
+    return json.dumps(
+        {
+            "content": content,
+            "raw": raw,
+            "annotated": True,
+            "roles": {},
+            "role_lines": lines,
+            "corrections": corrections or [],
+            "issues": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_transcript_parts_reads_bundle_and_keeps_raw_separate():
+    """正文与原文必须分开：正文是勘误后的写法，原文是逐字 ASR 结果。"""
+    content, raw, lines, corrections = pipe._transcript_parts(
+        bundle(
+            "改后的句子",
+            "原来的句子",
+            [{"i": 0, "role": "销售方", "start": 0, "end": 5}],
+            [{"i": 0, "text": "改后的句子", "reason": "音近"}],
+        )
+    )
+    assert content == "改后的句子"
+    assert raw == "原来的句子"
+    assert lines[0]["role"] == "销售方"
+    assert corrections == [{"i": 0, "text": "改后的句子", "reason": "音近"}]
+
+
+def test_transcript_parts_shifts_offsets_when_concatenating_files():
+    """多文件拼接必须整体后移区间，否则第二段的角色会落到第一段的句子上。"""
+    content, _, lines, _ = pipe._transcript_parts(
+        [
+            bundle("aaa\nbb", "r1", [{"i": 0, "role": "销售方", "start": 0, "end": 3}]),
+            bundle("ccc", "r2", [{"i": 0, "role": "客户方", "start": 0, "end": 3}]),
+        ]
+    )
+    assert content == "aaa\nbb\nccc"
+    assert (lines[1]["start"], lines[1]["end"]) == (7, 10)
+    assert pipe._role_at(lines, 7) == "客户方"
+    assert pipe._role_at(lines, 0) == "销售方"
+
+
+def test_transcript_parts_falls_back_to_raw_for_legacy_array():
+    """旧产物（裸 ASR 数组）没有角色：正文即原文，反查一律为空。"""
+    content, raw, lines, corrections = pipe._transcript_parts('[{"text": "你好"}]')
+    assert content == raw == '[{"text": "你好"}]'
+    assert lines == [] and corrections == []
+    assert pipe._role_at(lines, 0) == ""
+
+
+def test_transcript_parts_treats_empty_array_as_empty():
+    assert pipe._transcript_parts("[]") == ("", "", [], [])
+
+
+def test_role_at_returns_empty_outside_any_range():
+    lines = [{"i": 0, "role": "销售方", "start": 0, "end": 3}]
+    assert pipe._role_at(lines, 3) == ""
+    assert pipe._role_at([], 0) == ""
+    assert pipe._role_at(None, 0) == ""
+
+
+def test_role_segments_merges_adjacent_same_role():
+    lines = [
+        {"i": 0, "role": "销售方"},
+        {"i": 1, "role": "销售方"},
+        {"i": 2, "role": "客户方"},
+        {"i": 3, "role": "未知来源"},
+    ]
+    assert pipe._role_segments(lines) == "0-1 销售方；2 客户方；3 未知来源"
+    assert pipe._role_segments([]) == ""
+
+
+def test_correction_footnote_is_capped():
+    corrections = [{"i": i, "reason": "x"} for i in range(12)]
+    note = pipe._correction_footnote(corrections)
+    assert note.startswith("第 0 句（x）")
+    assert "等 12 处" in note
+    assert "第 8 句" not in note
+
+
+# ---------------------------------------------------------------- 证据位前缀
+
+def test_speaker_prefix_annotates_recording_evidence():
+    """录音证据写出「谁说的」；非录音证据不加前缀（空 ≠ 身份不明）。"""
+    assert pipe.proj._speaker_prefix(pipe.proj.SPEAKER_SALES) == "销售原话："
+    assert pipe.proj._speaker_prefix(pipe.proj.SPEAKER_CUSTOMER) == "客户原话："
+    assert pipe.proj._speaker_prefix(pipe.proj.SPEAKER_UNKNOWN) == "说话者身份存疑，信息可靠度低："
+    assert pipe.proj._speaker_prefix("") == ""
+
+
+def test_readable_evidence_carries_speaker_role():
+    claim = pipe.proj.Claim(
+        attribute="职业",
+        value="企业主",
+        channel="试驾录音",
+        quote="我自己开公司的",
+        speaker_role=pipe.proj.SPEAKER_CUSTOMER,
+    )
+    rendered = pipe.proj._readable_evidence([claim])
+    assert rendered and rendered[0].startswith("客户原话：")
+
+
+def test_readable_evidence_without_role_has_no_prefix():
+    claim = pipe.proj.Claim(attribute="职业", value="企业主", channel="企业信息", quote="法人：张三")
+    rendered = pipe.proj._readable_evidence([claim])
+    assert rendered and not rendered[0].startswith(("销售原话", "客户原话", "说话者身份存疑"))

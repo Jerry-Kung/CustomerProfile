@@ -180,6 +180,15 @@ GENDER_WEAK_TIERS: frozenset[str] = frozenset({FIRSTHAND, SOCIAL, PREDICTION})
 非登记来源的性别一律降为 ``inferred_low``（``_confidence_for`` 随之给 0.5，满足「≤0.6」）。
 """
 
+SPEAKER_SALES = "销售方"
+SPEAKER_CUSTOMER = "客户方"
+SPEAKER_UNKNOWN = "未知来源"
+"""录音证据的说话方（与 :mod:`customer_profile.workflows.role_labelling` 同一套词表）。
+
+只在**录音渠道**的证据上有值；其余渠道为空串，空值不加任何前缀——「不是录音」与
+「身份不明」是两种情况，混用会让销售误以为截图、登记数据也不可信。
+"""
+
 SALESPERSON_MARKERS: tuple[str, ...] = (
     "销售顾问",
     "顾问自称",
@@ -346,6 +355,14 @@ class Claim:
 
     值不是原文给的（是模型改过的），但改动前的原文必须留下——否则销售点开这条
     分不清「客户说的」与「模型改的」（v3 接口一）。``verbatim`` 时为空。
+    """
+
+    speaker_role: str = ""
+    """录音证据的说话方：``销售方`` / ``客户方`` / ``未知来源``。
+
+    由 L1 定位层按引文所在的句子反查得到（非录音渠道为空）。出口证据位据此加前缀：
+    销售原话、客户原话、说话者身份存疑（信息可靠度低）。空值不加前缀——那不是
+    「身份不明」，而是「这条证据不是录音」。
     """
 
     @property
@@ -1149,6 +1166,24 @@ def _strip_conclusion(text: str) -> str:
     return head
 
 
+def _speaker_prefix(role: str) -> str:
+    """证据位的说话方前缀（用户口径，2026-10-20）。
+
+    - ``销售方`` → 「销售原话：」——这条证据出自我方销售，**不是客户说的**；
+    - ``客户方`` → 「客户原话：」；
+    - ``未知来源`` → 「说话者身份存疑，信息可靠度低：」——身份不明，销售据此自行打折；
+    - 空值 → 不加前缀。空不是「身份不明」，而是「这条证据不是录音」（截图、登记、
+      第三方画像等），给它们加前缀会凭空造出一个不存在的可信度信号。
+    """
+    if role == SPEAKER_SALES:
+        return "销售原话："
+    if role == SPEAKER_CUSTOMER:
+        return "客户原话："
+    if role == SPEAKER_UNKNOWN:
+        return "说话者身份存疑，信息可靠度低："
+    return ""
+
+
 def _is_conclusion(text: str) -> bool:
     """整段皆为结论（无任何事实部分）时为真。"""
     return not _strip_conclusion(text)
@@ -1192,12 +1227,15 @@ def _readable_evidence(sources: Sequence[Claim]) -> list[str]:
                 evidence.append(tag)
             continue
         if claim.quote:
-            text = f"{claim.channel}：{claim.quote}" if claim.channel else claim.quote
+            prefix = _speaker_prefix(claim.speaker_role)
+            body = f"{claim.channel}：{claim.quote}" if claim.channel else claim.quote
+            text = f"{prefix}{body}"
             if text not in evidence:
                 evidence.append(text)
             continue
         if claim.source_quote:
-            text = f"原文「{claim.source_quote}」（经纠错归一）"
+            prefix = _speaker_prefix(claim.speaker_role)
+            text = f"{prefix}原文「{claim.source_quote}」（经纠错归一）"
             if text not in evidence:
                 evidence.append(text)
             continue

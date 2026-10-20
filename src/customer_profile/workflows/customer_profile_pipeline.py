@@ -177,17 +177,19 @@ L3_WORKFLOW = "customer_profile_l3"
 
 替代 production 的 12 个 LLM 节点：那张图里 9 个 section 与 Notes **各自生成**，
 是本项目的主要成本项与「卡片与 Notes 不一致」的根源。"""
-AUDIO_EXTRACT_WORKFLOW = "audio_content_extract_pure"
-"""录音抽取子流程。
+AUDIO_EXTRACT_WORKFLOW = "audio_content_extract_roled"
+"""录音抽取子流程：**带角色标注**的变体。
 
-**注意指向的是 v2 的纯识别变体，不是 ``audio_content_extract`` 原件。** 本管线只消费
-``auc_result``（逐字 ASR 数组），原件的「LLM 识别结果校对」与「LLM 内容有效性判断」
-两个节点照跑但产物一个字节不用（R1b 实测 2,559,841 + 856,156 token，全批 41.1% 成本里
-的一大块）。纯变体零 LLM 节点，交出的 ``auc_result`` 与原件逐字节相同。
+**注意指向的不是 ``audio_content_extract_pure``。** 纯识别变体（零 LLM）是 2026-10 之前
+的口径：只交逐字原文。实测发现原始 ``speaker`` 编号不可信（55 条录音中 41 条存在
+「同一编号下性别稳定矛盾」），销售自述（「我们是4S店的」）一旦被错归到客户方，下游会把
+客户职业整个判错。因此 v2 在纯识别之后多一次 LLM：按**语义**把每句判成
+销售方 / 客户方 / 未知来源，勘误明细单独交出。子流程交出 ``transcript_bundle``
+（纯正文 + 六字段原文 + 句级角色与字符区间 + 勘误明细）。
 
-**为什么是变体而不是就地删节点**：原件被**基线臂**的 ``test_drive_audio`` /
-``outbound_call_audio`` 复用（``audio_flow`` 的两处调用点），就地删除会让基线臂图结构
-改变、``definition_hash`` 漂移，AB 可比性判据失效。
+**为什么是另开一个 workflow_id 而不是在纯识别变体里加节点**：纯变体的语义是「零 LLM、
+只交逐字原文」，``tests/test_pipeline_l0_pure.py`` 用节点数与零 LLM 钉住它；新开变体
+让回退只需把本常量改回 ``audio_content_extract_pure``。
 """
 
 MOMENTS_PURE = "moments_info_pure"
@@ -553,33 +555,152 @@ def _is_empty_container(value: Any) -> bool:
     return value is None
 
 
-def _transcript_text(value: Any) -> str:
-    """把录音转录产出归一成一段文本。
+def _transcript_parts(value: Any) -> tuple[str, str, list, list]:
+    """把录音转录产出拆成（标注正文，六字段原文，句级角色，勘误明细）。
 
-    迭代节点 ``flatten_output`` 后给的是**逐文件**的 ``auc_result`` 列表，每项是一段
-    ASR 六字段数组文本。空项（识别无结果时是 ``"[]"``）必须剔除——若直接 JSON 序列化，
-    ``["[]", "<两千字原文>"]`` 这段噪声会原样进入上下文，且掩盖「这一段其实没识别出内容」。
+    两种形态都要认：
+
+    - **新形态**：角色标注子流程交出的 ``transcript_bundle``——一段 JSON 对象，
+      含 ``content``（纯正文）、``raw``（ASR 六字段原文）、``role_lines``（句级角色与
+      字符区间）与 ``corrections``（勘误明细）；
+    - **旧形态**：裸的 ``auc_result`` 数组文本。此时原文即正文，角色与勘误为空。
+
+    迭代节点 ``flatten_output`` 后给的是**逐文件**的列表，逐项拆完再按换行拼接，
+    因此多文件录音的原文与正文各自对齐、不会交叉。角色区间**按文件独立**，拼接后
+    不跨文件复用——多文件时角色信息只保留各文件的区间偏移，由消费方按文件边界处理。
     """
     if value is None:
-        return ""
+        return "", "", [], []
     if isinstance(value, (list, tuple)):
-        parts = [_transcript_text(v) for v in value]
-        return "\n".join(p for p in parts if p)
-    if isinstance(value, str):
-        text = value.strip()
-        if not text or _looks_like_sentinel(text):
-            return ""
+        parts = [_transcript_parts(v) for v in value]
+        content_parts: list[str] = []
+        raw_parts: list[str] = []
+        role_lines: list = []
+        corrections: list = []
+        cursor = 0
+        for content, raw, lines, items in parts:
+            if content:
+                # 多文件拼接时角色区间必须整体后移：各文件的区间是**文件内**偏移，
+                # 直接拼接会让第二个文件起的所有区间落到错误的句子上。
+                for line in lines:
+                    if isinstance(line, dict):
+                        shifted = dict(line)
+                        shifted["start"] = int(shifted.get("start") or 0) + cursor
+                        shifted["end"] = int(shifted.get("end") or 0) + cursor
+                        role_lines.append(shifted)
+                    else:
+                        role_lines.append(line)
+                content_parts.append(content)
+                cursor += len(content) + 1
+            if raw:
+                raw_parts.append(raw)
+            corrections.extend(items)
+        return "\n".join(content_parts), "\n".join(raw_parts), role_lines, corrections
+    if not isinstance(value, str):
+        return "", "", [], []
+
+    text = value.strip()
+    if not text or _looks_like_sentinel(text):
+        return "", "", [], []
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return text, text, [], []
+
+    if isinstance(parsed, dict) and "content" in parsed:
+        content = str(parsed.get("content") or "").strip()
+        raw = str(parsed.get("raw") or "").strip()
+        role_lines = parsed.get("role_lines") or []
+        corrections = parsed.get("corrections") or []
+        if not raw:
+            raw = content
+        return (
+            content,
+            raw,
+            list(role_lines) if isinstance(role_lines, list) else [],
+            list(corrections) if isinstance(corrections, list) else [],
+        )
+
+    # ASR 六字段数组：解析得动就说明是转录本体，原样保留（逐字，不重排）。
+    # 但空数组要归零：实测有 3 个录音文件识别结果是 ``"[]"``，它是「没识别出内容」，
+    # 不是「一段叫 [] 的原文」。留成非空会把一个空录音记成 status=ok。
+    if isinstance(parsed, list) and not parsed:
+        return "", "", [], []
+    return text, text, [], []
+
+
+def _role_at(role_lines: Any, offset: int) -> str:
+    """在句级角色表里按下标找角色：返回覆盖 ``offset`` 的那一句的角色。
+
+    角色区间是正文的字符闭开区间，定位层切出的引文起点落在哪一句，就直接用那一句的
+    角色——不跨句推断。找不到返回空串（非录音渠道、旧产物、标注失败都走这里）。
+    """
+    if not isinstance(role_lines, list):
+        return ""
+    for line in role_lines:
+        if not isinstance(line, dict):
+            continue
         try:
-            parsed = json.loads(text)
-        except ValueError:
-            return text
-        # ASR 六字段数组：解析得动就说明是转录本体，原样保留（逐字，不重排）。
-        # 但空数组要归零：实测有 3 个录音文件识别结果是 ``"[]"``，它是「没识别出内容」，
-        # 不是「一段叫 [] 的原文」。留成非空会把一个空录音记成 status=ok。
-        if isinstance(parsed, list) and not parsed:
-            return ""
-        return text
+            start = int(line.get("start"))
+            end = int(line.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if start <= offset < end or (start <= offset <= end and end == start):
+            return str(line.get("role") or "")
     return ""
+
+
+def _transcript_text(value: Any) -> str:
+    """把录音转录产出归一成一段文本（标注正文侧）。保留给既有调用点。"""
+    return _transcript_parts(value)[0]
+
+
+def _role_segments(role_lines: Any) -> str:
+    """把句级角色压成「句区间 → 角色」的短串，供分节头展示。
+
+    形如 ``0-4 销售方；5 客户方；6-9 未知来源``。相邻同角色合并，避免几百句的录音
+    把一行撑成几千字。``role_lines`` 为空（旧产物或标注失败）时返回空串。
+    """
+    if not isinstance(role_lines, list) or not role_lines:
+        return ""
+    merged: list[list[Any]] = []
+    for item in role_lines:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("i"))
+        except (TypeError, ValueError):
+            continue
+        role = str(item.get("role") or "")
+        if merged and merged[-1][2] == role and merged[-1][1] + 1 == index:
+            merged[-1][1] = index
+        else:
+            merged.append([index, index, role])
+    parts: list[str] = []
+    for lo, hi, role in merged:
+        span = f"{lo}" if lo == hi else f"{lo}-{hi}"
+        parts.append(f"{span} {role}")
+    return "；".join(parts)
+
+
+def _correction_footnote(corrections: Any) -> str:
+    """勘误明细压成一句脚注，供分节头展示。
+
+    正文里用的是**勘误后的写法**，原识别文本只在 ``content_raw`` 里；把「哪句改过」
+    在分节头点出来，L1 与定级都能知道哪些句子不是逐字原话。最多列 8 条，
+    避免长录音的勘误把分节头撑大。
+    """
+    if not isinstance(corrections, list) or not corrections:
+        return ""
+    parts: list[str] = []
+    for item in corrections[:8]:
+        if not isinstance(item, dict):
+            continue
+        index = item.get("i")
+        reason = str(item.get("reason") or "").strip()
+        parts.append(f"第 {index} 句（{reason}）" if reason else f"第 {index} 句")
+    more = len(corrections) - len(parts)
+    return "、".join(parts) + (f" 等 {len(corrections)} 处" if more > 0 else "")
 
 
 def _as_content(value: Any) -> str:
@@ -652,9 +773,14 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
 
         content_kind = spec["content_kind"]
         content = ""
+        content_raw = ""
+        role_lines: list = []
+        corrections: list = []
         if present:
             if source_name in TRANSCRIPT_SOURCES:
-                content = _transcript_text(transcripts.get(source_name))
+                content, content_raw, role_lines, corrections = _transcript_parts(
+                    transcripts.get(source_name)
+                )
                 if content:
                     content_kind = "transcript"
                 else:
@@ -685,6 +811,13 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
                 "created_at": str((item or {}).get("created_at") or ""),
                 "content": content,
                 "content_kind": content_kind,
+                # 录音的**未标注**六字段原文。角色标注与勘误都可能出错，而正文一经改写
+                # 就无法回查，因此原文单独留一份（非录音渠道为空串）。
+                "content_raw": content_raw,
+                # 句级角色（``{i, role, start, end}``）与勘误明细。角色供 L1 输入装配
+                # 与投影层的证据标注使用；二者都只对录音渠道非空。
+                "role_lines": role_lines,
+                "corrections": corrections,
             }
         )
 
@@ -1239,6 +1372,14 @@ def build_l1_input(records_json) -> dict:
         if created_at:
             header.append(f"采集时间：{created_at}")
         header.append(f"内容形态：{record.get('content_kind') or 'text'}")
+        # 录音的说话方分区：**放在分节头里、不插进正文**。插进正文会让 L1 抄锚点时
+        # 连段头一起抄，而锚点必须能在正文里逐字定位。
+        segments = _role_segments(record.get("role_lines") or [])
+        if segments:
+            header.append(f"说话方分区：{segments}")
+        notes = _correction_footnote(record.get("corrections") or [])
+        if notes:
+            header.append(f"已勘误：{notes}")
         sections.append("\n".join(header) + "\n\n" + str(record.get("content")))
 
     body = "\n\n---\n\n".join(sections)
@@ -1285,12 +1426,18 @@ def localize_claims(records_json, claims_json, min_anchor: int = 8) -> dict:
 
     by_name: dict[str, str] = {}
     by_id: dict[str, str] = {}
+    roles_by_name: dict[str, list] = {}
+    roles_by_id: dict[str, list] = {}
     for record in records:
         content = record.get("content") or ""
         if record.get("status") != OK or not content.strip():
             continue
         by_name.setdefault(str(record.get("source_name") or ""), content)
         by_id.setdefault(str(record.get("record_id") or ""), content)
+        role_lines = record.get("role_lines") or []
+        if isinstance(role_lines, list) and role_lines:
+            roles_by_name.setdefault(str(record.get("source_name") or ""), role_lines)
+            roles_by_id.setdefault(str(record.get("record_id") or ""), role_lines)
 
     kept: list[dict] = []
     dropped: list[dict] = []
@@ -1356,6 +1503,12 @@ def localize_claims(records_json, claims_json, min_anchor: int = 8) -> dict:
                 entry["quote"] = quote
                 entry["span"] = [start, end]
                 entry["record_channel"] = channel
+                # 录音的角色标注：引文起点落在哪一句，就记那一句的说话方。
+                # 投影层据此在证据位加「销售原话 / 客户原话 / 说话者身份存疑」前缀。
+                role_lines = roles_by_name.get(channel) or roles_by_id.get(channel) or []
+                role = _role_at(role_lines, start)
+                if role:
+                    entry["speaker_role"] = role
                 # v3.1 改造三：**锚点相关性门**。能定位 ≠ 有信息。
                 #   ① 噪音锚点：问候语（「喂，你好」）、OCR 的 JSON 残片（`gender": "男性`）
                 #      —— 它们在原文里逐字存在且唯一，但零信息量；
@@ -1681,6 +1834,9 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
                 # v3 接口一：坐标形态与当归型事实的原文（透传到 Notes 证据位）。
                 anchor_kind=str(raw.get("anchor_kind") or "").strip(),
                 source_quote=str(raw.get("source_quote") or "").strip(),
+                # 录音证据的说话方（定位层按引文所在句反查得到）。出口证据位据此加
+                # 「销售原话 / 客户原话 / 说话者身份存疑」前缀；非录音渠道为空。
+                speaker_role=str(raw.get("speaker_role") or "").strip(),
                 # v3.1 改造一：推导链透传到 Notes 的 ``steps``（与 ``evidence`` 分料）。
                 reasoning_steps=_steps(raw),
                 # v3.5：L1 自报的置信度透传到出口，作为字段级打分的基准
@@ -2266,7 +2422,7 @@ def _audio_chain(
             after=(files_node,),
             outputs=("output", "item"),
             iterator=(files_node, "files"),
-            inputs={"@output": (extract_node, "auc_result")},
+            inputs={"@output": (extract_node, "transcript_bundle")},
             body=(iter_start, extract_node),
             flatten_output=True,
             error_handle_mode="terminated",
@@ -2284,7 +2440,7 @@ def _audio_chain(
             "tool",
             after=(iter_start,),
             inputs={"file_url": (iter_node, "item")},
-            outputs=("auc_result",),
+            outputs=("transcript_bundle", "annotated", "role_summary"),
             **{
                 "@workflow": AUDIO_EXTRACT_WORKFLOW,
                 "@inputs": {"file_url": "file_url"},
