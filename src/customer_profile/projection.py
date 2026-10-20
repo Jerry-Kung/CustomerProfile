@@ -793,6 +793,37 @@ def project(
 
     # ---- c/d/e 冲突消解 + 枚举归一 + 单多值约束
     for attribute, group in surviving.items():
+        # ---- 收入字段只认收入标签（v3.6 / 2026-10-20）：第三方画像里有一批形态相似
+        #      但语义不同的标签——「预测车型价格偏好」「预测手机价格」给的是**车价 /
+        #      手机价**区间，不是收入。模型把它们当作收入写进 ``annual_income``，
+        #      实测产出「中低端（8w-15w）」（13570263031：标签原文 4档收入 → 应 30-40万）。
+        #      非收入标签整条拒收，而不是降级：它描述的根本不是这个字段。
+        if attribute == "annual_income":
+            allowed = [c for c in group if not _non_income_tag(c)]
+            dropped = [c for c in group if _non_income_tag(c)]
+            for claim in dropped:
+                result.rejected.append(
+                    {
+                        "attribute": attribute,
+                        "value": claim.value,
+                        "rule": "e_non_income_tag",
+                        "reason": "取值来自「车型价格 / 手机价格」等非收入标签，"
+                        "描述的不是年收入",
+                    }
+                )
+            if not allowed:
+                # 全是非收入标签：留白转人工，不用一个描述车价的区间冒充收入
+                # （宁空勿错）。L2 兜底仍可据职业等给出软推断。
+                result.to_confirm.append(
+                    {
+                        "attribute_key": attribute,
+                        "candidates": [c.value for c in dropped],
+                        "reason": "收入字段仅有非收入标签支撑（车价/手机价格）",
+                        "suggested_action": "向客户或销售确认年收入",
+                    }
+                )
+                continue
+            group = allowed
         best, same_tier = _pick_best(group)
         values = _diverse(claim.value for claim in same_tier)
 
@@ -1228,6 +1259,39 @@ def _speaker_prefix(role: str) -> str:
 def _is_conclusion(text: str) -> bool:
     """整段皆为结论（无任何事实部分）时为真。"""
     return not _strip_conclusion(text)
+
+
+INCOME_TAG_KEYWORD = "收入"
+"""收入标签名的判定词：「预测收入水平」含它，「预测车型价格偏好」「预测手机价格」不含。"""
+
+
+def _non_income_tag(claim: Claim) -> bool:
+    """这条收入断言是否由**非收入**的第三方标签支撑（v3.6 / 2026-10-20）。
+
+    只判第三方预测档：一手交互与登记来源的收入表述不在此列（那可能是客户自述或
+    销售确认，不是标签串字段的问题）。
+
+    判定看取值、标签名（``quote``）、当归原文与推断依据——L1 按模板要求把标签名抄进
+    ``quote`` 与 ``basis_of_inference``，旧产物至少有一处。三处都不含「收入」即判非收入。
+    实测形态：``annual_income="中低端（8w-15w）"``，标签名「预测车型价格偏好」
+    （13570263031；该案另有 ``4档收入`` 标签，理应取 30-40万）。
+    """
+    if claim.tier != PREDICTION:
+        return False
+    parts = [
+        _as_text(claim.value),
+        claim.quote or "",
+        claim.source_quote or "",
+        *claim.basis_of_inference,
+    ]
+    text = " ".join(parts)
+    # 只拦**看得出出自标签**的断言：有标签名（quote / 依据里出现「标签」）却没有「收入」。
+    # 没有任何标签痕迹的，是模型基于别的事实自行推断的金额（如「职业为网约车司机，
+    # 推断 20-40 万」），不该按标签串字段处理，原样放行。
+    tagged = bool(claim.quote or claim.source_quote) or "标签" in text
+    if not tagged:
+        return False
+    return INCOME_TAG_KEYWORD not in text
 
 
 def _salesperson_marked(claim: Claim) -> bool:

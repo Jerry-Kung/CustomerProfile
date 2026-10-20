@@ -215,3 +215,61 @@ def test_income_band_ranges_match_business_spec():
         "6": "60万以上",
     }
     assert sorted(ib.INCOME_BAND_RANGES) == ["1", "2", "3", "4", "5", "6"]
+
+
+# ------------------------------------------------ 收入字段只认收入标签（v3.6）
+
+def _income_claim(value, quote, basis, channel="第三方画像数据"):
+    from customer_profile import projection as proj
+
+    return proj.Claim(
+        attribute="annual_income",
+        value=value,
+        channel=channel,
+        basis="inferred_high",
+        quote=quote,
+        basis_of_inference=tuple(basis),
+    )
+
+
+def test_car_price_tag_is_not_written_as_income():
+    """车价标签（预测车型价格偏好）不得填进年收入；全被拒时留白转确认。
+
+    实测 13570263031：`annual_income` 被写成「中低端（8w-15w）」。
+    """
+    from customer_profile import projection as proj
+
+    result = proj.project(
+        [_income_claim("中低端（8w-15w）", "预测车型价格偏好",
+                       ["第三方画像标签“预测车型价格偏好”给出“中低端（8w-15w）”"])]
+    )
+    assert "annual_income" not in result.facts
+    assert any(r["rule"] == "e_non_income_tag" for r in result.rejected)
+    assert any(t["attribute_key"] == "annual_income" for t in result.to_confirm)
+
+
+def test_income_tag_wins_over_car_price_tag():
+    """同一案里既有车价标签又有收入标签时，取收入标签换算后的区间。"""
+    from customer_profile import projection as proj
+
+    result = proj.project(
+        [
+            _income_claim("中低端（8w-15w）", "预测车型价格偏好",
+                          ["第三方画像标签“预测车型价格偏好”给出“中低端（8w-15w）”"]),
+            _income_claim("4档收入", "预测收入水平",
+                          ["第三方画像标签“预测收入水平”给出“4档收入”"]),
+        ]
+    )
+    assert result.facts["annual_income"] == "30-40万"
+    assert any(r["rule"] == "e_non_income_tag" for r in result.rejected)
+
+
+def test_untagged_prediction_amount_passes_through():
+    """没有标签痕迹的第三方档推断金额（如据职业推断）不按标签串字段拦截。"""
+    from customer_profile import projection as proj
+
+    result = proj.project(
+        [_income_claim("20-40万", "", ["职业为网约车司机，收入中等偏上"])]
+    )
+    assert result.facts["annual_income"] == "20-40万"
+
