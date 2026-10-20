@@ -2,7 +2,7 @@
   "_comment": [
     "契约补充字段（v3.2 增量期遗留机制）。",
     "2026-10-15 起本文件**已清空**：v2 契约改走",
-    "`python scripts/snapshot_note_contract.py --from-response docs/Notes_new.txt`，",
+    "`python scripts/snapshot_note_contract.py --from-response docs/business_opt01_v3/Notes_new.txt`，",
     "线上 payload 本身就是完整现行契约，不需要再叠加补挂字段。",
     "保留文件与 --batch-dir 的合并通路，是为了仍能复现历史快照。",
     "原 5 条（competing_brand / competing_model / test_driven_models / brand_concerns",
