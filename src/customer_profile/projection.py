@@ -884,11 +884,14 @@ def project(
     # ---- 等级唯一化（跨产物字段）
     _unify_level(result)
 
-    # ---- 姓名兜底（v3.5，用户口径）：没有任何可靠来源指向真实姓名时，固定写「未知」。
+    # ---- 姓名兜底（v3.5 / 2026-10-20 用户口径）：没有任何可靠来源指向真实姓名时，
+    #      输出「客户」+手机号后四位（如「客户0087」），没有手机号才写「未知」。
     #      留白会让下游误读成「没提取到」，并被 L2 兜底补一个假姓名（线上实测补出过
     #      ``customer_name="先生"``）。这里一次性落定，兜底层不再经手姓名字段。
     if "customer_name" not in result.facts:
-        result.facts["customer_name"] = CONFIDENCE_UNKNOWN_NAME
+        result.facts["customer_name"] = unresolved_customer_name(
+            result.facts.get("phone_number")
+        )
         result.basis["customer_name"] = INFERRED_LOW
 
     # ---- g 缺失即留白 + 产出 notes_updates
@@ -1042,12 +1045,36 @@ def serialize_value(attribute: str, value: Any) -> str:
 
 
 CONFIDENCE_UNKNOWN_NAME = "未知"
-"""姓名查不到可靠来源时的固定取值（用户口径 v3.5）。
+"""姓名查不到可靠来源、且**没有手机号可拼兜底**时的取值（用户口径 v3.5）。
 
-姓名与其它字段不同：**没有可靠来源时必须显式说「未知」**，而不是留白，更不是拿
+姓名与其它字段不同：**没有可靠来源时必须显式给一个占位值**，而不是留白，更不是拿
 称呼（先生/女士）、昵称、企业名去凑。留白会让下游（卡片、L3 校验）读成「没提取到」，
 进而被兜底层再补一个假姓名——线上实测补出过 ``customer_name="先生"``。
 """
+
+NAME_PLACEHOLDER_PREFIX = "客户"
+"""姓名兜底前缀（用户口径，2026-10-20）：优先输出「客户」+手机号后四位。"""
+
+_NAME_PLACEHOLDER_PATTERN = re.compile(r"^客户\d{4}$")
+"""姓名兜底值「客户0087」的形态。"""
+
+
+def unresolved_customer_name(phone_number: Any) -> str:
+    """姓名查不到可靠来源时的兜底取值。
+
+    有手机号 → 「客户」+后四位（如「客户0087」），销售靠它把卡片对上人；手机号缺失或
+    不足 4 位 → 退回「未知」。
+    """
+    digits = re.sub(r"\D", "", _as_text(phone_number))
+    if len(digits) >= 4:
+        return f"{NAME_PLACEHOLDER_PREFIX}{digits[-4:]}"
+    return CONFIDENCE_UNKNOWN_NAME
+
+
+def name_is_unresolved(value: Any) -> bool:
+    """取值是否为「查不到真实姓名」的兜底形态（固定「未知」或「客户+后四位」）。"""
+    text = _as_text(value)
+    return text == CONFIDENCE_UNKNOWN_NAME or bool(_NAME_PLACEHOLDER_PATTERN.match(text))
 
 NAME_SALUTATION_VALUES: frozenset[str] = frozenset(
     {
@@ -1077,9 +1104,10 @@ def _confidence_for(result: Projection, key: str, sources: Sequence[Claim]) -> f
       （有原文切片或登记档）时 1.0；其余登记档来源 1.0。其它 ``fact`` 落在 0.85–0.95。
     - **高可信结论**：多条不同渠道同向 → 0.95；否则按自报分落在 0.70–0.90。
     - **低置信推断**：按自报分落在 0.40–0.60；自报分低于 0.4 的纯猜测落在 0.20–0.30。
-    - **姓名「未知」** 恒 1.0——「查遍了也没有」本身是确定的事实，不是猜测。
+    - **姓名兜底值**（「未知」或「客户+后四位」）恒 1.0——「查遍了也没有」本身是
+      确定的事实，不是猜测。
     """
-    if key == "customer_name" and result.facts.get(key) == CONFIDENCE_UNKNOWN_NAME:
+    if key == "customer_name" and name_is_unresolved(result.facts.get(key)):
         return 1.0
 
     raw = next((c.confidence for c in sources if c.confidence is not None), None)
@@ -1360,9 +1388,9 @@ def _to_notes_updates(
             continue
 
         sources = sorted(grouped.get(key) or [], key=lambda c: c.rank)
-        if key == "customer_name" and result.facts.get(key) == CONFIDENCE_UNKNOWN_NAME:
-            # 姓名查不到可靠来源：固定「未知」，并说清为什么没有——不写「据现有记录归纳」
-            # 这种像是从记录里提取到了什么的措辞。
+        if key == "customer_name" and name_is_unresolved(result.facts.get(key)):
+            # 姓名查不到可靠来源：固定兜底值（「客户+手机号后四位」，无手机号则「未知」），
+            # 并说清为什么没有——不写「据现有记录归纳」这种像是从记录里提取到了什么的措辞。
             detail = {
                 "summary": "客户信息中未查找到真实姓名",
                 "steps": ["现有记录中没有客户本人的姓名信息", "社交资料中的称呼与昵称不作为姓名"],

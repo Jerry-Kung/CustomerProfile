@@ -927,3 +927,37 @@ def test_unknown_name_note_explains_absence():
     assert note["reasoning_detail"]["summary"] == "客户信息中未查找到真实姓名"
     assert note["reasoning_detail"]["confidence"] == 1.0
 
+
+def test_unknown_name_falls_back_to_phone_suffix():
+    """姓名查不到但有手机号时，兜底输出「客户」+后四位（v3.5，2026-10-20 用户口径）。"""
+    result = proj.project(
+        [
+            claim("occupation", "教师", channel="试驾录音信息"),
+            claim("phone_number", "15308826588", channel="客户留资手机号"),
+        ]
+    )
+    assert result.facts.get("customer_name") == "客户6588"
+    note = _note(result, "customer_name")
+    assert note["attribute_value"] == "客户6588"
+    # 兜底值是确定结论，不是猜测：置信度仍为 1.0，Notes 说明与「未知」同口径。
+    assert note["reasoning_detail"]["summary"] == "客户信息中未查找到真实姓名"
+    assert note["reasoning_detail"]["confidence"] == 1.0
+
+
+def test_real_name_is_never_replaced_by_phone_suffix():
+    """有可靠姓名时不受兜底影响。"""
+    result = proj.project(
+        [
+            claim("customer_name", "陈", channel="试驾录音信息"),
+            claim("phone_number", "15308826588", channel="客户留资手机号"),
+        ]
+    )
+    assert result.facts.get("customer_name") == "陈"
+
+
+def test_unresolved_customer_name_without_phone_is_unknown():
+    """手机号缺失或不足四位时退回「未知」。"""
+    assert proj.unresolved_customer_name("") == "未知"
+    assert proj.unresolved_customer_name("123") == "未知"
+    assert proj.unresolved_customer_name("15308826588") == "客户6588"
+
