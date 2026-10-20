@@ -259,3 +259,4 @@ experiments/
 # 号码标签导出（json_by_phone/）：文件名是虚拟号，但正文含真实客户标签与手机号，
 # 属"真实客户数据"管辖，禁止入库。测试号清单见受控文件 test_phone_numbers.txt。
 json_by_phone/
+test_phone_numbers.txt
