@@ -134,6 +134,24 @@ L2_FALLBACK = "pipeline_l2_fallback"
 L2_APPLY = "pipeline_l2_apply"
 L2_REVIEW = "pipeline_l2_review"
 
+# —— 商机等级定级（独立一次 LLM 调用，v3.6）
+LEVEL_INPUT = "pipeline_level_input"
+"""定级输入装配（纯代码）：判定业务阶段 + 把全部客户记录与已定稿事实拼成提示词输入。
+
+**为什么单列一个阶段**：商机等级对销售的重要程度断档领先其它字段（2026-10-19 业务方
+要求），必须独占一次 LLM 调用、拿到全量原始数据与足够的输出篇幅，不能像普通字段那样
+由 L1 顺带一行产出。阶段判定用现成的 :func:`_has_test_drive`，口径与确定性字段注入一致。
+"""
+LEVEL_ASSESS = "pipeline_level_assess"
+"""商机等级评定（LLM，1 次）：按业务专家《客户商机等级定级规范》输出 H/A/B/C/待识别。"""
+LEVEL_APPLY = "pipeline_level_apply"
+"""定级收口（纯代码）：枚举归一、阶段上限（R04）、证据门槛（R05）、原文定位校验。
+
+**为什么规则必须在代码层再拦一次**：提示词已写明 R04/R05，但模型偶发越界；阶段上限与
+「H/A 必须同时具备时间、需求、行动证据」都是可机器判定的硬规则，交给提示词等于把
+业务红线押在模型自觉上。
+"""
+
 # —— L3 成文段
 PRODUCTION = "pipeline_production"
 
@@ -208,6 +226,9 @@ L2_REVIEW_TEMPLATE = template_name(L2_REVIEW)
 
 审查层对 L1/L2 的产出做合规性复核：枚举合法、无效占位清除、Notes 与 facts 同源、
 fact 必有锚点。**能代码判定的先由代码修**，只有代码判不了的语义问题才走这一次 LLM。"""
+
+LEVEL_ASSESS_TEMPLATE = template_name(LEVEL_ASSESS)
+"""商机等级定级提示词：规范全文要点 + 全量记录 + 已定稿事实，输出结构化定级结论。"""
 
 
 # ====================================================================
@@ -1929,6 +1950,268 @@ def _loads_object(value) -> dict:
     return {}
 
 
+# ====================================================================
+# 商机等级定级（独立 LLM 环节，业务专家《客户商机等级定级规范》）
+# ====================================================================
+
+LEVEL_UNKNOWN = "待识别"
+"""规范里的「信息不足」结论。**不是 C 级**（R08）——不能因为缺证据就认定客户不想买。"""
+
+LEVEL_STAGE_LEAD = "lead"
+LEVEL_STAGE_OPPORTUNITY = "opportunity"
+LEVEL_STAGE_LABEL: dict[str, str] = {
+    LEVEL_STAGE_LEAD: "线索邀约阶段",
+    LEVEL_STAGE_OPPORTUNITY: "转商机阶段",
+}
+
+
+def level_stage(records_json) -> dict:
+    """按规范 §2 判定业务阶段（纯代码，确定性）。
+
+    判定口径与 :func:`inject_deterministic` 的驾照规则同源：**有实质内容的试驾录音**
+    即视为已进入转商机阶段。不要求试驾数据与试驾录音同时存在。客户口头说「准备试驾」
+    不改变阶段（规范 §2.2 明文）。
+    """
+    records = _records_of(records_json)
+    has_drive = _has_test_drive(records)
+    stage = LEVEL_STAGE_OPPORTUNITY if has_drive else LEVEL_STAGE_LEAD
+    return {
+        "stage": stage,
+        "stage_label": LEVEL_STAGE_LABEL[stage],
+        "has_test_drive": has_drive,
+    }
+
+
+def _level_record_sections(records: list[dict]) -> list[str]:
+    """把有内容的记录渲染成分节文本。与 L1 输入同形（来源名 + 记录编号 + 原文）。"""
+    usable = [r for r in records if r.get("status") == OK and (r.get("content") or "").strip()]
+    sections: list[str] = []
+    for record in usable:
+        source_name = record.get("source_name") or record.get("channel") or "未知渠道"
+        header = [
+            f"## {source_name}",
+            f"记录编号：{record.get('record_id') or ''}",
+        ]
+        created_at = str(record.get("created_at") or "").strip()
+        if created_at:
+            header.append(f"采集时间：{created_at}")
+        header.append(f"内容形态：{record.get('content_kind') or 'text'}")
+        sections.append("\n".join(header) + "\n\n" + str(record.get("content")))
+    return sections
+
+
+def build_level_input(records_json, facts_json="{}", claims_json="{}") -> dict:
+    """定级输入装配：业务阶段 + 已定稿事实 + **全部**客户原始记录。
+
+    **为什么带上全部记录而不是只带事实表**：规范要求「尽可能详细地分析客户所有数据」
+    并给出可追溯的判断依据；事实表只有结论，没有客户原话与上下文（例如试驾反馈的
+    语气、客户对竞品的犹豫、顾问提到的交付条件）。定级是销售最看重的一条结论，
+    证据必须比字段级推断更厚。
+
+    **为什么不渲染《字段清单》**：那是 L1 的取证任务书，对定级是纯噪声。
+    """
+    stage = level_stage(records_json)
+    records = _records_of(records_json)
+    facts = _loads_object(facts_json)
+    sections = _level_record_sections(records)
+    body = "\n\n---\n\n".join(sections)
+
+    payload = [
+        f"【业务阶段】{stage['stage_label']}（stage={stage['stage']}）",
+        "",
+        "【已定稿事实（字段键 → 取值）】",
+        json.dumps(facts, ensure_ascii=False, default=str, indent=2, sort_keys=True),
+        "",
+        "【客户原始信息记录（按来源分节）】",
+        body or "（无可用记录）",
+    ]
+    output = "\n".join(payload)
+    return {
+        "output": output,
+        "stage": stage["stage"],
+        "stage_label": stage["stage_label"],
+        "section_count": len(sections),
+        "chars": len(output),
+    }
+
+
+def _level_evidence_locatable(evidence: str, contents: list[str]) -> bool:
+    """一条证据能否在原始记录里定位到（忽略空白与 Markdown 标记）。"""
+    text = str(evidence or "").strip()
+    if not text:
+        return False
+    return any(_locate(content, text) is not None for content in contents)
+
+
+def _as_list(value) -> list:
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if isinstance(value, str) and value.strip():
+        return [value]
+    return []
+
+
+def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
+    """定级收口（纯代码，0 token）：把模型结论变成可回传的 facts。
+
+    四道收口，每道都对应规范里一条可机器判定的硬规则：
+
+    1. **枚举归一**：只认 ``H`` / ``A`` / ``B`` / ``C`` / 待识别；非法值回落 L1 原等级
+       （L1 也没有就留空），不把自由文本写进 facts。
+    2. **阶段上限（R04）**：阶段由代码判定，线索邀约阶段最高 ``A``，``H`` 强制降级。
+    3. **证据门槛（R05）**：``H`` / ``A`` 必须同时具备需求、时间、行动三类**可定位**证据，
+       缺任一类降为 ``B``。
+    4. **原文定位**：每条证据回定位到客户记录，定位不到的剔除并按条扣置信度；
+       证据位因此不可能是模型自造的句子。
+
+    解析失败时**不覆盖原等级**：保留 L1 的兜底值并留痕（``parse_ok=False``），
+    而不是把一次失败的调用伪装成「客户被评成了待识别」。
+    """
+    records = _records_of(records_json)
+    contents = [str(r.get("content") or "") for r in records if (r.get("content") or "").strip()]
+    stage_code = str(stage or "").strip()
+    if stage_code not in LEVEL_STAGE_LABEL:
+        stage_code = level_stage(records_json)["stage"]
+
+    facts = _loads_object(facts_json)
+    assess = _loads_object(assess_json)
+    if not assess:
+        return {
+            "facts_json": json.dumps(facts, ensure_ascii=False, default=str),
+            "level": "",
+            "level_detail_json": "{}",
+            "stage": stage_code,
+            "rule_clamped": "",
+            "evidence_dropped": 0,
+            "parse_ok": False,
+        }
+
+    level = proj.normalize_level(assess.get("level"))
+    clamped = ""
+    if level is None:
+        # 模型给了契约外的自由文本：留痕，并回落到 L1 的兜底等级。
+        level = proj.normalize_level(facts.get("deal_level"))
+        clamped = "invalid_level"
+    if level is None:
+        return {
+            "facts_json": json.dumps(facts, ensure_ascii=False, default=str),
+            "level": "",
+            "level_detail_json": "{}",
+            "stage": stage_code,
+            "rule_clamped": "invalid_level",
+            "evidence_dropped": 0,
+            "parse_ok": True,
+        }
+
+    # ---- 2 阶段上限
+    if stage_code == LEVEL_STAGE_LEAD and level == "H":
+        level = "A"
+        clamped = "lead_stage_caps_at_A"
+
+    # ---- 4 证据定位（先做，R05 据此判「有没有可用证据」）
+    dropped = 0
+    kept_evidence: list[str] = []
+
+    def _clean(items) -> list[str]:
+        nonlocal dropped
+        out: list[str] = []
+        for item in _as_list(items):
+            text = str(item or "").strip()
+            if not text:
+                continue
+            if _level_evidence_locatable(text, contents):
+                if text not in out:
+                    out.append(text)
+            else:
+                dropped += 1
+        return out
+
+    dimensions = assess.get("dimensions") if isinstance(assess.get("dimensions"), dict) else {}
+    dim_evidence: dict[str, list[str]] = {}
+    for key in ("want_to_buy", "can_to_buy", "when_to_buy"):
+        entry = dimensions.get(key) if isinstance(dimensions.get(key), dict) else {}
+        dim_evidence[key] = _clean(entry.get("evidence"))
+
+    homework = _clean(assess.get("homework_evidence"))
+    obstacles: list[dict] = []
+    for item in _as_list(assess.get("obstacles")):
+        if not isinstance(item, dict):
+            continue
+        obstacles.append(
+            {
+                "name": str(item.get("name") or "").strip(),
+                "solvable_in_window": bool(item.get("solvable_in_window")),
+                "evidence": _clean(item.get("evidence")),
+            }
+        )
+    steps = [str(s).strip() for s in _as_list(assess.get("steps")) if str(s).strip()]
+
+    # ---- 3 证据门槛（R05）：H/A 必须同时具备需求、时间、行动三类可定位证据
+    if level in ("H", "A"):
+        has_demand = bool(dim_evidence.get("want_to_buy"))
+        has_time = bool(dim_evidence.get("when_to_buy")) or bool(
+            str(assess.get("time_window") or "").strip()
+        )
+        has_action = bool(homework)
+        if not (has_demand and has_time and has_action):
+            level = "B"
+            clamped = clamped or "insufficient_multidimensional_evidence"
+
+    confidence = assess.get("confidence")
+    try:
+        confidence = float(confidence)
+    except (TypeError, ValueError):
+        confidence = 0.6
+    confidence = max(0.0, min(1.0, confidence - min(0.3, 0.15 * dropped)))
+
+    all_evidence: list[str] = []
+    for key in ("want_to_buy", "can_to_buy", "when_to_buy"):
+        for item in dim_evidence.get(key) or []:
+            if item not in all_evidence:
+                all_evidence.append(item)
+    for item in homework:
+        if item not in all_evidence:
+            all_evidence.append(item)
+
+    # ---- 面向销售的结论：推理链 + 关键障碍 + 下一步建议（规范 §7.1 五项输出）
+    readable_steps = list(steps[:20])
+    obstacle_text = "；".join(
+        f"{o['name']}（{'目标窗口内可解决' if o['solvable_in_window'] else '短期难解决'}）"
+        for o in obstacles
+        if o["name"]
+    )
+    if obstacle_text:
+        readable_steps.append(f"关键障碍：{obstacle_text}")
+    next_action = str(assess.get("next_action") or "").strip()
+    if next_action:
+        readable_steps.append(f"下一步建议：{next_action}")
+
+    summary = str(assess.get("summary") or "").strip()
+    if not summary:
+        summary = f"综合客户数据，判定商机等级为{level}"
+
+    detail = {
+        "summary": summary,
+        "steps": readable_steps,
+        "evidence": all_evidence[:12],
+        "confidence": round(confidence, 2),
+    }
+
+    facts["deal_level"] = level
+    facts["deal_level_detail"] = detail
+    facts["business_opp_stage"] = LEVEL_STAGE_LABEL[stage_code]
+
+    return {
+        "facts_json": json.dumps(facts, ensure_ascii=False, default=str),
+        "level": level,
+        "level_detail_json": json.dumps(detail, ensure_ascii=False, default=str),
+        "stage": stage_code,
+        "rule_clamped": clamped,
+        "evidence_dropped": dropped,
+        "parse_ok": True,
+    }
+
+
 def _tool(
     node_id: str,
     title: str,
@@ -2402,19 +2685,71 @@ WORKFLOW = WorkflowDef(
             ),
             function=f"customer_profile.workflows.{SLUG}:review_notes",
         ),
+        # ---------------------------------------------------------- 商机等级定级（独立 1 次 LLM）
+        # 业务专家的《客户商机等级定级规范》要求「尽可能详细分析全部客户数据」并给出可追溯
+        # 的推理链。这条字段对销售的重要程度断档领先，因此**不随 L1 的字段清单一起产出**，
+        # 而是单开一次调用、独占全量原始记录与足量输出篇幅，再由代码做规则收口。
+        make_node(
+            LEVEL_INPUT,
+            "商机定级输入装配",
+            "code",
+            after=(L2_REVIEW,),
+            inputs={
+                "records_json": (L0_RECORDS, "records_json"),
+                "facts_json": (L2_PROJECT, "facts_json"),
+            },
+            outputs=("output", "stage", "stage_label", "section_count", "chars"),
+            function=f"customer_profile.workflows.{SLUG}:build_level_input",
+        ),
+        make_node(
+            LEVEL_ASSESS,
+            "商机等级评定",
+            "llm",
+            after=(LEVEL_INPUT,),
+            inputs={"arg1": (LEVEL_INPUT, "output")},
+            outputs=("result",),
+            template=LEVEL_ASSESS_TEMPLATE,
+            output="result",
+            expect_json=True,
+            system_text=SYSTEM_TEXT,
+        ),
+        make_node(
+            LEVEL_APPLY,
+            "商机定级收口",
+            "code",
+            after=(LEVEL_ASSESS, LEVEL_INPUT),
+            inputs={
+                "records_json": (L0_RECORDS, "records_json"),
+                "facts_json": (L2_PROJECT, "facts_json"),
+                "assess_json": (LEVEL_ASSESS, "result"),
+                "stage": (LEVEL_INPUT, "stage"),
+            },
+            outputs=(
+                "facts_json",
+                "level",
+                "level_detail_json",
+                "stage",
+                "rule_clamped",
+                "evidence_dropped",
+                "parse_ok",
+            ),
+            function=f"customer_profile.workflows.{SLUG}:apply_level",
+        ),
         # ---------------------------------------------------------- 取证与成文（复用）
         # ---------------------------------------------------------- L3 校验与表达（1 次 LLM）
         # 替代 production：**同一份 facts** 既喂 Notes、又写 9 个 section（设计稿 §7.4）。
         # 输入只有已定稿的事实，没有证据原文——表达层因此**无从新增事实**。
+        # facts 取自 **LEVEL_APPLY**（而非 L2_PROJECT）：商机等级是 L3 之后才定稿的，
+        # 若仍喂 L2 的 facts，卡片上会出现「等级与它的推理链对不上」。
         make_node(
             PRODUCTION,
             "L3 校验与表达",
             "tool",
-            after=(L2_REVIEW,),
+            after=(LEVEL_APPLY,),
             inputs={
                 "phone": (START, "phone_number"),
                 "batch_id": (START, "batch_id"),
-                "facts_json": (L2_PROJECT, "facts_json"),
+                "facts_json": (LEVEL_APPLY, "facts_json"),
                 "basis_json": (L2_PROJECT, "basis_json"),
                 "notes_updates_json": (L2_REVIEW, "notes_updates_json"),
                 "claims_json": (L1_INJECT, "claims_json"),
@@ -2442,7 +2777,7 @@ WORKFLOW = WorkflowDef(
             inputs={
                 "phone": (START, "phone_number"),
                 "batch_id": (START, "batch_id"),
-                "facts_json": (L2_PROJECT, "facts_json"),
+                "facts_json": (LEVEL_APPLY, "facts_json"),
                 "notes_updates_json": (L2_REVIEW, "notes_updates_json"),
                 # 表达层的 section 产物（resistances / emotion_state / overall_tag 从这里取）。
                 # ``result1`` 是**字符串**：由 callback_build 内部二次解析。
@@ -2518,4 +2853,6 @@ CODE_SPECS: dict[str, dict] = {
     L2_PROJECT: {"main": "project_claims", "renames": {}},
     L2_APPLY: {"main": "merge_l2_verdict", "renames": {}},
     L2_REVIEW: {"main": "review_notes", "renames": {}},
+    LEVEL_INPUT: {"main": "build_level_input", "renames": {}},
+    LEVEL_APPLY: {"main": "apply_level", "renames": {}},
 }

@@ -113,6 +113,20 @@ class Settings(BaseSettings):
             return DEFAULT_API_PORT
         return value
 
+    # ------------------------------------------------------------ 商机等级回传口径
+    purchase_intent_level_passthrough: bool = False
+    """是否把商机等级原样回传（含 ``H`` 与「待识别」）。
+
+    回传契约当前规定 ``ai_insight.purchase_intent_level.value`` 只认 ``A`` / ``B`` / ``C`` / ``D``，
+    而业务专家的定级规范产出 ``H`` / ``A`` / ``B`` / ``C`` / 待识别。过渡期的处置：
+
+    - **false（缺省）**：``H`` 映射为 ``A``；「待识别」不回传该项（前端显示为空，
+      而不是被误读成 C 级）。见 ``docs/遗留问题清单.md`` 的 L-008。
+    - **true**：原样透传五个取值。后端与前端支持后改为 true 即可切回，无需改代码。
+
+    与 ``LLM_*`` 不同，这一项属**对外契约口径**，随环境切换，因此放在这里而不是工作流定义里。
+    """
+
     # ------------------------------------------------------------ 外部服务
     auc_base_url: str = "https://openspeech.bytedance.com/api/v3/auc/bigmodel"
     """AUC 语音识别服务的基地址。
@@ -266,6 +280,7 @@ class Settings(BaseSettings):
         "llm_max_tokens",
         "api_port",
         "inbound_port",
+        "purchase_intent_level_passthrough",
         mode="before",
     )
     @classmethod

@@ -244,8 +244,12 @@ LEVEL_KEYS: tuple[str, ...] = ("deal_level", "business_opp_level")
 ``customer_overview.business_opp_level.value``）。基线 39 案里 **4 案**两者不一致，
 销售因此看到两个等级。L2 只保留一个。"""
 
-LEVEL_ORDER: tuple[str, ...] = ("A", "B", "C", "D")
-"""等级由高到低。冲突时取**证据更强者**，无法判定则取较高档并转 ``to_confirm``。"""
+LEVEL_ORDER: tuple[str, ...] = ("H", "A", "B", "C", "D", "待识别")
+"""商机等级由高到低。冲突时取**证据更强者**，无法判定则取较高档并转 ``to_confirm``。
+
+H/A/B/C/待识别 取自业务专家的《客户商机等级定级规范》；``D`` 仅保留给历史批次
+（旧口径「线索质量低」），新流程不再产出。
+"""
 
 AGE_PATTERN = re.compile(r"(\d{1,3})\s*[~—\-－至]\s*(\d{1,3})")
 AGE_OPEN_PATTERN = re.compile(r"(\d{1,3})\s*岁?\s*以上")
@@ -539,9 +543,19 @@ def normalize_age(value: Any) -> str | None:
 
 
 def normalize_level(value: Any) -> str | None:
-    """把等级归一到 ``A`` / ``B`` / ``C`` / ``D``。"""
+    """把商机等级归一到 ``H`` / ``A`` / ``B`` / ``C`` / ``D`` / ``待识别``。
+
+    「待识别」是规范里的独立结论（信息不足），**不是 C 级**，因此必须先于单字母
+    匹配判断——否则任何含「待」或「识」的串都会落到字母分支里被误读。
+    """
     text = _as_text(value).upper()
+    if not text:
+        return None
+    if "待识别" in text or "待定" in text or "未知" in text:
+        return "待识别"
     for level in LEVEL_ORDER:
+        if level == "待识别":
+            continue
         if text == level or text.startswith(level):
             return level
     return None

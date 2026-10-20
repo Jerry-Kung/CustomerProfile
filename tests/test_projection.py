@@ -433,7 +433,11 @@ def test_normalize_level_variants():
     assert proj.normalize_level("A") == "A"
     assert proj.normalize_level("b") == "B"
     assert proj.normalize_level("C级") == "C"
-    assert proj.normalize_level("未知") is None
+    assert proj.normalize_level("H") == "H"
+    assert proj.normalize_level("h级") == "H"
+    # 待识别是规范的独立结论，不是 C 级（R08）
+    assert proj.normalize_level("待识别") == "待识别"
+    assert proj.normalize_level("未知") == "待识别"
 
 
 def test_split_multi_handles_list_and_string():

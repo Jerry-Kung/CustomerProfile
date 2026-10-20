@@ -381,6 +381,23 @@ def assemble_l3(phone: str, batch_id: str, facts_json, notes_updates_json, expre
     for key in SECTION_KEYS:
         analysis_result.setdefault(key, [] if key in LIST_SECTIONS else {})
 
+    # ---- 商机等级由定级环节给定，表达层不得自行推断（v3.6）
+    # 等级的推理链是一次独立、足量的调用产出的；若让表达层按同一份 facts 再推一遍，
+    # 卡片上的等级与依据就会与 ``ai_insight`` 分叉——正是 production 时代的老毛病。
+    # 这里以定级结果**覆盖**表达层的 ``business_opp_level``。
+    from .. import projection as proj
+
+    level = proj.normalize_level(facts.get("deal_level"))
+    if level:
+        overview = analysis_result.get("customer_overview")
+        if not isinstance(overview, dict):
+            overview = {}
+        overview["business_opp_level"] = {
+            "value": level,
+            "reasoning_detail": _level_reasoning_detail(facts),
+        }
+        analysis_result["customer_overview"] = overview
+
     # ---- 拍扁 resistances 数组成一条文本，写进 Notes（v3.3 修复问题1）
     # resistances 一直存在于画像卡 analysis_result.resistances，但从未写进 Notes。
     # 现在把它补回来：把数组里的 resistance_name 拼成 "抗性1/抗性2" 格式。
@@ -437,6 +454,32 @@ LIST_SECTIONS: frozenset[str] = frozenset(
 )
 """数组形态的 section。其余是对象形态（``profile_summary`` / ``customer_overview`` /
 ``emotion_state``）——形状逐节对齐基线。"""
+
+
+def _level_reasoning_detail(facts: dict) -> dict[str, Any]:
+    """商机等级的 ``reasoning_detail``：定级环节给了就用它的，否则给保守兜底。"""
+    raw = facts.get("deal_level_detail")
+    if isinstance(raw, dict):
+        steps = [str(s) for s in (raw.get("steps") or []) if str(s).strip()]
+        evidence = [str(s) for s in (raw.get("evidence") or []) if str(s).strip()]
+        confidence = raw.get("confidence")
+        if not isinstance(confidence, (int, float)):
+            confidence = 0.6
+        return {
+            "summary": str(raw.get("summary") or "").strip(),
+            "steps": steps,
+            "evidence": evidence,
+            "confidence": max(0.0, min(1.0, float(confidence))),
+        }
+    from .. import projection as proj
+
+    level = proj.normalize_level(facts.get("deal_level")) or ""
+    return {
+        "summary": f"综合客户数据判定商机等级为{level}",
+        "steps": ["由商机定级环节依客户全部记录与已定稿事实得出"],
+        "evidence": [],
+        "confidence": 0.6,
+    }
 
 
 def _scan_new_facts(analysis_result: dict, facts: dict) -> list[dict]:

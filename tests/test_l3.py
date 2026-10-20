@@ -290,6 +290,45 @@ def test_assemble_shape_matches_baseline():
     assert set(payload["analysis_result"]) == set(l3.SECTION_KEYS) | {"basic_notes_updates"}
 
 
+def test_assemble_overrides_business_opp_level_with_the_dedicated_assessment():
+    """商机等级由定级环节给定，表达层自己写的一律被覆盖（v3.6）。
+
+    等级与其推理链是一次独立、足量的调用产出的；若让表达层按同一份 facts 再推一遍，
+    卡片与 ``ai_insight`` 就会出现两个说法。
+    """
+    facts = json.dumps(
+        {
+            "deal_level": "H",
+            "deal_level_detail": {
+                "summary": "条件已齐备",
+                "steps": ["已讨论订单与交付", "家属已同意"],
+                "evidence": ["明天来交定金"],
+                "confidence": 0.88,
+            },
+        },
+        ensure_ascii=False,
+    )
+    expr = json.dumps({"analysis_result": {
+        "customer_overview": {"business_opp_level": {"value": "C"}},
+    }}, ensure_ascii=False)
+    out = l3.assemble_l3("1", "", facts, notes_json(), expr)
+    overview = json.loads(out["result1"])["analysis_result"]["customer_overview"]
+    assert overview["business_opp_level"]["value"] == "H"
+    detail = overview["business_opp_level"]["reasoning_detail"]
+    assert detail["steps"] == ["已讨论订单与交付", "家属已同意"]
+    assert detail["confidence"] == 0.88
+
+
+def test_assemble_leaves_business_opp_level_alone_without_a_level():
+    """facts 里没有等级时不得凭空写一个——缺就是缺。"""
+    expr = json.dumps({"analysis_result": {
+        "customer_overview": {"business_opp_level": {"value": "A"}},
+    }}, ensure_ascii=False)
+    out = l3.assemble_l3("1", "", "{}", notes_json(), expr)
+    overview = json.loads(out["result1"])["analysis_result"]["customer_overview"]
+    assert overview["business_opp_level"] == {"value": "A"}
+
+
 def test_assemble_puts_notes_verbatim_into_analysis_result():
     """Notes 由代码装配（取自 L2），不经表达层转手——同源由此保证。"""
     notes = notes_json(
@@ -415,9 +454,19 @@ def test_pipeline_no_longer_carries_the_old_evidence_path():
 
 
 def test_pipeline_llm_nodes_are_l1_three_layers_and_l2_fallback():
-    """管线里 L1 是三层（事实 / 人设 / 分析投影）加 L2 兜底；成文段交给 L3 子流程。"""
+    """管线里 L1 是三层（事实 / 人设 / 分析投影）加 L2 兜底；成文段交给 L3 子流程。
+
+    v3.6 起多一个**独立定级**节点：商机等级对销售的重要程度断档领先，单开一次调用
+    拿全量原始数据与足量输出篇幅（业务方 2026-10-19 要求）。
+    """
     llm = sorted(n.node_id for n in pipe.WORKFLOW.nodes if n.node_type == "llm")
-    assert llm == [pipe.L1_FACTS, pipe.L1_FIELDS, pipe.L1_PERSONA, pipe.L2_FALLBACK]
+    assert llm == [
+        pipe.L1_FACTS,
+        pipe.L1_FIELDS,
+        pipe.L1_PERSONA,
+        pipe.L2_FALLBACK,
+        pipe.LEVEL_ASSESS,
+    ]
 
 
 def test_pipeline_end_reads_result1_from_the_callback_payload():

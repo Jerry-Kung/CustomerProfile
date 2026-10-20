@@ -143,14 +143,17 @@ INTERNAL_ENUM_SPECS: dict[str, dict[str, Any]] = {
         },
         "multiple_value": False,
     },
-    # 画像卡字段：``ai_insight.purchase_intent_level`` 只认 A/B/C/D 四个值。
+    # 画像卡字段：``ai_insight.purchase_intent_level``。取值按业务专家的
+    # 《客户商机等级定级规范》：H/A/B/C/待识别。``D`` 仅留给历史批次兼容。
     # 不给枚举定义，L1 会输出「高意向」「B级客户」之类的自由文本，归一失效后整项消失。
     "deal_level": {
         "items": {
+            "H": "H",
             "A": "A",
             "B": "B",
             "C": "C",
             "D": "D",
+            "待识别": "待识别",
         },
         "multiple_value": False,
     },
@@ -177,7 +180,7 @@ INTERNAL_FIELD_NAMES: dict[str, str] = {
     "emotion": "沟通风格",
     "communication_rhythm": "沟通节奏",
     "personality_and_preferences": "性格偏好",
-    "deal_level": "购车意向等级",
+    "deal_level": "商机等级",
 }
 """编外字段的中文名（L1《目标字段清单》渲染用；契约里已无 ``attribute_name`` 可读）。"""
 
@@ -221,9 +224,9 @@ INTERNAL_FIELD_DESCRIPTIONS: dict[str, str] = {
         "社交型关注排场、圈层；实用型关注性价比。"
     ),
     "deal_level": (
-        "判定客户的购车意向等级（A / B / C / D），供销售按等级排序跟进。"
-        "A＝近期明确要买；B＝有意向、时间窗较近；C＝在比较、暂无时间窗；D＝线索质量低。"
-        "综合购车时间窗、看车进度、预算明确度、竞品比对状态判定；无法判定时不输出该字段。"
+        "判定客户的商机等级（H / A / B / C / 待识别），衡量最终下单成交的概率等级，"
+        "供销售按等级排序跟进。**以系统定级环节的结果为准**：本字段在 L1 只作兜底，"
+        "无法判定时不输出。"
     ),
 }
 
