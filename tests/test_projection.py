@@ -26,7 +26,7 @@ def claim(attribute, value, channel="试驾录音信息", **kwargs):
 def test_snapshot_is_stable():
     """契约快照的规模是既定的：45 字段、7 分类、15 基础身份、17 单选 / 7 多选。
 
-    这组数字来自 v2 契约（``docs/Notes_new.txt``，payload 签名 ``b36e78edf9a2``），
+    这组数字来自 v2 契约（``docs/business_opt01_v3/Notes_new.txt``，payload 签名 ``b36e78edf9a2``），
     由 ``scripts/snapshot_note_contract.py --from-response`` 固化。相比上一版
     （47 字段 / 6 分类）：下线 17 个字段、新增 15 个、9 个同名改定义，
     并新增「地域与生活圈」分类。改动此处即改契约，须走评审。
@@ -604,6 +604,41 @@ def test_inferred_notes_never_quote_tier_labels():
     blob = json.dumps([u["reasoning_detail"] for u in result.notes_updates], ensure_ascii=False)
     assert "第三方预测" not in blob
     assert "0.9" not in blob
+
+
+# ---------------------------------------------------------------- 收入档位换算
+
+def test_income_band_maps_to_range_in_facts_and_notes():
+    """第三方「N档收入」进 facts 与 Notes 时都是金额区间，不是档位原文。"""
+    result = proj.project(
+        [claim("annual_income", "5档收入", channel="第三方画像数据", basis="inferred_high",
+               basis_of_inference=("第三方预测收入水平",))]
+    )
+    assert result.facts["annual_income"] == "40-60万"
+    note = next(u for u in result.notes_updates if u["attribute_key"] == "annual_income")
+    assert note["attribute_value"] == "40-60万"
+    assert "档收入" not in note["attribute_value"]
+
+
+def test_all_six_income_bands_have_ranges():
+    expected = {"1档收入": "8-15万", "2档收入": "10-20万", "3档收入": "20-30万",
+                "4档收入": "30-40万", "5档收入": "40-60万", "6档收入": "60万以上"}
+    for band, rng in expected.items():
+        assert proj.normalize_income(band) == rng
+
+
+def test_income_amounts_are_not_rewritten():
+    """客户自述或模型推断的金额不是档位，必须原样透传。"""
+    for value in ("30-50万", "10-20万", "8w-15w", "60万以上"):
+        assert proj.normalize_income(value) is None
+    result = proj.project([claim("annual_income", "30-50万", basis="inferred_high",
+                                 basis_of_inference=("关注 30 万以上车型",))])
+    assert result.facts["annual_income"] == "30-50万"
+
+
+def test_income_band_is_normalized_in_serialized_output():
+    """L2 兜底给的档位原文也在出口收口（它不经过 ``project()`` 的落值分支）。"""
+    assert proj.serialize_value("annual_income", "4档收入") == "30-40万"
 
 
 # ---------------------------------------------------------------- R2 缺字段候选

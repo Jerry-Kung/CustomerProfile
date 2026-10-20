@@ -559,6 +559,39 @@ def normalize_age(value: Any) -> str | None:
     return None
 
 
+INCOME_BAND_RANGES: dict[str, str] = {
+    "1": "8-15万",
+    "2": "10-20万",
+    "3": "20-30万",
+    "4": "30-40万",
+    "5": "40-60万",
+    "6": "60万以上",
+}
+"""第三方「预测收入水平」档位 → 年收入区间（业务专家口径，2026-10-20）。
+
+第三方标签只给 ``1档收入`` … ``6档收入`` 这样的档位，销售要的是具体金额。换算口径
+与档位的升降序均由业务方确认：1 档最低、6 档最高，切点如上表。映射只认档位原文，
+客户自己说的金额（``30-50万``）原样透传，不得被改写。
+"""
+
+_INCOME_BAND_PATTERN = re.compile(r"(?:第\s*)?([1-6])\s*档")
+
+
+def normalize_income(value: Any) -> str | None:
+    """把第三方收入档位换成区间数值；不是档位形态的取值返回 ``None``。
+
+    ``None`` 表示「这条取值本来就不是档位」，调用方应保留原值——推断出来的金额、
+    客户自述的金额都不是档位，不能被这张表吞掉。
+    """
+    text = _as_text(value)
+    if not text:
+        return None
+    matched = _INCOME_BAND_PATTERN.search(text)
+    if not matched:
+        return None
+    return INCOME_BAND_RANGES[matched.group(1)]
+
+
 def normalize_level(value: Any) -> str | None:
     """把商机等级归一到 ``H`` / ``A`` / ``B`` / ``C`` / ``D`` / ``待识别``。
 
@@ -876,7 +909,13 @@ def project(
                 )
             result.facts[attribute] = normalized[0] if inf.is_single_value(attribute) else normalized
         else:
-            result.facts[attribute] = values[0] if len(values) == 1 else values
+            chosen = values[0] if len(values) == 1 else values
+            # 第三方收入档位（`N档收入`）在**事实层**就换成金额区间：下游分析、
+            # 卡片、Notes 全读 facts，晚换一处就有一处会漏出「5档收入」。
+            # 非档位形态（客户自述金额、推断金额）原样保留。
+            if attribute == "annual_income" and not isinstance(chosen, (list, tuple)):
+                chosen = normalize_income(chosen) or chosen
+            result.facts[attribute] = chosen
 
     # ---- f 跨字段规则
     _apply_cross_field_rules(result, context)
@@ -1020,6 +1059,10 @@ def serialize_value(attribute: str, value: Any) -> str:
     ``driver_license_status`` 写成字典，而基线同字段是字符串。这是**下游契约违约**，
     与「枚举键填中文」同一性质，故在 L2 出口统一收口，不指望模型自觉。
     """
+    if attribute == "annual_income" and not isinstance(value, (Mapping, list, tuple)):
+        # 兜一层：事实层已换算过，但 L2 兜底的候选值与终判可能仍是档位原文，
+        # 它们不经过 ``project()`` 的落值分支，只在这里收口。
+        value = normalize_income(value) or value
     if isinstance(value, Mapping) or (
         isinstance(value, (list, tuple))
         and any(isinstance(item, Mapping) for item in value)
