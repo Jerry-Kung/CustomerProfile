@@ -2,6 +2,24 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-10-20 — AB 实验文档随批次移入 experiments/docs
+
+`AB实验.md` 讲的是两臂跑批对照，与部署运行环境的日常操作无关，已从 `docs/runbooks/`
+移到 `experiments/docs/`。`experiments/*` 仍整体忽略（批次产物约 600 MB/批），只对
+`experiments/docs/` 开例外——用 `experiments/*` + `!experiments/docs/` 而不是
+`experiments/`，因为父目录被排除后内部文件无法再被 `!` 纳入。
+
+`runbooks/` 因此只剩部署、故障定位、基线实验、内网取数四类可重复执行的操作；
+`experiments/README.md`、两份设计文档、`tests/test_pipeline_l1.py` 与归档文档中的引用同步改路径。
+
+## 2026-10-20 — runbooks 只保留可执行的操作知识
+
+`docs/runbooks/` 混进了两份记录性质的内容：《跑批可靠性》（缺陷分析 + 改进清单）与
+《v3.3-可靠性改进》（实施记录 + 验证清单）。它们回答的是「过去发生了什么」，不是
+「现在该怎么做」，已移入 `docs/history/`（`docs/history/跑批可靠性-分析与改进清单.md`、
+`docs/history/v3.3-可靠性改进-实施记录.md`），文内相对链接同步修正。新增 `runbooks/README.md`
+写明收录标准，避免同类内容再次回流。
+
 ## 2026-10-20 — 内网取数：留痕库按需快照
 
 UAT 部署在内网，运行台不可达。新增 `scripts/export_snapshot.py`，在 UAT 侧按时间窗与
