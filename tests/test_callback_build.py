@@ -153,7 +153,7 @@ def test_basic_notes_updates_keeps_reasoning_detail_shape():
 # ---------------------------------------------------------------- ai_insight
 
 def test_purchase_intent_level_is_normalized_without_the_suffix():
-    """意向等级取自 ``deal_level`` 并归一到 ``A``/``B``/``C``/``D``，**不含「级」字**。"""
+    """意向等级取自 ``deal_level`` 并归一，**不含「级」字**；取值按定级规范原样回传。"""
     value = _build(facts=_facts(deal_level="C级"))["analysis_result"]["ai_insight"]
     assert value["purchase_intent_level"]["value"] == "C"
 

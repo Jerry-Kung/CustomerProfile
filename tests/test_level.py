@@ -54,15 +54,16 @@ def _assess(**overrides):
         "confidence": 0.8,
         "time_window": "14天内",
         "dimensions": {
-            "want_to_buy": {"value": "换车接送孩子", "evidence": ["想换一台大空间的车接送"]},
+            "want_to_buy": {
+                "value": "换车接送孩子",
+                "evidence": ["企业微信里客户说孩子九月上小学，想换一台大空间的车接送"],
+            },
             "can_to_buy": {"value": "预算基本匹配", "evidence": []},
             "when_to_buy": {"value": "九月前要买", "evidence": []},
         },
-        "homework_evidence": ["客户试驾后说底盘挺稳"],
-        "obstacles": [],
+        "homework_evidence": ["客户已到店试驾并给出正向反馈，属于实质推进动作"],
         "steps": ["换车起因是孩子上学", "已试驾并给出正向反馈", "时间窗口明确"],
         "summary": "需求明确、已试驾，预计两周内可推进",
-        "next_action": "约家属二次到店并出报价",
     }
     base.update(overrides)
     return json.dumps(base, ensure_ascii=False)
@@ -127,7 +128,7 @@ def test_apply_level_writes_level_detail_and_stage():
     assert facts["business_opp_stage"] == "转商机阶段"
     detail = facts["deal_level_detail"]
     assert set(detail) == {"summary", "steps", "evidence", "confidence"}
-    assert detail["steps"][-1].startswith("下一步建议：")
+    assert detail["steps"]
     assert detail["evidence"]
 
 
@@ -172,11 +173,14 @@ def test_lead_stage_caps_h_at_a():
         level="H",
         stage="lead",
         dimensions={
-            "want_to_buy": {"value": "换车接送孩子", "evidence": ["想换一台大空间的车接送"]},
+            "want_to_buy": {
+                "value": "换车接送孩子",
+                "evidence": ["企业微信里客户说孩子九月上小学，想换一台大空间的车接送"],
+            },
             "can_to_buy": {"value": "预算基本匹配", "evidence": []},
             "when_to_buy": {"value": "九月前要买", "evidence": []},
         },
-        homework_evidence=["想换一台大空间的车接送"],
+        homework_evidence=["企业微信里客户明确说九月前就要提车，时间与动作都很具体"],
     )
     out = pipe.apply_level(LEAD_RECORDS, "{}", assess, stage=pipe.LEVEL_STAGE_LEAD)
     assert json.loads(out["facts_json"])["deal_level"] == "A"
@@ -205,55 +209,89 @@ def test_h_with_full_evidence_survives():
     assert out["rule_clamped"] == ""
 
 
-def test_evidence_that_cannot_be_located_is_dropped():
-    """证据必须能回定位到原文；定位不到的剔除，不可能出现在卡片上。"""
+def test_half_sentence_evidence_fragments_are_removed():
+    """证据改为可读化陈述后，半句对白类的碎片被剔除并留痕（读性优先，不再逐字核对）。"""
     out = pipe.apply_level(
         OPPORTUNITY_RECORDS,
         "{}",
         _assess(dimensions={
-            "want_to_buy": {"value": "换车", "evidence": ["客户说要把旧车卖了换新的"]},
+            "want_to_buy": {
+                "value": "换车接送孩子",
+                "evidence": ["家用啊，没有，真够啊。", "客户提到孩子九月上学，想换大空间的车接送"],
+            },
             "can_to_buy": {"value": "", "evidence": []},
             "when_to_buy": {"value": "", "evidence": []},
         }),
         stage=pipe.LEVEL_STAGE_OPPORTUNITY,
     )
-    assert out["evidence_dropped"] == 1
+    assert out["evidence_fragments_removed"] == 1
     detail = json.loads(out["facts_json"])["deal_level_detail"]
-    assert "客户说要把旧车卖了换新的" not in detail["evidence"]
+    assert "家用啊，没有，真够啊。" not in detail["evidence"]
 
 
-def test_obstacles_and_next_action_are_written_for_sales():
-    """规范 §7.1 要求输出关键障碍与下一步建议，二者进推理链末尾。"""
+def test_readable_evidence_not_present_verbatim_in_records_is_kept():
+    """可读化证据本就不会逐字出现在原文里——这正是本轮要放行的情况，不能再被删。"""
     out = pipe.apply_level(
         OPPORTUNITY_RECORDS,
         "{}",
-        _assess(obstacles=[{"name": "家属未到店", "solvable_in_window": True,
-                            "evidence": []}]),
+        _assess(
+            dimensions={
+                "want_to_buy": {
+                    "value": "换车接送孩子",
+                    "evidence": ["经分析该客户大概率是为接送孩子换车，需求真实"],
+                },
+                "can_to_buy": {"value": "预算基本匹配", "evidence": []},
+                "when_to_buy": {"value": "九月前要买", "evidence": []},
+            },
+        ),
+        stage=pipe.LEVEL_STAGE_OPPORTUNITY,
+    )
+    assert out["evidence_fragments_removed"] == 0
+    detail = json.loads(out["facts_json"])["deal_level_detail"]
+    assert "经分析该客户大概率是为接送孩子换车，需求真实" in detail["evidence"]
+
+
+def test_obstacles_and_next_action_are_not_written_into_the_reasoning_chain():
+    """推理链只讲等级怎么定出来的：即便模型多给了障碍与建议，也不得拼进 steps。"""
+    out = pipe.apply_level(
+        OPPORTUNITY_RECORDS,
+        "{}",
+        _assess(
+            obstacles=[{"name": "家属未到店", "solvable_in_window": True, "evidence": []}],
+            next_action="约家属二次到店并出报价",
+        ),
         stage=pipe.LEVEL_STAGE_OPPORTUNITY,
     )
     steps = json.loads(out["facts_json"])["deal_level_detail"]["steps"]
-    assert any("关键障碍：家属未到店" in s for s in steps)
-    assert any(s.startswith("下一步建议：") for s in steps)
+    assert not any("关键障碍" in s for s in steps)
+    assert not any("下一步建议" in s for s in steps)
 
 
-# ---------------------------------------------------------------- 过渡回传映射（L-008）
+def test_long_reasoning_chain_is_capped_at_eight():
+    """推理链上限 8 条：模型写长时截断，保留它自己的优先级顺序。"""
+    steps = [f"第{i}条：客户需求与时间窗口分析" for i in range(1, 13)]
+    out = pipe.apply_level(
+        OPPORTUNITY_RECORDS, "{}", _assess(steps=steps),
+        stage=pipe.LEVEL_STAGE_OPPORTUNITY,
+    )
+    kept = json.loads(out["facts_json"])["deal_level_detail"]["steps"]
+    assert len(kept) == pipe.LEVEL_STEP_LIMIT
+    assert kept == steps[: pipe.LEVEL_STEP_LIMIT]
 
-def test_contract_level_transition_mode_maps_h_and_drops_pending():
-    """过渡态：H→A；待识别不回传（不是 C 级）；旧 D→C。"""
-    assert cb.contract_level("H", passthrough=False) == "A"
-    assert cb.contract_level("待识别", passthrough=False) is None
-    assert cb.contract_level("D", passthrough=False) == "C"
-    assert cb.contract_level("A", passthrough=False) == "A"
 
+# ---------------------------------------------------------------- 回传取值（L-008 已解除）
 
-def test_contract_level_passthrough_returns_internal_values():
-    """切回模式：五值原样透传，前端整改完成后改配置即可，无需改代码。"""
+def test_ai_insight_passes_internal_levels_through_verbatim():
+    """回传照原样给 H/A/B/C/待识别——前端是文本字段，不做过渡映射（L-008 2026-10-20）。"""
     for level in ("H", "A", "B", "C", "待识别"):
-        assert cb.contract_level(level, passthrough=True) == level
+        facts = json.dumps({"deal_level": level}, ensure_ascii=False)
+        payload = json.loads(cb.build_analysis_result("13500000000", "b1", facts))
+        item = payload["analysis_result"]["ai_insight"]["purchase_intent_level"]
+        assert item["value"] == level
 
 
-def test_transition_mode_explains_the_h_to_a_display():
-    """H 映射为 A 时，推理链末尾要说明展示口径——不能出现「值 A、依据写 H」的矛盾。"""
+def test_ai_insight_does_not_explain_a_mapping_that_no_longer_happens():
+    """撤掉过渡映射后，推理链里不应再出现「显示为 A / 内部定级为 H」这类补丁说明。"""
     facts = json.dumps(
         {
             "deal_level": "H",
@@ -268,8 +306,8 @@ def test_transition_mode_explains_the_h_to_a_display():
     )
     payload = json.loads(cb.build_analysis_result("13500000000", "b1", facts))
     item = payload["analysis_result"]["ai_insight"]["purchase_intent_level"]
-    assert item["value"] == "A"
-    assert any("内部定级为 H" in s for s in item["reasoning_detail"]["steps"])
+    assert item["value"] == "H"
+    assert item["reasoning_detail"]["steps"] == ["已讨论订单与交付"]
 
 
 def test_ai_insight_prefers_the_dedicated_level_detail():
@@ -293,29 +331,9 @@ def test_ai_insight_prefers_the_dedicated_level_detail():
     assert detail["evidence"] == ["想换一台大空间的车接送"]
 
 
-def test_pending_level_is_omitted_in_transition_mode(monkeypatch):
-    """待识别在过渡态不回传：前端留空，而不是显示成 C。"""
-    from customer_profile import settings
-
-    monkeypatch.setenv("PURCHASE_INTENT_LEVEL_PASSTHROUGH", "false")
-    settings.get_settings.cache_clear()
-    try:
-        facts = json.dumps({"deal_level": "待识别"}, ensure_ascii=False)
-        payload = json.loads(cb.build_analysis_result("13500000000", "b1", facts))
-        assert "ai_insight" not in payload["analysis_result"]
-    finally:
-        settings.get_settings.cache_clear()
-
-
-def test_pending_level_passes_through_when_enabled(monkeypatch):
-    from customer_profile import settings
-
-    monkeypatch.setenv("PURCHASE_INTENT_LEVEL_PASSTHROUGH", "true")
-    settings.get_settings.cache_clear()
-    try:
-        facts = json.dumps({"deal_level": "待识别"}, ensure_ascii=False)
-        payload = json.loads(cb.build_analysis_result("13500000000", "b1", facts))
-        item = payload["analysis_result"]["ai_insight"]["purchase_intent_level"]
-        assert item["value"] == "待识别"
-    finally:
-        settings.get_settings.cache_clear()
+def test_pending_level_is_returned_as_is():
+    """待识别原样回传（R08：信息不足 ≠ 低意向，不得改写或丢弃）。"""
+    facts = json.dumps({"deal_level": "待识别"}, ensure_ascii=False)
+    payload = json.loads(cb.build_analysis_result("13500000000", "b1", facts))
+    item = payload["analysis_result"]["ai_insight"]["purchase_intent_level"]
+    assert item["value"] == "待识别"

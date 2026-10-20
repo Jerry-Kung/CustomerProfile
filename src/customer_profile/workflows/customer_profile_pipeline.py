@@ -2035,12 +2035,27 @@ def build_level_input(records_json, facts_json="{}", claims_json="{}") -> dict:
     }
 
 
-def _level_evidence_locatable(evidence: str, contents: list[str]) -> bool:
-    """一条证据能否在原始记录里定位到（忽略空白与 Markdown 标记）。"""
+LEVEL_STEP_LIMIT = 8
+"""推理链上限（用户 2026-10-20 口径：5–8 条，只讲等级怎么定出来的）。
+
+提示词已要求精简，这里再兜一道：模型偶尔仍然写长，超出即截断前 8 条——
+保留模型自己的优先级顺序，不改写内容。
+"""
+
+LEVEL_EVIDENCE_MIN_CHARS = 12
+"""证据最短长度。短于此的视为「半句对白」碎片剔除（证据已改为可读化陈述，见模板第五节）。"""
+
+
+def _level_evidence_readable(evidence: str) -> bool:
+    """证据是否像一条可独立阅读的陈述——只挡碎片，不再核对逐字原文。
+
+    **口径变化（2026-10-20）**：此前要求证据逐字出现在原始记录里，后果是外呼录音
+    等 ASR 渠道只剩「家用啊，没有，真够啊。」这类碎片，读者看不出它证明了什么。
+    现按用户要求以可读性优先，证据改为「出处 + 信号 + 指向」的整合陈述，代价是放弃
+    逐字定位。这里只做最轻的一道守卫：过短即碎片。
+    """
     text = str(evidence or "").strip()
-    if not text:
-        return False
-    return any(_locate(content, text) is not None for content in contents)
+    return len(text) >= LEVEL_EVIDENCE_MIN_CHARS
 
 
 def _as_list(value) -> list:
@@ -2054,21 +2069,21 @@ def _as_list(value) -> list:
 def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
     """定级收口（纯代码，0 token）：把模型结论变成可回传的 facts。
 
-    四道收口，每道都对应规范里一条可机器判定的硬规则：
+    三道收口，每道都对应规范里一条可机器判定的硬规则：
 
     1. **枚举归一**：只认 ``H`` / ``A`` / ``B`` / ``C`` / 待识别；非法值回落 L1 原等级
        （L1 也没有就留空），不把自由文本写进 facts。
     2. **阶段上限（R04）**：阶段由代码判定，线索邀约阶段最高 ``A``，``H`` 强制降级。
-    3. **证据门槛（R05）**：``H`` / ``A`` 必须同时具备需求、时间、行动三类**可定位**证据，
+    3. **证据门槛（R05）**：``H`` / ``A`` 必须同时具备需求、时间、行动三类证据，
        缺任一类降为 ``B``。
-    4. **原文定位**：每条证据回定位到客户记录，定位不到的剔除并按条扣置信度；
-       证据位因此不可能是模型自造的句子。
+
+    证据只做「碎片剔除 + 去重」，**不再回原文逐字核对**（读性优先，见
+    :func:`_level_evidence_readable`）。推理链截断到 :data:`LEVEL_STEP_LIMIT` 条，
+    且只讲定级本身——关键障碍与下一步建议不再拼进推理链（它们是跟进事项，不是等级依据）。
 
     解析失败时**不覆盖原等级**：保留 L1 的兜底值并留痕（``parse_ok=False``），
     而不是把一次失败的调用伪装成「客户被评成了待识别」。
     """
-    records = _records_of(records_json)
-    contents = [str(r.get("content") or "") for r in records if (r.get("content") or "").strip()]
     stage_code = str(stage or "").strip()
     if stage_code not in LEVEL_STAGE_LABEL:
         stage_code = level_stage(records_json)["stage"]
@@ -2082,7 +2097,7 @@ def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
             "level_detail_json": "{}",
             "stage": stage_code,
             "rule_clamped": "",
-            "evidence_dropped": 0,
+            "evidence_fragments_removed": 0,
             "parse_ok": False,
         }
 
@@ -2099,7 +2114,7 @@ def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
             "level_detail_json": "{}",
             "stage": stage_code,
             "rule_clamped": "invalid_level",
-            "evidence_dropped": 0,
+            "evidence_fragments_removed": 0,
             "parse_ok": True,
         }
 
@@ -2108,22 +2123,21 @@ def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
         level = "A"
         clamped = "lead_stage_caps_at_A"
 
-    # ---- 4 证据定位（先做，R05 据此判「有没有可用证据」）
-    dropped = 0
-    kept_evidence: list[str] = []
+    # ---- 证据清洗：碎片剔除 + 去重（不回原文核对）
+    removed = 0
 
     def _clean(items) -> list[str]:
-        nonlocal dropped
+        nonlocal removed
         out: list[str] = []
         for item in _as_list(items):
             text = str(item or "").strip()
             if not text:
                 continue
-            if _level_evidence_locatable(text, contents):
-                if text not in out:
-                    out.append(text)
-            else:
-                dropped += 1
+            if not _level_evidence_readable(text):
+                removed += 1
+                continue
+            if text not in out:
+                out.append(text)
         return out
 
     dimensions = assess.get("dimensions") if isinstance(assess.get("dimensions"), dict) else {}
@@ -2133,20 +2147,9 @@ def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
         dim_evidence[key] = _clean(entry.get("evidence"))
 
     homework = _clean(assess.get("homework_evidence"))
-    obstacles: list[dict] = []
-    for item in _as_list(assess.get("obstacles")):
-        if not isinstance(item, dict):
-            continue
-        obstacles.append(
-            {
-                "name": str(item.get("name") or "").strip(),
-                "solvable_in_window": bool(item.get("solvable_in_window")),
-                "evidence": _clean(item.get("evidence")),
-            }
-        )
     steps = [str(s).strip() for s in _as_list(assess.get("steps")) if str(s).strip()]
 
-    # ---- 3 证据门槛（R05）：H/A 必须同时具备需求、时间、行动三类可定位证据
+    # ---- 3 证据门槛（R05）：H/A 必须同时具备需求、时间、行动三类证据
     if level in ("H", "A"):
         has_demand = bool(dim_evidence.get("want_to_buy"))
         has_time = bool(dim_evidence.get("when_to_buy")) or bool(
@@ -2162,7 +2165,7 @@ def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
         confidence = float(confidence)
     except (TypeError, ValueError):
         confidence = 0.6
-    confidence = max(0.0, min(1.0, confidence - min(0.3, 0.15 * dropped)))
+    confidence = max(0.0, min(1.0, confidence))
 
     all_evidence: list[str] = []
     for key in ("want_to_buy", "can_to_buy", "when_to_buy"):
@@ -2173,26 +2176,13 @@ def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
         if item not in all_evidence:
             all_evidence.append(item)
 
-    # ---- 面向销售的结论：推理链 + 关键障碍 + 下一步建议（规范 §7.1 五项输出）
-    readable_steps = list(steps[:20])
-    obstacle_text = "；".join(
-        f"{o['name']}（{'目标窗口内可解决' if o['solvable_in_window'] else '短期难解决'}）"
-        for o in obstacles
-        if o["name"]
-    )
-    if obstacle_text:
-        readable_steps.append(f"关键障碍：{obstacle_text}")
-    next_action = str(assess.get("next_action") or "").strip()
-    if next_action:
-        readable_steps.append(f"下一步建议：{next_action}")
-
     summary = str(assess.get("summary") or "").strip()
     if not summary:
         summary = f"综合客户数据，判定商机等级为{level}"
 
     detail = {
         "summary": summary,
-        "steps": readable_steps,
+        "steps": steps[:LEVEL_STEP_LIMIT],
         "evidence": all_evidence[:12],
         "confidence": round(confidence, 2),
     }
@@ -2207,7 +2197,7 @@ def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
         "level_detail_json": json.dumps(detail, ensure_ascii=False, default=str),
         "stage": stage_code,
         "rule_clamped": clamped,
-        "evidence_dropped": dropped,
+        "evidence_fragments_removed": removed,
         "parse_ok": True,
     }
 
@@ -2730,7 +2720,7 @@ WORKFLOW = WorkflowDef(
                 "level_detail_json",
                 "stage",
                 "rule_clamped",
-                "evidence_dropped",
+                "evidence_fragments_removed",
                 "parse_ok",
             ),
             function=f"customer_profile.workflows.{SLUG}:apply_level",

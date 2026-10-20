@@ -417,60 +417,24 @@ def _level_detail(view: _FactView) -> dict[str, Any]:
     return view.detail("deal_level", "business_opp_level")
 
 
-def contract_level(level: str | None, *, passthrough: bool) -> str | None:
-    """把内部商机等级映射到回传契约接受的取值。
-
-    **这是过渡口径，不是业务口径**（见 ``docs/遗留问题清单.md`` L-008）：
-    契约当前只认 ``A`` / ``B`` / ``C`` / ``D``，而定级规范产出 ``H`` / ``A`` / ``B`` / ``C`` / 待识别。
-
-    - ``passthrough=False``（缺省）：``H`` → ``A``（7 天档在契约里没有位置，损失的是紧迫度，
-      不是意向强度）；``待识别`` → ``None``（**不回传该项**，前端留空，而不是被误读成 C 级）。
-    - ``passthrough=True``：原样透传。后端与前端支持五值后改配置即可切回，无需改代码。
-    """
-    if not level:
-        return None
-    if passthrough:
-        return level
-    if level == "H":
-        return "A"
-    if level == "待识别":
-        return None
-    if level == "D":
-        # 旧口径的 D 是「线索质量低」，新契约没有这一档，按 C 回传。
-        return "C"
-    return level
-
-
 def build_ai_insight(view: _FactView, express: Mapping[str, Any]) -> dict[str, Any]:
     """``ai_insight``：意向等级 + 客户群标签，两项都是 ``{value, reasoning_detail}``。
 
-    - ``purchase_intent_level``：取 facts 的 ``deal_level``，经
-      :func:`contract_level` 映射到契约取值（过渡期 ``H``→``A``、待识别不回传）；
+    - ``purchase_intent_level``：取 facts 的 ``deal_level`` 并归一，**按定级规范原样回传**
+      ``H`` / ``A`` / ``B`` / ``C`` / 待识别（前端答复该字段是文本字段，非 ABCD 纯枚举，
+      2026-10-20 撤掉过渡映射，见 L-008）；
     - ``customer_segment``：取表达层自由生成的 ``overall_tag``。本轮不约束取值口径
       （L-001，待业务方给人群标签字典），但**必须**带 ``reasoning_detail``——
       没有它的值在前端就是个不可点击的死值。
     """
     from . import projection as proj
-    from .settings import get_settings
 
     insight: dict[str, Any] = {}
     level = proj.normalize_level(view.raw("deal_level"))
-    mapped = contract_level(
-        level, passthrough=get_settings().purchase_intent_level_passthrough
-    )
-    if mapped:
-        detail = _level_detail(view)
-        # 过渡态把 H 映射为 A 时，推理链里可能仍写着 H。不解释一句，销售会看到
-        # 「等级 A、依据写 H」的自相矛盾——补一条展示口径说明，而不是去改写推理链。
-        if level and mapped != level:
-            detail = dict(detail)
-            detail["steps"] = list(detail.get("steps") or []) + [
-                f"按当前画像列表的展示口径，该等级显示为 {mapped}；"
-                f"内部定级为 {level}（更高一档，紧迫度更强）"
-            ]
+    if level:
         insight["purchase_intent_level"] = {
-            "value": mapped,
-            "reasoning_detail": detail,
+            "value": level,
+            "reasoning_detail": _level_detail(view),
         }
 
     segment = _as_text(_section_text(express, "overall_tag"))
