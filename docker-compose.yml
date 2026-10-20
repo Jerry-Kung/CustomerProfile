@@ -1,0 +1,82 @@
+# Customer Profile —— 三进程部署
+#
+#     cp .env.example .env     # 填入真实端点与凭据
+#     docker compose up -d --build
+#     docker compose ps
+#     docker compose logs -f worker
+#
+# 三个服务共用同一个镜像与同一个 SQLite 文件：命名卷 cp-data 挂到容器内 /app/data。
+# 命名卷落在本机磁盘上，满足「SQLite 不可放网络挂载」这条硬约束（见 docs/architecture.md §7）。
+#
+# 配置来自仓库根目录的 .env（被 gitignore）。compose 的 env_file 只是把它注入容器环境，
+# 与 settings.py 自己读 .env 的取值一致；下面的 environment 只覆盖随部署形态变化的几项。
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: customer-profile:latest
+  env_file:
+    - .env
+  volumes:
+    - cp-data:/app/data
+  restart: unless-stopped
+  # 让容器内的 PID 1 交给 tini：uvicorn 与 worker 都靠信号优雅停机，
+  # 由 shell 当 PID 1 会让信号转发不可靠。
+  init: true
+
+services:
+  api:
+    <<: *app
+    command: ["python", "-m", "customer_profile.main"]
+    environment:
+      # 构建产物已随镜像带进去，运行台开箱可用（.env 里缺省是 false）。
+      SERVE_UI: "true"
+      # API 只提交与查询，执行交给下面的 worker 服务，避免两个消费者抢同一队列。
+      INLINE_WORKER: "false"
+      # 与 inbound 同样强制关掉：本进程不跑工作流，却会按「上次进程遗留的 running」
+      # 把自己那边看不见的运行标成 interrupted——那是 **worker 正在跑的**任务。
+      # API 会重启（restart: unless-stopped），一次重启就会打断在飞运行。
+      # 崩溃恢复由 worker 自己做（worker.py 的启动恢复）。
+      INTERRUPT_ON_START: "false"
+    ports:
+      # 端口取自 .env 的 API_PORT（缺省 18173），容器内监听同一个值。
+      # 8000 曾是缺省值，但那是各框架的开发端口，部署机上常被别的服务占用；
+      # 那时只能改代码，现在改 .env 即可：API_PORT=xxxx 后 docker compose up -d。
+      - "${API_PORT:-18173}:${API_PORT:-18173}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${API_PORT:-18173}/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # 停机要等在飞运行收敛（最长 60s），低于这个值会被 SIGKILL。
+    stop_grace_period: 90s
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "customer_profile.worker"]
+    # worker 不监听端口，也没有可探的 HTTP 端点，因此不配 healthcheck；
+    # `docker compose ps` 的 State 与日志即其存活判据。
+    #
+    # 停机要等**在飞运行自然结束**：一次画像约 21 分钟，默认的 10 秒宽限会把它砍断，
+    # 留下需要人工处理的 interrupted 运行（见 docs/runbooks/部署.md §5）。
+    stop_grace_period: 30m
+
+  inbound:
+    <<: *app
+    command: ["python", "-m", "customer_profile.inbound"]
+    ports:
+      # 对外写面，强制密钥鉴权（未配 INBOUND_API_KEY 时整体 503）。
+      # 若这台机器直接对公网，请改成只绑内网，例如 "10.0.0.5:8099:8099"。
+      - "8099:8099"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8099/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 30s
+
+volumes:
+  cp-data:

@@ -116,6 +116,62 @@ async def test_submit_returns_run_id(client):
     assert body["workflow_id"] == hci.WORKFLOW_ID
 
 
+async def test_entry_submit_without_batch_id_gets_default(client):
+    """主入口不传 ``batch_id`` 时补 ``batch_001``。
+
+    回归用：``start`` 节点把 ``batch_id`` 声明为可选（``required_batch_id=False``），
+    但执行器只输出「声明了且传了」的字段，不传时下游取
+    ``(START, "batch_id")`` 直接 KeyError——照着 README 的 curl 示例只传手机号，
+    运行会在 ``pipeline_production`` 节点失败，而提交本身返回 200。
+    这里断言**落库的入参**已补齐，执行结果不在本用例范围内。
+    """
+    run_id = (
+        await client.post(
+            "/runs",
+            json={
+                "workflow_id": "customer_profile_pipeline",
+                "inputs": {"phone_number": "13800000001"},
+            },
+        )
+    ).json()["run_id"]
+
+    detail = (await client.get(f"/runs/{run_id}")).json()
+    assert detail["inputs"]["batch_id"] == "batch_001"
+    assert detail["inputs"]["phone_number"] == "13800000001"
+
+
+async def test_entry_submit_blank_batch_id_gets_default(client):
+    """传空白串与不传同义：补缺省批次号，而不是把空串带进回传体。"""
+    run_id = (
+        await client.post(
+            "/runs",
+            json={
+                "workflow_id": "customer_profile_pipeline",
+                "inputs": {"phone_number": "13800000001", "batch_id": "   "},
+            },
+        )
+    ).json()["run_id"]
+
+    detail = (await client.get(f"/runs/{run_id}")).json()
+    assert detail["inputs"]["batch_id"] == "batch_001"
+
+
+async def test_entry_submit_explicit_batch_id_is_kept(client):
+    """显式给的批次号原样保留——它会被填进回传体，前端据此判断任务来源。"""
+    run_id = (
+        await client.post(
+            "/runs",
+            json={
+                "workflow_id": "customer_profile_pipeline",
+                "inputs": {"phone_number": "13800000001", "batch_id": "batch-20261016-01"},
+            },
+        )
+    ).json()["run_id"]
+
+    detail = (await client.get(f"/runs/{run_id}")).json()
+    assert detail["inputs"]["batch_id"] == "batch-20261016-01"
+
+
 async def test_submitted_run_is_queryable_by_run_id(client):
     """任务先落库再返回 run_id，因此拿到 ID 就能查到。"""
     run_id = (

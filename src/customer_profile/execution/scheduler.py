@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
@@ -29,6 +30,20 @@ from .executors import (
     NodeRuntime,
     normalise_outcome,
 )
+
+
+CURRENT_CALL_PATH: ContextVar[str] = ContextVar("current_call_path", default="")
+"""当前正在执行的节点的调用路径。
+
+循环体节点要把自己的路径拼成 ``<基路径>/iter:<迭代节点>/<轮次>``，而基路径就是
+**它所属那次执行**的路径。这个值过去存在 ``_RunRecord.call_path`` 上——那是整个运行
+共用的一份句柄，运行内各节点又是并发的，于是循环体覆盖它的那段时间里，同时结束的
+兄弟节点会读到别人的路径，把自己的终态写进另一条调用路径（详见
+``docs/design/提交臂切换与极光节点卡死修复方案.md``）。
+
+改用 ``ContextVar``：每个 ``asyncio.Task`` 在创建时各自复制一份上下文，因此同一个
+运行里并发跑的节点互不可见，而循环体（在迭代节点那个 task 内被 await）能读到它。
+"""
 
 
 @dataclass(slots=True)
@@ -90,7 +105,11 @@ class RunRecorder:
 
     async def run_started(self, run: Any) -> None: ...
 
-    async def node_started(self, run: Any, node: NodeDef) -> None: ...
+    async def node_started(
+        self, run: Any, node: NodeDef, call_path: str | None = None
+    ) -> None:
+        """``call_path`` 为本次执行的调用路径；``None`` 时由实现回落到 ``run.call_path``。"""
+        ...
 
     async def node_finished(self, run: Any, execution: NodeExecution) -> None: ...
 
@@ -484,7 +503,10 @@ class Scheduler:
                 f"run_iteration_body_node 找不到运行 {item_ctx.run_id!r} 的记录句柄；"
                 "该运行可能已经结束，或未经过 Scheduler.run 启动"
             )
-        override = f"{record.call_path}/iter:{iteration_id}/{index}"
+        # 基路径取**当前执行**的路径（本方法在迭代节点那个 task 内被 await），
+        # 不取 ``record.call_path``：后者是整运行共享的，循环体一改就会污染兄弟节点。
+        base = CURRENT_CALL_PATH.get() or record.call_path
+        override = f"{base}/iter:{iteration_id}/{index}"
         execution = await self._execute_node(
             node, item_ctx, record, is_child=True, call_path_override=override
         )
@@ -505,12 +527,24 @@ class Scheduler:
     ) -> NodeExecution:
         """执行单个节点，异常一律转成失败结果。"""
         queued_ms = now_ms()
+        # 本次执行的调用路径**在此刻定死**，此后不再改。
+        #
+        # 原先的写法是把覆盖路径临时写进 ``record.call_path``（整运行共用一份句柄），
+        # 执行完再还原。运行内各节点是并发的：循环体把 ``record.call_path`` 改成
+        # ``/iter:<id>/<n>`` 的那段时间里，任何**同时结束的兄弟节点**都会读到这个被
+        # 污染的值，终态因此被写进另一条调用路径，而它自己那条 ``running`` 行再无人更新，
+        # 永久停在「运行中」（实测：业务测试臂运行里的「极光数据」）。
+        # 现在路径只存在于本次执行的 ``NodeExecution`` 上，另以 ContextVar 供循环体取基路径。
+        effective_call_path = (
+            call_path_override if call_path_override is not None else record.call_path
+        )
         execution = NodeExecution(
             node_id=node.node_id,
             title=node.title,
             node_type=node.node_type,
             status=NodeStatus.RUNNING,
             queued_at_ms=queued_ms,
+            call_path=effective_call_path,
         )
         started = self._clock()
         started_ms = now_ms()
@@ -521,52 +555,43 @@ class Scheduler:
         时间放在同一条轴上比较。两者此前被写成同一行表达式，``started_at_ms`` 因此等于
         ``duration_ms``，时间线无从绘制（V0.4.4 实测发现）。
         """
-        # 留痕时使用覆盖后的调用路径。记录句柄是每次运行一份、循环体串行执行，
-        # 因此临时替换再还原是安全的。
-        original_call_path = record.call_path
-        if call_path_override is not None:
-            record.call_path = call_path_override
-
+        token = CURRENT_CALL_PATH.set(effective_call_path)
         try:
-            async with self._slot(is_child):
-                if record is not None:
-                    await self.recorder.node_started(record, node)
-                executor = self.registry.get(node.node_type)
-                raw = await executor(node, ctx, self.runtime)
-                outcome = normalise_outcome(raw)
-        except asyncio.CancelledError:
-            execution.status = NodeStatus.FAILED
-            execution.error = "节点执行被取消"
+            try:
+                async with self._slot(is_child):
+                    if record is not None:
+                        await self.recorder.node_started(record, node, effective_call_path)
+                    executor = self.registry.get(node.node_type)
+                    raw = await executor(node, ctx, self.runtime)
+                    outcome = normalise_outcome(raw)
+            except asyncio.CancelledError:
+                execution.status = NodeStatus.FAILED
+                execution.error = "节点执行被取消"
+                execution.started_at_ms = started_ms
+                execution.duration_ms = int((self._clock() - started) * 1000)
+                await self.recorder.node_finished(record, execution)
+                raise
+            except MissingValue as exc:
+                execution.status = NodeStatus.FAILED
+                execution.error = f"变量解析失败：{exc}"
+            except NodeExecutionError as exc:
+                execution.status = NodeStatus.FAILED
+                execution.error = str(exc)
+            except Exception as exc:  # 未预期的异常：记类型与消息，不吞
+                execution.status = NodeStatus.FAILED
+                execution.error = f"{type(exc).__name__}: {exc}"
+            else:
+                execution.status = NodeStatus.SUCCEEDED
+                execution.outputs = dict(outcome.outputs)
+                execution.branch = outcome.branch
+                execution.sub_run_id = outcome.meta.get("sub_run_id")
+
             execution.started_at_ms = started_ms
             execution.duration_ms = int((self._clock() - started) * 1000)
-            if call_path_override:
-                execution.call_path = call_path_override
             await self.recorder.node_finished(record, execution)
-            record.call_path = original_call_path
-            raise
-        except MissingValue as exc:
-            execution.status = NodeStatus.FAILED
-            execution.error = f"变量解析失败：{exc}"
-        except NodeExecutionError as exc:
-            execution.status = NodeStatus.FAILED
-            execution.error = str(exc)
-        except Exception as exc:  # 未预期的异常：记类型与消息，不吞
-            execution.status = NodeStatus.FAILED
-            execution.error = f"{type(exc).__name__}: {exc}"
-        else:
-            execution.status = NodeStatus.SUCCEEDED
-            execution.outputs = dict(outcome.outputs)
-            execution.branch = outcome.branch
-            execution.sub_run_id = outcome.meta.get("sub_run_id")
-            execution.call_path = record.call_path if call_path_override else ""
-
-        execution.started_at_ms = started_ms
-        execution.duration_ms = int((self._clock() - started) * 1000)
-        if call_path_override:
-            execution.call_path = call_path_override
-        await self.recorder.node_finished(record, execution)
-        record.call_path = original_call_path
-        return execution
+            return execution
+        finally:
+            CURRENT_CALL_PATH.reset(token)
 
     def _slot(self, is_child: bool) -> Any:
         """取执行名额。子运行不再申请，避免与等待它的父节点互等。"""

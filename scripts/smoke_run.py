@@ -176,8 +176,12 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"入参格式应为 key=value，实际为 {pair!r}")
         inputs[key.strip()] = value
     inputs.setdefault("phone_number", args.phone or read_first_phone())
-    if args.workflow == "customer_profile_entry":
-        inputs.setdefault("batch_id", "")
+    # ``batch_id`` 是画像两条臂共同的入参（``required_batch_id=False``，缺省空串）。
+    # 原先只为 ``customer_profile_entry`` 补，业务测试臂漏掉时 ``pipeline_start`` 不产出
+    # 该字段，下游 ``pipeline_production`` 的 ``(START, "batch_id")`` 绑定解析即 KeyError。
+    # ``run_baseline.py`` 对任何 ``--workflow-id`` 都显式传它，冒烟脚本按同一口径对齐。
+    # 多补的键由 ``execute_start`` 透出（``executors_misc.py:63``），不影响其它工作流。
+    inputs.setdefault("batch_id", "")
 
     record = asyncio.run(smoke(args.workflow, inputs, args.read_timeout))
     print(json.dumps(record, ensure_ascii=False, indent=2))

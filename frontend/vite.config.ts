@@ -9,10 +9,11 @@ export default defineConfig({
   base: './',
   server: {
     // 开发模式把 API 请求转给后端，避免前端写死后端地址。
+    // 端口与后端 API_PORT 缺省值一致（见 .env.example §7.1）；后端改了端口时这里也要改。
     proxy: {
-      '/workflows': 'http://127.0.0.1:8000',
-      '/runs': 'http://127.0.0.1:8000',
-      '/health': 'http://127.0.0.1:8000',
+      '/workflows': 'http://127.0.0.1:18173',
+      '/runs': 'http://127.0.0.1:18173',
+      '/health': 'http://127.0.0.1:18173',
     },
   },
   build: {

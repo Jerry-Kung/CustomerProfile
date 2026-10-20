@@ -1,0 +1,175 @@
+你的任务是**把一份已经定稿的客户事实，写成一张销售看的人设画像卡**。
+
+**你不是在分析客户，也不是在补充事实。** 上游已经用代码规则把事实定稿了——下面给你的
+`facts` 就是**唯一的事实来源**。你的工作只有两件：**组织**（把平铺的字段归到 9 个板块）
+与**措辞**（写成销售能一眼看懂的短句）。
+
+## 一、事实定稿（唯一事实来源）
+
+{{ facts_output }}
+
+这是一份「字段键 → 取值」的表。每个取值都已经过校验：要么能指回客户原话，要么标明了
+推断依据。**表里没有的，就是不知道。**
+
+## 二、可参考的业务资产
+
+以下是本店的标签库、画像数据格式、在售产品信息与邀约策略。它们用于**帮你选对词、选对
+产品卖点、选对邀约方式**，不是新的事实来源。
+
+### 标签库
+{{ tag_library }}
+
+### 画像数据格式
+{{ profile_format }}
+
+### 产品信息及卖点（详版）
+{{ product_info }}
+
+### 产品信息及卖点（速查版）
+{{ product_info_short }}
+
+### 邀约策略与话术库
+{{ invite_strategy }}
+
+## 三、硬边界（违反即作废）
+
+1. **不得新增事实。** 你写出的每一处**具体取值**（金额、年限、百分比、车型名、品牌、
+   地名、职业、姓名）都必须能在上面的事实表里找到出处。找不到的，**宁可不写**。
+2. **数字尤其要小心。** 不得四舍五入成表里没有的数，不得把「30-50 万」写成「40 万」，
+   不得自行推算一个百分比。
+3. **不得靠常识编。** 事实表里没有的字段，对应板块可以简略；但**可以**把表里已有的事实
+   归纳、合并、换句话写成叙述（例：表里只给了 `core_concerns`，写「用车上最在意油耗与安全」
+   是可以的）。**不可以**引入表里没有的金额、年限、百分比、品牌、车型、地名、职业、姓名。
+   「把已有事实归纳成话」与「编造新的事实」是两回事——前者要做足，后者一律禁止。空白不是
+   省略的理由：只有当这个板块**确实一条相关线索都没有**时，才留空。
+4. **不得把推断写成事实。** 事实表里标注为低置信推断的字段，措辞上要用「可能」「倾向」
+   这类保留口吻，不要写成断言。
+5. **写给人看。** 所有 `summary` / `steps` / `evidence` 都是给销售看的，必须是人话：
+   说清「结论是怎么推出来的」与「依据在哪」。**不得**出现内部规则名、来源档代号
+   （「一手交互」「第三方预测」之类）、字段键名（如 `core_concerns`）、英文键或
+   「未知渠道」这类占位串。
+
+## 四、要输出的 9 个板块
+
+逐个输出下列键，形状如下。
+
+**这 9 个键是平级的**，一律平铺在 `analysis_result` 之下，没有从属关系。**不得**把其中任何
+一个嵌进另一个板块内部（例：把 `purchase_motivations` 写进 `customer_overview` 里面）。
+每个键的值只装它自己那一节的内容。
+
+### 1. `profile_summary`（对象）
+```
+{"name": "", "gender": "", "age": "", "deal_level": "", "overall_tag": "",
+ "personality_summary": "", "profile_summary": ""}
+```
+- 各字段取自事实表对应项（客户姓名 / 称呼 / 年龄 / 商机等级）；
+- `overall_tag`：一个 6–10 字的总标签；`personality_summary`（60–120 字）与
+  `profile_summary`（80–150 字）是**叙述**，只能复述事实表里的内容；
+- 事实表里没有的字段留空串。
+
+### 2. `inferred_tags`（数组，0–6 项）
+```
+[{"id": "tag_001", "title": "", "desc": "", "confidence": 0.85, "icon": "calculator",
+  "reasoning_detail": {"summary": "", "steps": [], "evidence": [], "confidence": 0.85}}]
+```
+- `title` **必须**取自上面的标签库（`标签内容`），不要自创标签名；
+- 一项也就够用，不必凑数。
+
+### 3. `usage_scenarios`（数组，0–6 项）
+```
+[{"id": "scn_001", "title": "", "desc": "", "confidence": 0.85, "image_url": "",
+  "rank_order": 1, "reasoning_detail": {...}}]
+```
+- **从事实表里把用车场景拆开写**：通勤、接送小孩、长途、商务接待、周末自驾、回乡探亲
+  这些，只要事实表里能找到一点关联（职业、家庭结构、车型意向、关注点、沟通记录里的
+  场景表述），就各写成一条。表里给了多条线索却只写一条，等于漏。
+
+### 4. `communication_strategies`（数组，0–4 项）
+```
+[{"business_scenario": "", "strategy_name": "", "description": "",
+  "reasoning_detail": {...}}]
+```
+- 优先从上面的邀约策略库里选策略与话术，不要另造。
+
+### 5. `customer_overview`（对象）
+```
+{"business_opp_level": {"value": "", "reasoning_detail": {...}},
+ "closing_probability": {"value": "", "reasoning_detail": {...}},
+ "customer_type": {"value": "", "reasoning_detail": {...}},
+ "current_stage": {"value": "", "reasoning_detail": {...}},
+ "core_issue": {"value": "", "reasoning_detail": {...}},
+ "breakthrough_point": {"value": "", "reasoning_detail": {...}}}
+```
+- `business_opp_level` **必须**与事实表的「商机等级」一致（同一个值，不得写出两个等级）；
+  它的 `reasoning_detail` 以事实表里的商机定级结论为准（照实组织，不要另推一套等级）；
+- 其余各项是判断类结论，措辞可以给，但依据只能来自事实表。
+
+### 6. `purchase_motivations`（数组，0–4 项）
+```
+[{"motivation_name": "", "description": "", "rank_order": 1, "reasoning_detail": {...}}]
+```
+- **先翻事实表再决定写不写**：表里有购车用途、核心关注点、痛点，就据此写出对应条目，
+  不要因为表里没有直接写着「购车动机」四个字就交空数组；
+- 确实一条相关线索都没有（相关字段全空）时，才给空数组。
+
+### 7. `product_preferences`（数组，0–4 项）
+```
+[{"preference_name": "", "description": "", "reasoning_detail": {...}}]
+```
+- 产品偏好尽量对上上面的产品信息的卖点名称；
+- **先翻事实表再决定写不写**：表里有车型意向、关注点、用车需求，就据此写出对应条目；
+- 确实一条相关线索都没有时，才给空数组。
+
+### 8. `resistances`（数组，0–4 项）
+```
+[{"resistance_name": "", "severity": "", "description": "", "reasoning_detail": {...}}]
+```
+- **先翻事实表再决定写不写**：表里有吐槽点、顾虑、比价行为，就据此写出对应条目；
+- 确实一条相关线索都没有时，才给空数组。
+
+### 9. `emotion_state`（对象）
+```
+{"current_state": {"value": "", "reasoning_detail": {...}},
+ "brand_attitude": {"value": "", "reasoning_detail": {...}},
+ "sales_attitude": {"value": "", "reasoning_detail": {...}},
+ "radar_data": {"items": [{"dimension": "", "score": 0}]}}
+```
+- **只有**当事实表里有情绪/态度相关线索（如沟通风格、沟通节奏、
+  沟通记录）时才填；没有就给 `{}`。
+- `radar_data.items` 的 `score` 为 0–100 的整数，维度取「犹豫/信任/可转化/防备/紧迫」这类。
+
+## 五、`reasoning_detail` 的统一形状
+
+上述每一处 `reasoning_detail` 都用同一个形状：
+
+```
+{"summary": "一句话总结", "steps": ["推理步骤"], "evidence": ["依据"], "confidence": 0.8}
+```
+- `summary` 一句话说清结论怎么来的；`steps` 是推理步骤（2–4 条），写成普通人能看懂的
+  因果链（「因为…所以…」），**不要**出现规则名、来源档代号、字段键名；
+- `evidence` 必须精确到**客户原始数据里的一段内容**：优先引用客户的原话片段（如
+  「我现在开的是一九年的君威」），其次写第三方数据里的标签名或记录里的具体表述
+  （如「第三方数据：预测职业为货车司机」）。**不要**只写字段键名，**不要**写
+  「一手交互」「第三方预测」这类分类代号；
+- `confidence` 与结论的确定程度一致。
+
+## 六、输出格式
+
+只输出一个 JSON 对象，9 个键都在：
+
+```json
+{"analysis_result": {
+  "profile_summary": {...},
+  "inferred_tags": [...],
+  "usage_scenarios": [...],
+  "communication_strategies": [...],
+  "customer_overview": {...},
+  "purchase_motivations": [...],
+  "product_preferences": [...],
+  "resistances": [...],
+  "emotion_state": {...}
+}}
+```
+
+- 直接输出 JSON，**不要**加 ```json 之类的围栏，不要加任何说明文字；
+- 使用简体中文；JSON 内部不得出现未转义的英文双引号。

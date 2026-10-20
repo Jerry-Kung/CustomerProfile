@@ -121,7 +121,13 @@ def extract_jiguang_tags(records: str, data_source: str) -> dict:
     """提取极光数据的 ``tags``。
 
     与迁移前的定义节点 ``1777288063102`` 的 ``main`` 逐字符一致。
+
+    **取数即换算**（2026-10-20）：标签里的「预测收入水平」给的是 ``N档收入`` 档位，
+    在这里就换成金额区间（:func:`customer_profile.income_band.normalize_income_tags`），
+    L0 及以后的每一层看到的都是区间，不会有人再去解释「档位」。
     """
+    from ..income_band import normalize_income_tags
+
     import json
 
     # 兜底：输入为空时直接返回空字符串
@@ -158,12 +164,16 @@ def extract_jiguang_tags(records: str, data_source: str) -> dict:
             if user_tags is None:
                 return {"result": ""}
 
-            # 若 user_tags 本身就是字符串，直接返回
+            # 若 user_tags 本身就是字符串，换算后直接返回（非 JSON 串原样返回）
             if isinstance(user_tags, str):
-                return {"result": user_tags}
+                return {"result": normalize_income_tags(user_tags)}
 
-            # 若 user_tags 是数组/对象，转成 JSON 字符串返回
-            return {"result": json.dumps(user_tags, ensure_ascii=False)}
+            # 若 user_tags 是数组/对象，换算成区间后转成 JSON 字符串返回
+            return {
+                "result": json.dumps(
+                    normalize_income_tags(user_tags), ensure_ascii=False
+                )
+            }
 
     # 没找到目标元素
     return {"result": ""}

@@ -775,12 +775,15 @@ class Store:
         usage: Mapping[str, Any] | None = None,
         provider_request_id: str | None = None,
         replayed: bool = False,
+        anomaly: str | None = None,
+        finish_reason: str | None = None,
     ) -> None:
         await self._write(
             "INSERT INTO request_attempts (run_id, node_id, call_path, attempt_no, kind, "
             " target, request_json, response_text, status_code, duration_ms, error, "
-            " error_code, usage_json, provider_request_id, replayed, created_at_ms) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " error_code, usage_json, provider_request_id, replayed, anomaly, "
+            " finish_reason, created_at_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run_id,
                 node_id,
@@ -797,6 +800,8 @@ class Store:
                 json_dumps(dict(usage or {})) if usage else None,
                 provider_request_id,
                 1 if replayed else 0,
+                anomaly,
+                finish_reason,
                 _now_ms(),
             ),
         )
@@ -878,11 +883,17 @@ _ADDED_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         ("claimed_by", "TEXT"),
         ("lease_expires_at_ms", "INTEGER"),
     ),
+    "request_attempts": (
+        ("anomaly", "TEXT"),
+        ("finish_reason", "TEXT"),
+    ),
 }
 """V0.5.2 起新增的列：表名 -> (列名, 类型) 序列。
 
 ``CREATE TABLE IF NOT EXISTS`` 对**已存在**的表不会补列，而 data/customer_profile.db
 已在磁盘上。没有这一步，新列在运行期只表现为一句 no such column。
+
+``request_attempts.anomaly`` / ``finish_reason`` 自 v3.3+ 添加，用于诊断异常重试与静默降级。
 """
 
 

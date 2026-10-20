@@ -26,6 +26,7 @@ WORKFLOW_MODULES: tuple[str, ...] = (
     "customer_profile.workflows.test_drive_audio",
     "customer_profile.workflows.outbound_call_audio",
     "customer_profile.workflows.audio_content_extract",
+    "customer_profile.workflows.audio_content_extract_roled",
     "customer_profile.workflows.jiguang_data",
     "customer_profile.workflows.chat_history_data",
     "customer_profile.workflows.user_feedback_data",
@@ -33,7 +34,13 @@ WORKFLOW_MODULES: tuple[str, ...] = (
     "customer_profile.workflows.evidence_subagent",
     "customer_profile.workflows.phone_company_analysis",
     "customer_profile.workflows.customer_profile_production",
-    "customer_profile.workflows.customer_profile_entry",
+    # ``customer_profile_entry``（客户初始画像，基线臂）于 2026-10-16 从注册表摘除：
+    # 该臂已无业务用途，入口改指 ``customer_profile_pipeline``（业务测试臂）。
+    # 模块文件保留——`tests/test_contract.py` 等仍以它为「子流程编排」的样本，
+    # 且它是 AB 基线可复位的前提。它引用的 ``evidence_subagent`` 与
+    # ``profile_features_analysis`` 因此保留在册（摘除会让基线臂无法复位）。
+    "customer_profile.workflows.customer_profile_pipeline",
+    "customer_profile.workflows.customer_profile_l3",
 )
 
 

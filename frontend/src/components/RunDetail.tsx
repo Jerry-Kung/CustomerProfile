@@ -19,7 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, type RunDetailPayload, type RunGraph } from '../api/client'
 import { NodeDetail } from './NodeDetail'
 import { NodeList } from './NodeList'
-import { executionKey } from '../lib/nodeSummary'
+import { callbackPayloadOf, executionKey } from '../lib/nodeSummary'
 import { ResultView } from './ResultView'
 import { RunOverview } from './RunOverview'
 
@@ -97,6 +97,13 @@ export function RunDetail({ runId, onDrillDown, onBack }: RunDetailProps) {
   )?.display_name
 
   const hasResult = payload !== null && Object.keys(payload.outputs ?? {}).length > 0
+
+  // 回传体：本轮改造的**第二份产物**（六键 analysis_result），运行级 outputs 里没有它，
+  // 只在构造节点的产出里。定位方式见 callbackPayloadOf，不写死工作流名或节点 ID。
+  const callbackPayload = useMemo(
+    () => callbackPayloadOf(definitionNodes, executions),
+    [definitionNodes, executions],
+  )
 
   const copyResult = useCallback(async () => {
     if (!payload) return
@@ -205,7 +212,24 @@ export function RunDetail({ runId, onDrillDown, onBack }: RunDetailProps) {
               </button>
             </header>
             <div className="modal-body">
-              <ResultView outputs={payload.outputs} />
+              {/* 设计稿 §5：本轮对外产物**有两份**，形状不同、不要混读。
+                  两份并列呈现，各自可折叠；回传体只在业务测试臂上存在，缺则整段不渲染。 */}
+              <details className="result-block" open>
+                <summary className="result-block-summary">
+                  画像卡（result1）
+                  <span className="result-block-note">工作流出口，对外契约</span>
+                </summary>
+                <ResultView outputs={payload.outputs} />
+              </details>
+              {callbackPayload ? (
+                <details className="result-block" open>
+                  <summary className="result-block-summary">
+                    回传体（analysis_result 六键）
+                    <span className="result-block-note">构造节点产出，调测期不发请求</span>
+                  </summary>
+                  <ResultView outputs={callbackPayload} />
+                </details>
+              ) : null}
             </div>
           </div>
         </div>

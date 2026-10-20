@@ -24,8 +24,25 @@ from .runner import QueueFull, RunSlotUnavailable, Service, build_service
 from .settings import get_settings
 
 
-ENTRY_WORKFLOW_ID = "customer_profile_entry"
-"""主入口工作流 ID。手机号校验只对它启用，不把入口契约硬编码给全部工作流。"""
+ENTRY_WORKFLOW_ID = "customer_profile_pipeline"
+"""主入口工作流 ID，即业务测试臂。手机号校验只对它启用，不把入口契约硬编码给全部工作流。
+
+2026-10-16 由 ``customer_profile_entry``（客户初始画像，基线臂）改指本臂：该臂已从
+``WORKFLOW_MODULES`` 摘除、不再可运行，而提交页与入参校验必须落在同一个 ID 上——
+只改前端会让手机号校验静默失效。
+"""
+
+DEFAULT_BATCH_ID = "batch_001"
+"""主入口未传 ``batch_id`` 时补的缺省批次号。
+
+``start`` 节点把可选入参声明在 ``required_batch_id=False`` 上，但执行器只输出「声明了
+且调用方传了」的字段——不传时该键根本不出现，下游取 ``(START, "batch_id")`` 直接
+``KeyError``（实测：照着 README 的 curl 示例只传手机号，运行在 ``pipeline_production``
+节点失败）。这里在提交入口补一个确定值，让「可选」真正可选。
+
+只在提交入口补，不在 ``execute_start`` 里改：那里的语义是「原样暴露调用方入参」，
+给所有工作流的所有可选入参凭空补值会改变其它工作流的既有行为。
+"""
 
 PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
 """中国大陆手机号。与 ``scripts/smoke_run.py`` 的脱敏正则同一形状，此处锚定整串。"""
@@ -263,11 +280,16 @@ def create_app(service_factory: Any = None) -> FastAPI:
         数据库里查不到」的情况。
         """
         service = get_service()
-        _validate_entry_inputs(payload.workflow_id, payload.inputs)
+        inputs = dict(payload.inputs)
+        if payload.workflow_id == ENTRY_WORKFLOW_ID and not str(inputs.get("batch_id") or "").strip():
+            # 未传或传空白：补缺省批次号。见 DEFAULT_BATCH_ID 的说明——
+            # 不补的话运行会在下游节点 KeyError，而调用方拿到的是 200。
+            inputs["batch_id"] = DEFAULT_BATCH_ID
+        _validate_entry_inputs(payload.workflow_id, inputs)
         try:
             run_id = await service.submit(
                 payload.workflow_id,
-                payload.inputs,
+                inputs,
                 business_ref=payload.business_ref,
             )
         except KeyError as exc:

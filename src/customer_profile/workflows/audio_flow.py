@@ -64,6 +64,11 @@ ELSE_BRANCH = "false"
 
 SHARED_CODE_MODULE = "customer_profile.workflows.shared_code"
 AUDIO_EXTRACT_WORKFLOW_ID = "audio_content_extract"
+"""基线臂在用的录音抽取子流程（含 2 个 LLM 节点）。**不得改动**。"""
+
+AUDIO_EXTRACT_PURE_WORKFLOW_ID = "audio_content_extract_pure"
+"""v2 的纯识别变体：零 LLM 节点，只交逐字原文。见
+:mod:`customer_profile.workflows.audio_content_extract`。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,10 +93,79 @@ def template_name(slug: str, node_id: str) -> str:
     return f"{slug}__{node_id}"
 
 
-def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
-    """按共用图结构构造一个录音工作流的定义。"""
+def build_audio_workflow(
+    flow: AudioFlow, *, pure_recognition: bool = False
+) -> WorkflowDef:
+    """按共用图结构构造一个录音工作流的定义。
+
+    ``pure_recognition=False``（缺省）产出迁移前的定义基线：18 节点，
+    含「录音文件分析」与单文件侧的分析 LLM。**基线臂在用，逐字不得改动。**
+
+    ``pure_recognition=True`` 产出 v2 的纯识别变体：录音子流程换成零 LLM 的
+    ``audio_content_extract_pure``，并删掉父图里两个消费压缩文本的 LLM 节点
+    （「录音文件分析」与单文件侧那个同职责节点）。``result`` 因此变成**逐字转写的拼接**，
+    而不是一份 LLM 汇总报告——这正是 v2 「原文逐字进 L1、取数侧不做有损压缩」的口径。
+
+    **证据**（R1b 13 案实测）：「录音文件分析」节点 421,030 token，
+    「LLM 识别结果校对」1,261,865 + 「LLM 内容有效性判断」420,881 由本图内部发起；
+    而管线侧只把 ``result`` 当作**兜底报告**用，R1b 20 条录音记录里 **0 条**走到该兜底
+    （``content_kind`` 全为 ``transcript``）。这 210 万 token 是「付费后弃用」。
+    """
     slug = flow.slug
     template = lambda node_id: template_name(slug, node_id)  # noqa: E731
+    extract_child = (
+        AUDIO_EXTRACT_PURE_WORKFLOW_ID if pure_recognition else AUDIO_EXTRACT_WORKFLOW_ID
+    )
+
+    if pure_recognition:
+        # 纯识别：不建任何消费压缩文本的 LLM 节点。``result`` 由「多文件拼接」与
+        # 「单文件原文」两路聚合而成——两者都是逐字原文，没有一次有损压缩。
+        analysis_nodes: tuple[Any, ...] = ()
+        # 纯识别下「录音分析结果汇总」直接收两路逐字原文：多文件拼接结果与单文件原文。
+        aggregate_2_after: tuple[str, ...] = (JOIN_TEMPLATE, AUDIO_EXTRACT_SINGLE)
+        aggregate_2_sources: tuple[tuple[str, str], ...] = (
+            (JOIN_TEMPLATE, "output"),
+            (AUDIO_EXTRACT_SINGLE, "file_content"),
+        )
+    else:
+        analysis_nodes = (
+            make_node(
+                AUDIO_LLM,
+                "录音文件分析",
+                "llm",
+                after=(JOIN_TEMPLATE,),
+                # 正文引用 ``{{#1775811655657.output#}}``（多文件聚合结果）。必须绑定：
+                # 未绑定时渲染期报「模板变量未提供」——该路径在 AUC 不可达期间从未被执行，
+                # 因此直到 2026-09-23 真实录音冒烟才暴露。
+                inputs={"arr": (JOIN_TEMPLATE, "output")},
+                outputs=("text",),
+                template=template(AUDIO_LLM),
+            ),
+            # 条件分支 3（llm_model 分支）已废弃，删除该 if-else，
+            # 直接连到「非 gemini」那一支的 llm（两支差异仅模型选择）。
+            make_node(
+                flow.kept_llm_id,
+                flow.llm_title,
+                "llm",
+                after=(AUDIO_EXTRACT_SINGLE,),
+                # 正文引用 ``{{#1776135353554.file_content#}}``（单文件录音抽取结果）。
+                # 与上面的 AUDIO_LLM 同因：未绑定即渲染失败。真实录音冒烟实测到
+                # ``变量解析失败："模板变量 '1776135353554.file_content' 未提供；已提供：[]"``。
+                inputs={"content": (AUDIO_EXTRACT_SINGLE, "file_content")},
+                outputs=("text",),
+                template=template(flow.kept_llm_id),
+            ),
+            make_node(
+                flow.aggregate_llm_id,
+                flow.aggregate_llm_title,
+                "variable-aggregator",
+                after=(AUDIO_LLM, flow.kept_llm_id),
+                variables=((AUDIO_LLM, "text"), (flow.kept_llm_id, "text")),
+                outputs=("output",),
+            ),
+        )
+        aggregate_2_after = (AUDIO_LLM, flow.aggregate_llm_id)
+        aggregate_2_sources = ((AUDIO_LLM, "text"), (flow.aggregate_llm_id, "output"))
 
     nodes = (
         make_node(
@@ -220,7 +294,7 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             inputs={"file_url": (ITERATION, "item")},
             outputs=("file_content",),
             **{
-                "@workflow": AUDIO_EXTRACT_WORKFLOW_ID,
+                "@workflow": extract_child,
                 "@inputs": {"file_url": "file_url"},
             },
             iteration_id=ITERATION,
@@ -235,18 +309,6 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             template=template(JOIN_TEMPLATE),
         ),
         make_node(
-            AUDIO_LLM,
-            "录音文件分析",
-            "llm",
-            after=(JOIN_TEMPLATE,),
-            # 正文引用 ``{{#1775811655657.output#}}``（多文件聚合结果）。必须绑定：
-            # 未绑定时渲染期报「模板变量未提供」——该路径在 AUC 不可达期间从未被执行，
-            # 因此直到 2026-09-23 真实录音冒烟才暴露。
-            inputs={"arr": (JOIN_TEMPLATE, "output")},
-            outputs=("text",),
-            template=template(AUDIO_LLM),
-        ),
-        make_node(
             AUDIO_EXTRACT_SINGLE,
             "录音文件内容抽取（纯识别，无加工）",
             "tool",
@@ -254,38 +316,17 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
             inputs={"file_url": (PARSE_URL_CODE, "file_url")},
             outputs=("file_content",),
             **{
-                "@workflow": AUDIO_EXTRACT_WORKFLOW_ID,
+                "@workflow": extract_child,
                 "@inputs": {"file_url": "file_url"},
             },
         ),
-        # 条件分支 3（llm_model 分支）已废弃，删除该 if-else，
-        # 直接连到「非 gemini」那一支的 llm（两支差异仅模型选择）。
-        make_node(
-            flow.kept_llm_id,
-            flow.llm_title,
-            "llm",
-            after=(AUDIO_EXTRACT_SINGLE,),
-            # 正文引用 ``{{#1776135353554.file_content#}}``（单文件录音抽取结果）。
-            # 与上面的 AUDIO_LLM 同因：未绑定即渲染失败。真实录音冒烟实测到
-            # ``变量解析失败："模板变量 '1776135353554.file_content' 未提供；已提供：[]"``。
-            inputs={"content": (AUDIO_EXTRACT_SINGLE, "file_content")},
-            outputs=("text",),
-            template=template(flow.kept_llm_id),
-        ),
-        make_node(
-            flow.aggregate_llm_id,
-            flow.aggregate_llm_title,
-            "variable-aggregator",
-            after=(AUDIO_LLM, flow.kept_llm_id),
-            variables=((AUDIO_LLM, "text"), (flow.kept_llm_id, "text")),
-            outputs=("output",),
-        ),
+        *analysis_nodes,
         make_node(
             AGGREGATE_2,
             "录音分析结果汇总",
             "variable-aggregator",
-            after=(AUDIO_LLM, flow.aggregate_llm_id),
-            variables=((AUDIO_LLM, "text"), (flow.aggregate_llm_id, "output")),
+            after=aggregate_2_after,
+            variables=aggregate_2_sources,
             outputs=("output",),
         ),
     )
@@ -299,6 +340,30 @@ def build_audio_workflow(flow: AudioFlow) -> WorkflowDef:
         outputs={"result": "output"},
         nodes=nodes,
     )
+
+
+def build_pure_workflow(flow: AudioFlow, *, pure_flow_id: str, pure_display_name: str) -> WorkflowDef:
+    """构造某录音流程的 v2 纯识别变体（零 LLM 节点）。
+
+    ``flow`` 仍传原件那份参数——模板 slug、渠道名、节点 ID 与原件逐字相同，因此
+    变体引用的是**同一批模板资源**，不新增一份正文。差量只有：``workflow_id``、
+    显示名、以及 :func:`build_audio_workflow` 在 ``pure_recognition=True`` 下的图。
+    """
+    pure_flow = AudioFlow(
+        slug=flow.slug,
+        display_name=pure_display_name,
+        data_source=flow.data_source,
+        workflow_id=pure_flow_id,
+        check_title=flow.check_title,
+        exists_title=flow.exists_title,
+        llm_title=flow.llm_title,
+        aggregate_llm_id=flow.aggregate_llm_id,
+        aggregate_llm_title=flow.aggregate_llm_title,
+        deprecated_branch_id=flow.deprecated_branch_id,
+        discarded_llm_id=flow.discarded_llm_id,
+        kept_llm_id=flow.kept_llm_id,
+    )
+    return build_audio_workflow(pure_flow, pure_recognition=True)
 
 
 def default_inputs(
