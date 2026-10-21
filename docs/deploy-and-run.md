@@ -314,6 +314,8 @@ customer-profile-migrate
 > 扫描间隔后，自动把“无租约、无 claim token、无新旧 runId、零尝试”的遗留
 > `processing` 任务作为新 generation 重新入队；已有 runId 的任务不会走该路径。
 
+`007_add_profile_failure_outbox.sql` 新建最终失败通知表，可重复执行；先迁移后启用 `PROFILE_FAILURE_CALLBACK_ENABLED=true`。通知配置和状态规则见 [Runner 接入与部署](profile-runner-integration.md#最终失败通知)。
+
 ## 6. 对外接口一览
 
 | 方法 | 路径 | 说明 |
@@ -362,4 +364,4 @@ API_E2E_BASE_URL=http://127.0.0.1:8000 ./scripts/api_e2e_curl.sh
 
 ## 新增画像 Runner Worker
 
-`profile-runner-worker` 已合入根目录 `docker-compose.yml`，使用 `docker compose up -d --build` 与其他服务统一启动。配置、并发领取及旧独立项目迁移见 [Runner 接入与部署](profile-runner-integration.md)。复用现有 001–006 表结构与重试机制，无新增数据库迁移。
+`profile-runner-worker` 已合入根目录 `docker-compose.yml`，使用 `docker compose up -d --build` 与其他服务统一启动。配置、并发领取及旧独立项目迁移见 [Runner 接入与部署](profile-runner-integration.md)。执行复用 001–006 表结构与重试机制，最终失败通知通过 007 增加 outbox。

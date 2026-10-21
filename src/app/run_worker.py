@@ -5,6 +5,9 @@ import signal
 from src.app.bootstrap import bootstrap
 from src.config.logging_utils import get_logger, log_runtime_identity
 from src.worker.runner import WorkerRunner
+from src.worker.failure_callbacks import FailureCallbackDispatcher
+from src.infrastructure.db.failure_callback_repository import MySQLFailureCallbackRepository
+from src.infrastructure.workflow.failure_callback import ProfileFailureClient
 
 
 def _install_shutdown_signal_handlers(runner: WorkerRunner) -> None:
@@ -23,12 +26,18 @@ def _install_shutdown_signal_handlers(runner: WorkerRunner) -> None:
 
 
 def main() -> int:
-    config, _, _, executor, _ = bootstrap("worker")
+    config, db_client, _, executor, _ = bootstrap("worker")
+    dispatcher = None
+    if config.failure_callback.enabled:
+        dispatcher = FailureCallbackDispatcher(
+            MySQLFailureCallbackRepository(db_client), ProfileFailureClient(config.failure_callback),
+        )
     log_runtime_identity(get_logger("worker"), component="worker", app_env=config.app_env)
     runner = WorkerRunner(
         executor=executor,
         interval_seconds=config.worker.poll_interval_seconds,
         concurrency=config.worker.concurrency,
+        failure_dispatcher=dispatcher,
     )
     _install_shutdown_signal_handlers(runner)
     runner.run_forever()

@@ -34,6 +34,8 @@ services:
     command: ["customer-profile-worker"]
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
       WORKER_ROLE: local
@@ -56,6 +58,8 @@ services:
     command: ["customer-profile-worker"]
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
       WORKER_ROLE: commercial

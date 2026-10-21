@@ -19,8 +19,11 @@ class WorkerRunner:
         concurrency: int = 1,
         supervisor_interval_seconds: float = 60.0,
         summary_interval_seconds: float = 300.0,
+        failure_dispatcher=None,
     ):
         self._executor = executor
+        self._failure_dispatcher = failure_dispatcher
+        self._callback_thread: threading.Thread | None = None
         self._interval_seconds = interval_seconds
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
@@ -210,6 +213,12 @@ class WorkerRunner:
             daemon=True,
         )
         self._supervisor_thread.start()
+        if self._failure_dispatcher is not None:
+            self._callback_thread = threading.Thread(
+                target=self._failure_dispatcher.run, args=(self._stop_event,),
+                name="profile-failure-callbacks", daemon=True,
+            )
+            self._callback_thread.start()
         try:
             # Park the main thread on stop_event; supervisor keeps workers alive in between.
             while not self._stop_event.is_set():
@@ -226,9 +235,13 @@ class WorkerRunner:
                 self._supervisor_thread.join(
                     timeout=max(0.0, shutdown_deadline - time.monotonic())
                 )
+            if self._callback_thread is not None:
+                self._callback_thread.join(timeout=max(0.0, shutdown_deadline - time.monotonic()))
             unfinished = [t.name for t in self._threads if t.is_alive()]
             if self._supervisor_thread is not None and self._supervisor_thread.is_alive():
                 unfinished.append(self._supervisor_thread.name)
+            if self._callback_thread is not None and self._callback_thread.is_alive():
+                unfinished.append(self._callback_thread.name)
             if unfinished:
                 self._logger.warning(
                     "worker_shutdown_timeout timeout_seconds=%s unfinished_threads=%s",

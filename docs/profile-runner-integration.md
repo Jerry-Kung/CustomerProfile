@@ -4,7 +4,7 @@
 
 `profile-runner-worker` 已合入根目录的 `docker-compose.yml`，与 `api`、`worker`、`commercial-worker` 统一启动。画像生成服务本身仍是外部依赖，需要提前运行。
 
-Runner 适配与各 Worker 的竞争领取复用现有 001–006 表结构。没有新增表、数据库迁移、批次收据、失败通知进程或回写补偿进程；提交、重复提交以及旧 Dify 的执行方式保持原行为。
+Runner 领取和执行复用 001–006 表结构。最终失败通知使用 007 新增的持久化 outbox，由 Worker 内独立线程投递，不占画像执行线程；提交、重复提交以及旧 Dify 的执行方式保持原行为。
 
 ## 并发领取配置
 
@@ -29,12 +29,28 @@ Runner 使用独立目标 ID，默认 `profile-runner-production`，角色为 `l
 
 不单独识别“画像已生成但回写失败”并补发 HTTP：新服务返回确定失败后，backend 按原工作流失败机制处理。业务回写仍由 CustomerProfile 工作流负责，部署时保持 `WRITEBACK_ENABLED=true`，并检查业务 API 地址与 M2M 密钥。提交结果未知和运行失联仍沿用原机制处理，不盲目重建远端运行。
 
+## 最终失败通知
+
+启用前先部署支持 `batch_id` 校验的画像 API，并完成 007 迁移：
+
+```dotenv
+PROFILE_FAILURE_CALLBACK_ENABLED=true
+PROFILE_API_BASE_URL=http://host.docker.internal:8084
+PROFILE_API_KEY=<画像 API 的 M2M_API_KEY>
+```
+
+URL 指向 M2M 服务根地址，不带 `/api/v1/remote`。测试/生产分离时用 `PROFILE_API_BASE_URL_TEST/PRODUCTION` 和 `PROFILE_API_KEY_TEST/PRODUCTION` 覆盖；留空复用通用配置。所有 Worker 使用同一配置，投递通过数据库行锁协调。Compose 使用宿主机地址时，所有 Worker 均需配置 `host.docker.internal:host-gateway`。
+
+确认终止的 `customer_profile` 失败按 `(task_id, generation)` 入 outbox；HTTP 失败每 30 秒重试，Worker 重启继续投递。`retry_wait`、提交结果未知、运行失联和待核对状态不回传失败。画像 API 忽略旧批次、成功后的迟到失败和重复失败；成功数据仍由 CustomerProfile 回写。禁用开关只停止通知，不删除 outbox。
+
+生成服务地址必须是支持 `POST /runs`、`GET /runs/{run_id}` 的内部 API（默认 18173）；8099 是另一套入站接口。
+
 ## 新增 Worker 的配置
 
 在部署用 `.env` 中添加以下字段，地址必须从新 Worker 容器内可达；示例地址应替换成实际地址。
 
 ```dotenv
-PROFILE_RUNNER_BASE_URL_PRODUCTION=http://host.docker.internal:18000
+PROFILE_RUNNER_BASE_URL_PRODUCTION=http://host.docker.internal:18173
 PROFILE_RUNNER_REQUEST_TIMEOUT_MS=15000
 PROFILE_RUNNER_POLL_INTERVAL_MS=2000
 PROFILE_RUNNER_POLL_TIMEOUT_MS=2400000
@@ -43,7 +59,7 @@ PROFILE_RUNNER_CONCURRENCY=1
 PROFILE_RUNNER_TARGET_MODE=active
 ```
 
-画像服务与 backend 在同一台 Docker Compose 宿主机时，使用上例的 `host.docker.internal:18000`；Runner 服务已配置 `host-gateway` 映射。部署在其他机器时，改用 Runner 容器可达的实际地址，不要使用 `127.0.0.1`。沿用原 `MYSQL_*`，确保连接同一个数据库且从容器内可访问。三个 Worker 共用根目录的 `.env`；其中的 `WORKFLOW_PLATFORM` 继续保持擎天或 Dify，Compose 只为 Runner 容器覆盖平台、画像任务范围及生产环境。
+画像服务与 backend 在同一台 Docker Compose 宿主机时，使用上例的 `host.docker.internal:18173`；Runner 服务已配置 `host-gateway` 映射。部署在其他机器时，改用 Runner 容器可达的实际地址，不要使用 `127.0.0.1`。沿用原 `MYSQL_*`，确保连接同一个数据库且从容器内可访问。三个 Worker 共用根目录的 `.env`；其中的 `WORKFLOW_PLATFORM` 继续保持擎天或 Dify，Compose 只为 Runner 容器覆盖平台、画像任务范围及生产环境。
 
 生成服务目前串行执行画像，先保持 adapter 并发 1。增加 adapter 并发主要会增加生成服务内部排队量；不要直接增加共享 SQLite 的生成 Worker 副本。
 
@@ -55,7 +71,7 @@ PROFILE_RUNNER_TARGET_MODE=active
 docker compose up -d --build
 ```
 
-Compose 会先运行 `migrate`，迁移成功后启动 `api`、`worker`、`commercial-worker` 和 `profile-runner-worker`。已有数据库会重新检查幂等的 001–006 迁移，本次接入没有新增迁移。Runner 不发布端口，与旧 Worker 共用队列和日志目录。
+Compose 会先运行 `migrate`，迁移成功后启动 `api`、`worker`、`commercial-worker` 和 `profile-runner-worker`。已有数据库会重新检查幂等的 001–007 迁移；007 创建失败通知 outbox。Runner 不发布端口，与旧 Worker 共用队列和日志目录。
 
 线上沿用原 backend 的 Compose 项目名、端口、卷、旧工作流密钥和目标身份。若原部署显式使用了 `-p`，下面所有 backend 命令也要带相同的 `-p`，例如 `docker compose -p "$CP_BACKEND_PROJECT" up -d --build`。代码提交并推送后，服务器才能拉取到本次配置修改。
 

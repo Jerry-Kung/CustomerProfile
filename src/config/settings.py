@@ -81,6 +81,16 @@ class ProfileRunnerConfig:
 
 
 @dataclass(frozen=True)
+class FailureCallbackConfig:
+    enabled: bool = False
+    base_url_test: str = ""
+    base_url_production: str = ""
+    api_key_test: str = ""
+    api_key_production: str = ""
+    timeout_seconds: int = 10
+
+
+@dataclass(frozen=True)
 class MySQLConfig:
     host: str
     port: int
@@ -177,6 +187,7 @@ class AppConfig:
     commercial_queue: CommercialQueueConfig = field(default_factory=CommercialQueueConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     runner: ProfileRunnerConfig = field(default_factory=ProfileRunnerConfig)
+    failure_callback: FailureCallbackConfig = field(default_factory=FailureCallbackConfig)
 
 
 def _default_task_upload_dir() -> Path:
@@ -270,6 +281,7 @@ def load_config() -> AppConfig:
             poll_timeout_ms=_env_int("QINGTIAN_POLL_TIMEOUT_MS", 2400000),
         ),
         mysql=load_mysql_config(),
+        failure_callback=_failure_callback_config(),
         upload=UploadConfig(
             base_dir=upload_base,
             max_bytes_per_file=_env_int("TASK_UPLOAD_MAX_BYTES_PER_FILE", 10 * 1024 * 1024),
@@ -485,4 +497,21 @@ def _runner_config(*, workflow_platform: str, work_envs: tuple[str, ...]) -> Pro
         request_timeout_ms=_positive_env_int("PROFILE_RUNNER_REQUEST_TIMEOUT_MS", 15000),
         poll_interval_ms=_positive_env_int("PROFILE_RUNNER_POLL_INTERVAL_MS", 2000),
         poll_timeout_ms=_positive_env_int("PROFILE_RUNNER_POLL_TIMEOUT_MS", 2400000),
+    )
+
+
+def _failure_callback_config() -> FailureCallbackConfig:
+    raw_enabled = _env_str("PROFILE_FAILURE_CALLBACK_ENABLED", "false").lower()
+    if raw_enabled not in {"true", "false", "1", "0"}:
+        raise ValueError("PROFILE_FAILURE_CALLBACK_ENABLED must be true/false")
+    enabled = raw_enabled in {"true", "1"}
+    base_url = _validated_url("PROFILE_API_BASE_URL", required=enabled)
+    api_key = _require_env("PROFILE_API_KEY") if enabled else _env_str("PROFILE_API_KEY")
+    return FailureCallbackConfig(
+        enabled=enabled,
+        base_url_test=_validated_url("PROFILE_API_BASE_URL_TEST", required=False) or base_url,
+        base_url_production=_validated_url("PROFILE_API_BASE_URL_PRODUCTION", required=False) or base_url,
+        api_key_test=_env_str("PROFILE_API_KEY_TEST") or api_key,
+        api_key_production=_env_str("PROFILE_API_KEY_PRODUCTION") or api_key,
+        timeout_seconds=_positive_env_int("PROFILE_FAILURE_CALLBACK_TIMEOUT_SECONDS", 10),
     )
