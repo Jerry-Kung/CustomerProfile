@@ -91,7 +91,7 @@ docker compose -p customer-profile-runner-adapter -f docker-compose.yml stop pro
 
 ## 构建时指定基础镜像和 pip 源
 
-Dockerfile 默认使用 `python:3.12-slim`，可用构建参数 `PYTHON_BASE_IMAGE` 指定可访问的镜像仓库。该参数和 `PIP_INDEX_URL` 只用于镜像构建，不需要加入业务 `.env`。
+Dockerfile 默认使用 `python:3.12-slim`，pip 默认使用清华源 `https://pypi.tuna.tsinghua.edu.cn/simple`。可通过构建参数 `PYTHON_BASE_IMAGE`、`PIP_INDEX_URL` 分别覆盖基础镜像和 pip 源；这两个参数只用于镜像构建，不需要加入业务 `.env`。
 
 如果 Docker Hub 不可达、腾讯加速域名解析失败，可先确认 DaoCloud 官方入口是否可访问：
 

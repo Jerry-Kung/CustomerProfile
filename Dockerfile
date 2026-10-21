@@ -13,7 +13,7 @@ ENV PYTHONUNBUFFERED=1 \
 # This layer stays cached when only source files change.
 COPY pyproject.toml ./
 
-ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
 RUN python -m pip install --no-cache-dir --upgrade pip --index-url "${PIP_INDEX_URL}" \
     && python -c 'import pathlib, subprocess, sys, tomllib; deps = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["dependencies"]; subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "--index-url", sys.argv[1], *deps])' "${PIP_INDEX_URL}"
