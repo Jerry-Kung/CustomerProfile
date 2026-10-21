@@ -10,7 +10,7 @@ MVP 后端：客户画像任务提交、列表、结果查询；可扩展异步 
 |------|------|
 | [部署快速上手](docs/deploy-quickstart.md) | 统一 Compose 启动、更新和日常命令 |
 | [部署运行指南](docs/deploy-and-run.md) | 完整配置、本地开发、迁移与接口验证 |
-| [Runner 接入与部署](docs/profile-runner-integration.md) | 画像生成服务、分流比例、升级与回滚 |
+| [Runner 接入与部署](docs/profile-runner-integration.md) | 画像生成服务、任务分工、升级与回滚 |
 | [当前架构](docs/architecture.md) | API、队列、状态、执行目标和恢复 |
 | [前端接口指南](docs/frontend-api-guide.md) | 提交、列表和结果查询 |
 | [Ubuntu 环境准备](docs/docker-deploy-ubuntu24.md) | Docker 安装、宿主机网络和端口 |
@@ -36,4 +36,4 @@ docker compose up -d --build
 
 同一份 `docker-compose.yml` 会先执行迁移，再统一启动 API、普通 Worker、商业 Worker 和 `profile-runner-worker`。启动前填写 `.env` 中的 `PROFILE_RUNNER_BASE_URL_PRODUCTION`；共享的 `WORKFLOW_PLATFORM` 保持 `dify` 或 `qingtian`，Runner 服务会单独覆盖为 `runner`。
 
-将部分画像任务分流到独立生成服务，参见 [Runner 接入与部署](docs/profile-runner-integration.md)。Runner Worker 已合入原 Compose，与旧 Worker 统一启停，使用原队列和重试机制，支持可配置的 80/20 首次分配；邀约继续使用原工作流。
+默认 Compose 将新提交的生产画像全部交给独立生成服务，普通 Worker 处理邀约，商用 Worker 仅恢复已绑定的旧运行。新画像使用 `single_target_v1` 重试，失败后仍由 Runner 处理。测试画像需要单独配置测试 Runner，不会回退到旧画像工作流。升级和已有运行的处理见 [Runner 接入与部署](docs/profile-runner-integration.md)。

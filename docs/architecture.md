@@ -54,11 +54,11 @@ Runner 使用独立目标 `profile-runner-production`，通过 `customer_profile
 
 旧 Dify 路径保持自身调用方式。具体目标模式、重试上限、资源池切换和升级顺序以[部署运行指南](deploy-and-run.md)为准。
 
-## 画像任务竞争领取
+## 默认 Compose 的任务分工
 
-所有可处理画像任务的 Worker 从同一 MySQL 队列竞争领取，使用 `SELECT ... FOR UPDATE SKIP LOCKED` 避免重复领取。空闲线程主动取任务，各进程的并发数控制在途容量，不再按手机号和批次分桶，也不等待跨组溢出时间。Compose 分别通过 `WORKER_CONCURRENCY`、`COMMERCIAL_WORKER_CONCURRENCY` 和 `PROFILE_RUNNER_CONCURRENCY` 配置三个 Worker；旧资源池使用 `WORKER_ROUTING_MODE=parallel` 即可同时参与。实际处理份额由并发、处理耗时和目标健康状态共同决定。
+默认 Compose 将新生产画像全部交给 `profile-runner-worker`；`worker` 只领取新邀约，`commercial-worker` 固定为 `recovery_only`，只恢复已绑定的旧商用运行。API 将新任务的重试策略固定为 `single_target_v1`，新画像失败后仍在 Runner 重试，不切换到旧画像工作流。任务领取继续使用 `SELECT ... FOR UPDATE SKIP LOCKED`。
 
-任务类型、环境及 Runner 入参校验继续限制领取范围。已有远端运行保留原目标 ID、revision 与 run_id，明确失败后的重试沿用原策略及次数上限。旧 `PROFILE_ROUTING_*` 和 `PROFILE_RUNNER_TRAFFIC_PERCENT` 已停用，残留配置不会重新启用比例分流。配置、升级和回滚步骤见 [Runner 接入与部署](profile-runner-integration.md)。
+任务类型、环境及 Runner 入参校验继续限制新任务领取范围。测试画像需配置测试 Runner；默认生产 Runner 不领取测试任务。已有远端运行保留原目标 ID、revision、run_id 和原重试策略，由原目标恢复；旧 Dify 在途任务应完成后再重建。旧 `PROFILE_ROUTING_*` 和 `PROFILE_RUNNER_TRAFFIC_PERCENT` 已停用。配置、升级和回滚步骤见 [Runner 接入与部署](profile-runner-integration.md)。
 
 ## 数据库与契约维护
 

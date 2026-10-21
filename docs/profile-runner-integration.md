@@ -1,29 +1,37 @@
 # 客户画像 Runner 与统一 Docker Compose 部署
 
-业务 `customer-profile-api` 继续向原 backend 的 `/v1/customer-profile/tasks` 提交任务。新增 Runner Worker 与擎天／Dify Worker 连接同一 MySQL 队列，只处理客户画像；邀约保留原流程。
+业务 `customer-profile-api` 继续向原 backend 的 `/v1/customer-profile/tasks` 提交任务。默认 Compose 将新生产画像全部交给 Runner 和独立画像生成服务；邀约保留原工作流，旧商用 Worker 只恢复已绑定运行。
 
 `profile-runner-worker` 已合入根目录的 `docker-compose.yml`，与 `api`、`worker`、`commercial-worker` 统一启动。画像生成服务本身仍是外部依赖，需要提前运行。
 
 Runner 领取和执行复用 001–006 表结构。最终失败通知使用 007 新增的持久化 outbox，由 Worker 内独立线程投递，不占画像执行线程；提交、重复提交以及旧 Dify 的执行方式保持原行为。
 
-## 并发领取配置
+## 任务分工与并发
 
-Runner 与旧工作流 Worker 从同一 MySQL 队列竞争领取符合自身任务类型和环境条件的任务。每个空闲线程直接领取一条任务，数据库行锁及 `SKIP LOCKED` 防止重复领取。通过各自并发数控制处理容量，无需配置百分比或等待另一组溢出。
+各 Worker 读取同一 MySQL 队列，默认 Compose 固定以下分工。数据库行锁及 `SKIP LOCKED` 防止重复领取。
+
+| 服务 | 新任务 | 已绑定运行 |
+|---|---|---|
+| `worker` | 仅 `invitation_strategy` | 恢复原 `local-default` 运行 |
+| `commercial-worker` | 不领取，固定 `recovery_only` | 恢复原 `commercial-default` 运行 |
+| `profile-runner-worker` | 生产环境 `customer_profile` | 恢复原 Runner 运行 |
+
+API 将新任务的重试策略固定为 `single_target_v1`，新画像明确失败后仍由 Runner 按原次数上限重试。不会回到旧本地或商用画像工作流。已有任务保留原策略和绑定，不迁移远端运行。
 
 ```dotenv
-WORKER_ROUTING_MODE=parallel
+RETRY_POLICY_VERSION=single_target_v1
 WORKER_CONCURRENCY=8
 COMMERCIAL_WORKER_CONCURRENCY=1
 PROFILE_RUNNER_CONCURRENCY=1
 ```
 
-以上为默认并发示例，并不保证固定的处理份额；实际完成量还取决于工作流耗时和目标健康状态。Runner 仅领取生产环境中、有有效中国手机号和 1–50 字符业务批次的画像；邀约、测试环境以及不符合其入参要求的画像由支持这些任务的旧 Worker 处理。
+`WORKER_CONCURRENCY` 控制邀约并发，`COMMERCIAL_WORKER_CONCURRENCY` 控制旧商用运行恢复并发。Runner 仅领取生产环境中、有有效中国手机号和 1–50 字符业务批次的画像；测试画像需要单独配置测试 Runner，不符合入参要求的画像不会回退旧工作流。API 的 `REMOTE_API_ENV` 应为 `production`。
 
-旧 `PROFILE_ROUTING_*` 与 `PROFILE_RUNNER_TRAFFIC_PERCENT` 已停用，可从部署环境中删除；即使残留 `weighted` 或比例数值，也不会改变新版 Worker 的领取行为。旧版本 Worker 仍可能执行旧的分流规则，升级时需统一更新全部参与画像处理的 Worker。修改并发后需要重建容器；只执行 `restart` 不会加载新环境变量。
+旧 `PROFILE_ROUTING_*` 与 `PROFILE_RUNNER_TRAFFIC_PERCENT` 已停用。`WORKER_ROUTING_MODE=local_only` 仅限制普通新任务，不能阻止旧目标领取未绑定重试；新分支通过任务类型与 `recovery_only` 同时阻止新画像和未绑定重试进入旧画像流程。升级时统一更新 Worker，并核对旧独立 adapter，避免残留旧消费者。修改配置后需要重建容器；`restart` 不会加载新环境变量。
 
 ## 原有重试机制
 
-Runner 使用原队列的手机号及业务批次，新任务提交到生成服务的 `customer_profile_pipeline`，并按原机制持久化 run_id、目标 ID 和 revision 后查询。已有 `customer_profile_entry` 运行仍按原 run_id 恢复查询。轮询超时或重启继续查询同一个 run_id，不增加生成次数；明确失败后的次数上限、退避、资源池切换和目标优先策略沿用原 `RETRY_*` 配置。竞争领取不更改旧任务已经固化的 retry policy。
+Runner 使用原队列的手机号及业务批次，新任务提交到生成服务的 `customer_profile_pipeline`，并按原机制持久化 run_id、目标 ID 和 revision 后查询。已有 `customer_profile_entry` 运行仍按原 run_id 恢复查询。轮询超时或重启继续查询同一个 run_id，不增加生成次数；明确失败后的次数上限和退避沿用原 `RETRY_*` 配置。新画像使用单目标重试，旧任务保留已经固化的 retry policy。
 
 Runner 使用独立目标 ID，默认 `profile-runner-production`，角色为 `local`。旧目标的 ID、revision 和资源池保持原值。旧 Dify 仍使用原调用及重试方式，没有新增 Dify 提交／轮询恢复改造。
 
@@ -50,7 +58,7 @@ URL 指向 M2M 服务根地址，不带 `/api/v1/remote`。测试/生产分离�
 在部署用 `.env` 中添加以下字段，地址必须从新 Worker 容器内可达；示例地址应替换成实际地址。
 
 ```dotenv
-PROFILE_RUNNER_BASE_URL_PRODUCTION=http://host.docker.internal:18173
+PROFILE_RUNNER_BASE_URL_PRODUCTION=http://host.docker.internal:18000
 PROFILE_RUNNER_REQUEST_TIMEOUT_MS=15000
 PROFILE_RUNNER_POLL_INTERVAL_MS=2000
 PROFILE_RUNNER_POLL_TIMEOUT_MS=2400000
@@ -59,7 +67,7 @@ PROFILE_RUNNER_CONCURRENCY=1
 PROFILE_RUNNER_TARGET_MODE=active
 ```
 
-画像服务与 backend 在同一台 Docker Compose 宿主机时，使用上例的 `host.docker.internal:18173`；Runner 服务已配置 `host-gateway` 映射。部署在其他机器时，改用 Runner 容器可达的实际地址，不要使用 `127.0.0.1`。沿用原 `MYSQL_*`，确保连接同一个数据库且从容器内可访问。三个 Worker 共用根目录的 `.env`；其中的 `WORKFLOW_PLATFORM` 继续保持擎天或 Dify，Compose 只为 Runner 容器覆盖平台、画像任务范围及生产环境。
+画像服务与 backend 在同一台宿主机时，使用宿主机映射端口；当前部署为 `18000 -> 18173`，因此上例使用 `host.docker.internal:18000`。Runner 已配置 `host-gateway` 映射。部署在其他机器时，改用容器可达的实际地址。沿用原 `MYSQL_*`，确保连接同一个数据库。三个 Worker 共用 `.env`；`WORKFLOW_PLATFORM` 继续保持擎天或 Dify，Compose 为 Runner 覆盖平台及范围，并固定旧 Worker 的任务分工。
 
 生成服务目前串行执行画像，先保持 adapter 并发 1。增加 adapter 并发主要会增加生成服务内部排队量；不要直接增加共享 SQLite 的生成 Worker 副本。
 
@@ -91,7 +99,7 @@ docker compose stop worker commercial-worker profile-runner-worker
 docker compose up -d --build --no-deps --force-recreate worker commercial-worker profile-runner-worker
 ```
 
-新提交继续留在原队列；共享画像与邀约的 Worker 暂停期间，邀约也会短暂等待。保留业务 API 的 `REMOTE_API_URL`，它继续指向 backend 任务接口。核对启动日志中的平台、目标身份和并发数，领取原因保存在重试尝试表中。
+新提交继续留在原队列；Worker 暂停期间，邀约也会短暂等待。业务 API 的 `REMOTE_API_URL` 继续指向 backend 任务接口；当前宿主机端口为 `18007`，路径为 `/v1/customer-profile/tasks`。服务器本地 Compose 修改应先备份再合并，保留本节任务分工、已有目标身份和实际端口；合并后用 `docker compose config --quiet` 校验。
 
 ## 从旧独立 Runner 项目迁移
 
@@ -159,21 +167,21 @@ docker image tag OLD_COMMERCIAL_IMAGE_ID customer-profile-commercial-worker:pre-
 ## 检验
 
 1. 原 Worker 和新增 Runner 容器均为 running。Runner 启动日志应包含 `workflow_client_selected platform=runner`；各 Worker 的 `config_loaded` 应显示预期的 concurrency、目标身份和任务范围，无数据库或画像服务连接错误。
-2. 从原业务入口提交真实画像任务，至少验证一条 Runner 画像、一条旧工作流画像和一条邀约。确认任务成功，业务侧能看到实际画像结果；不要重复提交仍在执行的测试任务。
+2. 从原业务入口提交一条生产画像和一条邀约。新画像必须由 Runner 领取并出现 `runner_submitted`，邀约由旧本地 Worker 处理；确认结果已回写。旧本地／商用 Worker 不应领取新画像或未绑定画像重试；已有绑定运行保留原目标恢复。不要重复提交仍在执行的测试任务。
 3. 按测试手机号检查执行目标、运行 ID、状态、重试次数及错误码：
 
 ```sql
 SELECT customer_phonenumber, task_type, workflow_target_id, workflow_run_id,
-       status, attempt_count, last_error_code
+       status, retry_policy_version, attempt_count, last_error_code
 FROM customer_profile_tasks
 WHERE customer_phonenumber IN ('TEST_PHONE_1', 'TEST_PHONE_2');
 ```
 
-Runner 目标为 `profile-runner-production`。旧擎天沿用原目标 ID；旧 Dify 保留原执行方式，目标字段可能为空。任何可处理画像任务的空闲 Worker 都可立即领取，实际完成量无需符合固定比例。
+新画像目标必须为 `profile-runner-production`，重试策略为 `single_target_v1`。旧擎天运行沿用原目标 ID；旧 Dify 保留原执行方式，目标字段可能为空。默认 Compose 不按比例分流画像。
 
 ## 配置回滚
 
-先让 Runner 停止领取新任务，旧 Worker 继续通过空闲并发领取新任务。修改 Runner 配置：
+先让 Runner 停止领取新任务，旧 Worker 继续处理邀约；新画像暂留队列。修改 Runner 配置：
 
 ```dotenv
 PROFILE_RUNNER_TARGET_MODE=draining
@@ -200,7 +208,7 @@ WHERE workflow_target_id = 'profile-runner-production'
 docker compose stop profile-runner-worker
 ```
 
-停用 Runner 新任务领取使用 `draining`，它仍会恢复同一目标绑定的已有运行。配置回滚无需恢复数据库，也无需更新两个 API。
+停用 Runner 新任务领取使用 `draining`，它仍会恢复同一目标绑定的已有运行。以上步骤只停用新画像，不会自动恢复旧画像消费者。如果明确需要回到旧画像流程，再通过单独的 Compose override 恢复 `worker.WORKER_TASK_TYPES=customer_profile,invitation_strategy`、`commercial-worker.WORKER_TARGET_MODE=active`，并将 backend API 的 `RETRY_POLICY_VERSION` 改回所需旧策略。无需回滚数据库。
 
 ## 旧镜像回滚
 
@@ -208,16 +216,23 @@ docker compose stop profile-runner-worker
 
 ```yaml
 services:
+  api:
+    environment:
+      RETRY_POLICY_VERSION: throughput_first_v1
   worker:
     image: customer-profile-worker:pre-runner
+    environment:
+      WORKER_TASK_TYPES: customer_profile,invitation_strategy
   commercial-worker:
     image: customer-profile-commercial-worker:pre-runner
+    environment:
+      WORKER_TARGET_MODE: active
 ```
 
 使用发布前保存的镜像重建旧 Worker，不重新构建镜像：
 
 ```bash
-docker compose -p "$CP_BACKEND_PROJECT" -f docker-compose.yml -f compose.rollback.yml up -d --no-deps --no-build --pull never --force-recreate worker commercial-worker
+docker compose -p "$CP_BACKEND_PROJECT" -f docker-compose.yml -f compose.rollback.yml up -d --no-deps --no-build --pull never --force-recreate api worker commercial-worker
 ```
 
 沿用原目标 ID、revision、端口及卷。Runner 排空并停止后，可恢复原 `.env` 中的旧平台和重试配置；没有数据库结构需要回滚。

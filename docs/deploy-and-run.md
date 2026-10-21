@@ -81,11 +81,13 @@ Worker 现在把“资源池”和“具体工作流目标”分开：
 
 | 服务 | 目标 ID | 资源池 | 任务类型 |
 |------|---------|--------|----------|
-| `worker` | `local-default` | `local` | 客户画像、邀请策略 |
-| `commercial-worker` | `commercial-default` | `commercial` | 客户画像 |
-| `profile-runner-worker` | `profile-runner-production` | `local` | 生产环境客户画像 |
+| `worker` | `local-default` | `local` | 新邀约；恢复已绑定的旧运行 |
+| `commercial-worker` | `commercial-default` | `commercial` | 仅恢复已绑定旧运行（`recovery_only`） |
+| `profile-runner-worker` | `profile-runner-production` | `local` | 全部新生产画像及其重试 |
 
-商用目标配置自己的 TEST/PRODUCTION AppKey：
+默认 Compose 的 backend API 将新任务固定为 `single_target_v1`，画像失败后继续由 Runner 重试；不会切回旧画像流程。测试画像需要单独配置测试 Runner。已有旧任务保留原策略及目标身份。
+
+商用目标保留原 TEST/PRODUCTION AppKey，用于已有运行恢复：
 
 ```env
 QINGTIAN_COMMERCIAL_API_KEY_TEST=
@@ -97,7 +99,7 @@ QINGTIAN_COMMERCIAL_API_KEY_PRODUCTION=
 其他环境可继续增加带独立 AppKey 和唯一目标 ID 的 Worker，不需要修改数据库结构。
 
 普通任务通过 MySQL `FOR UPDATE SKIP LOCKED` 原子领取，任意数量的 Worker
-进程/线程都不会重复消费。消费模式由以下变量控制：
+进程/线程都不会重复消费。以下资源池模式仅在显式启用旧画像消费者时使用；默认 Compose 的本地 Worker 只领新邀约，商用 Worker 固定为恢复模式：
 
 ```env
 WORKER_ROUTING_MODE=parallel
@@ -232,8 +234,8 @@ docker compose up -d --build
 ```
 
 - **api**：对外暴露 HTTP，默认映射本机 `18008` → 容器内 `18008`。
-- **worker**：本地 Worker，后台轮询 MySQL 队列并调用工作流。
-- **commercial-worker**：一条商用工作流目标。
+- **worker**：仅领取新邀约，仍可恢复已绑定到本地目标的旧远程运行。
+- **commercial-worker**：固定 `recovery_only`，仅恢复已绑定的旧商用运行。
 - **profile-runner-worker**：独立画像生成服务的适配 Worker，只处理生产环境客户画像，默认并发 1；与其他服务统一启动。
 - **migrate**：一次性容器，启动时扫 `db/migrations/*.sql` 并按文件名顺序全部执行（所有 SQL 已实现幂等，可放心重复执行）。`api` 和三个 Worker 通过 `depends_on: service_completed_successfully` 等它退出成功后再启动；任一迁移失败都会阻塞业务进程启动。MySQL 尚未就绪时 `migrate` 会自动重试（次数与间隔由 `MIGRATION_DB_WAIT_MAX_TRIES` / `MIGRATION_DB_WAIT_INTERVAL_MS` 控制，默认 30 次 × 2s）。
 
@@ -364,4 +366,4 @@ API_E2E_BASE_URL=http://127.0.0.1:8000 ./scripts/api_e2e_curl.sh
 
 ## 新增画像 Runner Worker
 
-`profile-runner-worker` 已合入根目录 `docker-compose.yml`，使用 `docker compose up -d --build` 与其他服务统一启动。配置、并发领取及旧独立项目迁移见 [Runner 接入与部署](profile-runner-integration.md)。执行复用 001–006 表结构与重试机制，最终失败通知通过 007 增加 outbox。
+`profile-runner-worker` 已合入根目录 `docker-compose.yml`，使用 `docker compose up -d --build` 与其他服务统一启动。任务分工、单目标重试及旧独立项目迁移见 [Runner 接入与部署](profile-runner-integration.md)。执行复用 001–006 表结构与重试机制，最终失败通知通过 007 增加 outbox。

@@ -19,7 +19,7 @@ cp .env.example .env
 | `WORKFLOW_PLATFORM` | 共享配置保持 `dify` 或 `qingtian`；Runner 服务单独覆盖为 `runner` |
 | `DIFY_*` 或 `QINGTIAN_*` | 对应平台的地址、测试／生产画像 Key、邀约 Key 和用户 ID，完整字段见部署运行指南 §2 |
 | `QINGTIAN_COMMERCIAL_API_KEY_TEST` / `QINGTIAN_COMMERCIAL_API_KEY_PRODUCTION` | 使用擎天时，商用 Worker 的独立画像 Key |
-| `PROFILE_RUNNER_BASE_URL_PRODUCTION` | 从 Runner 容器内可访问的画像生成服务地址 |
+| `PROFILE_RUNNER_BASE_URL_PRODUCTION` | 从 Runner 容器内可访问的生产画像生成服务地址；默认 Compose 的新画像全部由它处理 |
 
 生成服务在同一宿主机时，可使用 `http://host.docker.internal:18000`；Runner 服务已配置 `host-gateway`。远端服务填写实际地址。容器里的 `127.0.0.1` 指向该容器自身。
 
@@ -45,15 +45,17 @@ API 和三个 Worker 应运行，`migrate` 应以 0 退出，健康检查中的�
 
 | 变量 | 默认值 | 作用 |
 |---|---|---|
-| `WORKER_CONCURRENCY` | 8 | 旧 Worker 单进程并发 |
-| `COMMERCIAL_WORKER_CONCURRENCY` | 1 | 商用 Worker 单进程并发 |
+| `WORKER_CONCURRENCY` | 8 | 邀约 Worker 单进程并发 |
+| `COMMERCIAL_WORKER_CONCURRENCY` | 1 | 旧商用运行恢复并发 |
 | `PROFILE_RUNNER_CONCURRENCY` | 1 | Runner 适配 Worker 并发 |
-| `WORKER_ROUTING_MODE` | parallel | 旧本地／商用目标的普通任务领取策略 |
+| `WORKER_ROUTING_MODE` | parallel | 显式启用旧画像消费者时的资源池闸门；默认 Compose 不让旧目标领取新画像 |
 | `TASK_QUEUE_MAX_WAITING` | 500 | 各任务类型 queued 数量上限 |
 
 仅修改 `.env` 后执行 `docker compose up -d`，让 Compose 重建受影响的容器并加载配置。`restart` 不会重新注入环境变量。从旧的比例分流版本升级时，按 [Runner 升级步骤](profile-runner-integration.md#docker-compose-统一启动)统一更新全部画像 Worker。
 
-`WORKER_ROUTING_MODE=parallel` 时，可处理画像任务的空闲 Worker 从同一队列竞争领取，各自并发数控制在途任务容量。没有固定份额或画像等待溢出时间；实际处理量取决于可用并发、耗时和目标健康状态。邀约继续走旧工作流。旧 `PROFILE_ROUTING_*` 和 `PROFILE_RUNNER_TRAFFIC_PERCENT` 已停用，残留环境变量不再影响领取。
+默认 Compose：`worker` 仅领取新邀约，`commercial-worker` 固定为 `recovery_only`，`profile-runner-worker` 领取新生产画像。API 将新任务的重试策略固定为 `single_target_v1`，新画像失败后继续由 Runner 处理。已绑定的旧远程运行仍由原目标恢复；旧 Dify 在途任务应完成后再重建容器。测试画像需要单独配置测试 Runner，不会回退旧画像服务。
+
+旧 `PROFILE_ROUTING_*` 和 `PROFILE_RUNNER_TRAFFIC_PERCENT` 已停用，残留环境变量不再影响领取。服务器已有 Compose 修改应先备份再合并，保留上述任务分工和实际端口；当前部署的 backend 宿主机端口为 `18007`，CustomerProfile 为 `18000`。
 
 ## 4. 日常命令
 

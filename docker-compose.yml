@@ -1,4 +1,5 @@
-# API plus local/commercial/Runner Workers. MySQL and workflow services are external (configure via .env).
+# API, invitation Worker, legacy recovery Worker and profile Runner.
+# MySQL and workflow services are external (configure via .env).
 # Shared volume: API saves multipart uploads here; worker reads paths for DIFY_IMAGE_MODE=file_id.
 services:
   migrate:
@@ -21,6 +22,8 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: "18008"
       TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
+      # New profiles have one execution target; retries stay on the Runner.
+      RETRY_POLICY_VERSION: single_target_v1
     volumes:
       - task_uploads:/var/lib/customer-profile/task-uploads
       - ./logs:/app/logs
@@ -43,7 +46,8 @@ services:
       WORKFLOW_TARGET_ID: local-default
       WORKFLOW_TARGET_REVISION: "${LOCAL_WORKFLOW_TARGET_REVISION:-v1}"
       WORKER_TARGET_MODE: "${LOCAL_WORKER_TARGET_MODE:-active}"
-      WORKER_TASK_TYPES: "customer_profile,invitation_strategy"
+      # New tasks are invitations only; owned remote runs can still recover.
+      WORKER_TASK_TYPES: invitation_strategy
     volumes:
       - task_uploads:/var/lib/customer-profile/task-uploads
       - ./logs:/app/logs
@@ -53,7 +57,7 @@ services:
     restart: unless-stopped
 
   commercial-worker:
-    # Commercial workflow target 01.
+    # Recover existing commercial runs without accepting new profile tasks.
     build: .
     command: ["customer-profile-worker"]
     env_file:
@@ -66,7 +70,7 @@ services:
       # Keep the legacy workflow lineage id so pre-006 runIds remain recoverable.
       WORKFLOW_TARGET_ID: commercial-default
       WORKFLOW_TARGET_REVISION: "${COMMERCIAL_1_WORKFLOW_TARGET_REVISION:-v1}"
-      WORKER_TARGET_MODE: "${COMMERCIAL_1_WORKER_TARGET_MODE:-active}"
+      WORKER_TARGET_MODE: recovery_only
       WORKER_TASK_TYPES: customer_profile
       WORKER_CONCURRENCY: "${COMMERCIAL_WORKER_CONCURRENCY:-1}"
       COMMERCIAL_QUEUE_THRESHOLD: "${COMMERCIAL_QUEUE_THRESHOLD:-5}"
