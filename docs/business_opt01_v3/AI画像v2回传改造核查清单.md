@@ -4,7 +4,7 @@
 > 本文逐项比对新契约与当前实现的差异，并列出项目内部需要跟着动的地方。
 > **本文只做核查，不含设计与实现方案。**
 >
-> 依据：`docs/AI画像远程回传接口数据结构说明.md`、`docs/Notes_new.txt`
+> 依据：`docs/business_opt01_v3/AI画像远程回传接口数据结构说明.md`、`docs/business_opt01_v3/Notes_new.txt`
 > （线上 `GET /api/v1/remote/config/note-attributes` 实测返回）。
 > 当前实现：`notes_contract.py` / `projection.py` / `customer_profile_l3.py` /
 > `customer_profile_production.py`。
@@ -368,6 +368,6 @@ decision_psychology    [ 4 个固定 key ]
 
 ## 附：本次核对中的一处计数修正
 
-分类字段数在初版核对中算错，已按 `docs/Notes_new.txt` 逐项重数并更正为
+分类字段数在初版核对中算错，已按 `docs/business_opt01_v3/Notes_new.txt` 逐项重数并更正为
 第 2.4 节的数字（基础身份 15、购车需求 6、预算与金融 4、决策与节奏 5、
 个人偏好与备注 9、竞品对比 4、地域与生活圈 2，合计 45）。

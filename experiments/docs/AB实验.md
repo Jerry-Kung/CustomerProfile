@@ -2,12 +2,12 @@
 
 > 用途：把「客户人设画像输出质量优化」的新旧两条链路放在**同一批号码、同一套配置**下
 > 各跑一遍，产出可逐案比对的两臂批次。
-> 实验设计与指标口径见 `../business_opt01/落地方案.md`；跑批脚本的通用用法见
-> `./基线实验.md`（本文件只讲**两臂**相关的部分，不重复那份的通用流程）。
+> 实验设计与指标口径见 `../../docs/business_opt01_v3/README.md`；跑批脚本的通用用法见
+> `../../docs/runbooks/基线实验.md`（本文件只讲**两臂**相关的部分，不重复那份的通用流程）。
 
 ## 1. 它解决什么问题
 
-`基线实验.md` 讲的是「改动前后质量有没有崩」，对照物是**历史批次**。AB 实验更进一步：
+`../../docs/runbooks/基线实验.md` 讲的是「改动前后质量有没有崩」，对照物是**历史批次**。AB 实验更进一步：
 两条链路要**同时**跑，逐案比对「同一个客户，两套实现各给出什么画像」。
 
 因此它比基线多一条硬要求：**两臂之间除了被测的那一处，其余必须完全一致**。
@@ -77,7 +77,7 @@ git worktree add ../cp-baseline <dev-business-opt01 的 HEAD>
 | 轮次 | 范围 | 目的 |
 |---|---|---|
 | R0 | 3 案 | 新链路能跑完、产物形状正确 |
-| R1 | 13 案（探针集） | 逐案核对「已知正确答案」，名单见 `落地方案.md` §5.4 |
+| R1 | 13 案（探针集） | 逐案核对「已知正确答案」，名单见 `../../docs/business_opt01_v3/README.md` |
 | R2 | 39 案 | 出正式 AB 对比报告 |
 
 **R0 起就要真实出网**（LLM + AUC + mhero）。AUC 走共享缓存，主要成本在 LLM。
@@ -85,12 +85,12 @@ git worktree add ../cp-baseline <dev-business-opt01 的 HEAD>
 **轮次记录**：
 
 - **R0**（2026-10-10，3 案，实验臂 3/3 `succeeded`）：结论与三条质量问题见
-  `../business_opt01/R0结果.md`。该文件同时记录了**判据 3 未满足**的一个实例：
+  `../../docs/business_opt01_v3/README.md`。该文件同时记录了**判据 3 未满足**的一个实例：
   跑批时被测代码尚未提交，`manifest.code_commit` 记的是 HEAD 而实际执行的是工作区代码，
   批次不可从所记提交复原。跑 R1 前须先提交。
 - **R1**（2026-10-10，13 案，提交 `e0eb935`）：**判据 3 首次通过**。但 Notes 从基线的 360
   掉到 158，根因是**三个工程缺陷**（锚点长度门过严、空产出清空字段、枚举键附录位置不当），
-  已由 `b6a7023` 修复。结论见 `../business_opt01/R1结果.md`。
+  已由 `b6a7023` 修复。结论见 `../../docs/business_opt01_v3/README.md`。
 - **R1b**（2026-10-10，13 案，提交 `b6a7023`）：修复后复跑，13/13 `succeeded`，
   四条判据全过。Notes 回到 **192**，定位丢失 237→30。**R1 首轮的数字不可对外引用**
   （它测的是带缺陷的实现），只引 R1b。
@@ -104,9 +104,9 @@ git worktree add ../cp-baseline <dev-business-opt01 的 HEAD>
 | # | 要求 | 判据 | 怎么核 |
 |---|---|---|---|
 | 1 | 号码一致 | 两臂 `phones_sha256` 相同 | 比 `manifest.json` 的该字段 |
-| 2 | 定义单值 | 每臂内 39 案 `definition_hash` 只有一个值 | 见 `基线实验.md` §5 的 PowerShell 单行 |
+| 2 | 定义单值 | 每臂内 39 案 `definition_hash` 只有一个值 | 见 `../../docs/runbooks/基线实验.md` §5 的 PowerShell 单行 |
 | 3 | 代码冻结 | 跑批期间不改代码 | 在固定 commit 的 worktree 里跑；看 `manifest.code_commit` |
-| 4 | 不回写 | 两臂 `WRITEBACK_ENABLED=false` | 查 `request_attempts` 里 `update-profile` 为 0（命令见 `基线实验.md` §8） |
+| 4 | 不回写 | 两臂 `WRITEBACK_ENABLED=false` | 查 `request_attempts` 里 `update-profile` 为 0（命令见 `../../docs/runbooks/基线实验.md` §8） |
 
 **第 2 条两臂之间不同是预期的**——那是被测的那一处。**每臂内部**必须单值。
 
@@ -124,7 +124,7 @@ experiments/abexperiments/
 ```
 
 单批次的内部结构（`manifest.json` / `summary.md` / `trace.db` / `runs/<号码>/…`）与
-`基线实验.md` §4 逐字相同——两臂跑的是同一个脚本，没有第二套归档格式。
+`../../docs/runbooks/基线实验.md` §4 逐字相同——两臂跑的是同一个脚本，没有第二套归档格式。
 
 **`manifest.json` 的 `workflow_id` 记的是实际使用的入口工作流**，不是缺省常量。
 写死常量会让业务测试臂的批次声称自己跑的是基线图，第 1、2 条判据随之失效。
@@ -139,12 +139,12 @@ experiments/abexperiments/
 ## 7. 禁用命令
 
 `git clean -xdf` / `git clean -X` 会**一并删除**整个 `experiments/`（含历史基线与共享
-转写缓存）。**禁用这两条命令。** 详见 `基线实验.md` §7。
+转写缓存）。**禁用这两条命令。** 详见 `../../docs/runbooks/基线实验.md` §7。
 
 ## 8. 常见问题
 
 **「实验臂跑完是 succeeded，能下结论了吗？」**
-不能。`succeeded` 只说明运行没失败，不说明新链路**走到了该走的分支**——`基线实验.md` §9
+不能。`succeeded` 只说明运行没失败，不说明新链路**走到了该走的分支**——`../../docs/runbooks/基线实验.md` §9
 讲的 `skipped` 陷阱在这里同样成立。先核 §4 的四条底线，再看产物。
 
 **「两臂的 `definition_hash` 不同，是不是跑错了？」**

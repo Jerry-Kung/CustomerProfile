@@ -77,6 +77,11 @@
 
 补充规则：
 
+- **证据与推理链里禁止出现英文**：不得写英文字段名（如 `planned_purchase_time`）、
+  英文取值（如 `within_3_months`、`needs_license`、`loan`），也不得出现 `key=value`
+  这类内部写法。事实表给你的就是中文说法，一律照着中文说。
+  - 反例：「已定稿事实显示planned_purchase_time为within_3_months，属中期窗口」
+  - 正例：「事实表显示计划时间在3个月内，属中期窗口而非近期」
 - 一条证据放对位置：需求类放 `want_to_buy`，条件类放 `can_to_buy`，时间类放 `when_to_buy`，实际推进动作放 `homework_evidence`。
 - **不得把坐席/销售说的话当成客户证据**（例如坐席报的门店地点、报的报价），除非客户对此作出了回应。
 - 同一条依据不要在多个位置重复写。

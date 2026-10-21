@@ -26,7 +26,7 @@ def claim(attribute, value, channel="试驾录音信息", **kwargs):
 def test_snapshot_is_stable():
     """契约快照的规模是既定的：45 字段、7 分类、15 基础身份、17 单选 / 7 多选。
 
-    这组数字来自 v2 契约（``docs/Notes_new.txt``，payload 签名 ``b36e78edf9a2``），
+    这组数字来自 v2 契约（``docs/business_opt01_v3/Notes_new.txt``，payload 签名 ``b36e78edf9a2``），
     由 ``scripts/snapshot_note_contract.py --from-response`` 固化。相比上一版
     （47 字段 / 6 分类）：下线 17 个字段、新增 15 个、9 个同名改定义，
     并新增「地域与生活圈」分类。改动此处即改契约，须走评审。
@@ -606,6 +606,41 @@ def test_inferred_notes_never_quote_tier_labels():
     assert "0.9" not in blob
 
 
+# ---------------------------------------------------------------- 收入档位换算
+
+def test_income_band_maps_to_range_in_facts_and_notes():
+    """第三方「N档收入」进 facts 与 Notes 时都是金额区间，不是档位原文。"""
+    result = proj.project(
+        [claim("annual_income", "5档收入", channel="第三方画像数据", basis="inferred_high",
+               basis_of_inference=("第三方预测收入水平",))]
+    )
+    assert result.facts["annual_income"] == "40-60万"
+    note = next(u for u in result.notes_updates if u["attribute_key"] == "annual_income")
+    assert note["attribute_value"] == "40-60万"
+    assert "档收入" not in note["attribute_value"]
+
+
+def test_all_six_income_bands_have_ranges():
+    expected = {"1档收入": "8-15万", "2档收入": "10-20万", "3档收入": "20-30万",
+                "4档收入": "30-40万", "5档收入": "40-60万", "6档收入": "60万以上"}
+    for band, rng in expected.items():
+        assert proj.normalize_income(band) == rng
+
+
+def test_income_amounts_are_not_rewritten():
+    """客户自述或模型推断的金额不是档位，必须原样透传。"""
+    for value in ("30-50万", "10-20万", "8w-15w", "60万以上"):
+        assert proj.normalize_income(value) is None
+    result = proj.project([claim("annual_income", "30-50万", basis="inferred_high",
+                                 basis_of_inference=("关注 30 万以上车型",))])
+    assert result.facts["annual_income"] == "30-50万"
+
+
+def test_income_band_is_normalized_in_serialized_output():
+    """L2 兜底给的档位原文也在出口收口（它不经过 ``project()`` 的落值分支）。"""
+    assert proj.serialize_value("annual_income", "4档收入") == "30-40万"
+
+
 # ---------------------------------------------------------------- R2 缺字段候选
 
 def test_candidates_include_missing_contract_fields():
@@ -926,3 +961,38 @@ def test_unknown_name_note_explains_absence():
     assert note["attribute_value"] == "未知"
     assert note["reasoning_detail"]["summary"] == "客户信息中未查找到真实姓名"
     assert note["reasoning_detail"]["confidence"] == 1.0
+
+
+def test_unknown_name_falls_back_to_phone_suffix():
+    """姓名查不到但有手机号时，兜底输出「客户」+后四位（v3.5，2026-10-20 用户口径）。"""
+    result = proj.project(
+        [
+            claim("occupation", "教师", channel="试驾录音信息"),
+            claim("phone_number", "15308826588", channel="客户留资手机号"),
+        ]
+    )
+    assert result.facts.get("customer_name") == "客户6588"
+    note = _note(result, "customer_name")
+    assert note["attribute_value"] == "客户6588"
+    # 兜底值是确定结论，不是猜测：置信度仍为 1.0，Notes 说明与「未知」同口径。
+    assert note["reasoning_detail"]["summary"] == "客户信息中未查找到真实姓名"
+    assert note["reasoning_detail"]["confidence"] == 1.0
+
+
+def test_real_name_is_never_replaced_by_phone_suffix():
+    """有可靠姓名时不受兜底影响。"""
+    result = proj.project(
+        [
+            claim("customer_name", "陈", channel="试驾录音信息"),
+            claim("phone_number", "15308826588", channel="客户留资手机号"),
+        ]
+    )
+    assert result.facts.get("customer_name") == "陈"
+
+
+def test_unresolved_customer_name_without_phone_is_unknown():
+    """手机号缺失或不足四位时退回「未知」。"""
+    assert proj.unresolved_customer_name("") == "未知"
+    assert proj.unresolved_customer_name("123") == "未知"
+    assert proj.unresolved_customer_name("15308826588") == "客户6588"
+

@@ -3,8 +3,8 @@
 > 前端（业务架构师侧）指定了新的回传契约：`analysis_result` 六键 + 一份 45 字段的 Notes 清单。
 > 本文是落地计划：目标、验收标准、阶段划分、每阶段的改动面与验证方式。
 >
-> 差异逐项核对见 `docs/AI画像v2回传改造核查清单.md`；本轮不解决的问题见 `docs/遗留问题清单.md`。
-> 契约原文：`docs/AI画像远程回传接口数据结构说明.md`；线上实测清单：`docs/Notes_new.txt`。
+> 差异逐项核对见 `docs/business_opt01_v3/AI画像v2回传改造核查清单.md`；本轮不解决的问题见 `docs/遗留问题清单.md`。
+> 契约原文：`docs/business_opt01_v3/AI画像远程回传接口数据结构说明.md`；线上实测清单：`docs/business_opt01_v3/Notes_new.txt`。
 >
 > 立项：2026-10-15。承接臂：`customer_profile_pipeline`（对外口径改称**业务测试臂**）。
 >
@@ -30,7 +30,7 @@
 
 | # | 标准 | 怎么证 |
 |---|---|---|
-| A1 | 契约快照为 45 字段 / 7 分类，且可由线上 payload 复现 | `python scripts/snapshot_note_contract.py --from-response docs/Notes_new.txt --check` 输出 `[OK] … 45 字段` |
+| A1 | 契约快照为 45 字段 / 7 分类，且可由线上 payload 复现 | `python scripts/snapshot_note_contract.py --from-response docs/business_opt01_v3/Notes_new.txt --check` 输出 `[OK] … 45 字段` |
 | A2 | 单号端到端跑完，`basic_notes_updates` 的每个 `attribute_key` 都在新契约 45 键内 | 批次产物里逐条比对，零未知键 |
 | A3 | 三个条目化区块的 id 在同客户内全局唯一 | 断言 `purchase_decisions` / `deal_battle` / `decision_psychology` 取出的 id 集合无重复 |
 | A4 | 调测期零真实回传 | 批次 `attempts.json` 中零条 `update-profile`；回写节点产出 `writeback_skipped: true` |

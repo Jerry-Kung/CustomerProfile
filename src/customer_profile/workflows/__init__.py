@@ -26,6 +26,7 @@ WORKFLOW_MODULES: tuple[str, ...] = (
     "customer_profile.workflows.test_drive_audio",
     "customer_profile.workflows.outbound_call_audio",
     "customer_profile.workflows.audio_content_extract",
+    "customer_profile.workflows.audio_content_extract_roled",
     "customer_profile.workflows.jiguang_data",
     "customer_profile.workflows.chat_history_data",
     "customer_profile.workflows.user_feedback_data",

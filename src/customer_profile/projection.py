@@ -43,6 +43,9 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import internal_fields as inf
 from . import notes_contract as nc
+from .income_band import INCOME_BAND_RANGES, normalize_income
+"""档位→区间换算的正身已下沉到 :mod:`customer_profile.income_band`（取数节点也用它）。
+此处保留导出，供离线回放旧产物与直接构造档位断言的调用方沿用。"""
 
 # ====================================================================
 # 来源分级
@@ -178,6 +181,15 @@ GENDER_WEAK_TIERS: frozenset[str] = frozenset({FIRSTHAND, SOCIAL, PREDICTION})
 优先级：登记称呼 > 一手自述 > 头像性别标签 > 录音性别标签（用户口径）。
 一手交互整体入弱档，是因为录音里的性别标签**天生不可靠**、且说话人未必是客户本人；
 非登记来源的性别一律降为 ``inferred_low``（``_confidence_for`` 随之给 0.5，满足「≤0.6」）。
+"""
+
+SPEAKER_SALES = "销售方"
+SPEAKER_CUSTOMER = "客户方"
+SPEAKER_UNKNOWN = "未知来源"
+"""录音证据的说话方（与 :mod:`customer_profile.workflows.role_labelling` 同一套词表）。
+
+只在**录音渠道**的证据上有值；其余渠道为空串，空值不加任何前缀——「不是录音」与
+「身份不明」是两种情况，混用会让销售误以为截图、登记数据也不可信。
 """
 
 SALESPERSON_MARKERS: tuple[str, ...] = (
@@ -346,6 +358,14 @@ class Claim:
 
     值不是原文给的（是模型改过的），但改动前的原文必须留下——否则销售点开这条
     分不清「客户说的」与「模型改的」（v3 接口一）。``verbatim`` 时为空。
+    """
+
+    speaker_role: str = ""
+    """录音证据的说话方：``销售方`` / ``客户方`` / ``未知来源``。
+
+    由 L1 定位层按引文所在的句子反查得到（非录音渠道为空）。出口证据位据此加前缀：
+    销售原话、客户原话、说话者身份存疑（信息可靠度低）。空值不加前缀——那不是
+    「身份不明」，而是「这条证据不是录音」。
     """
 
     @property
@@ -773,6 +793,37 @@ def project(
 
     # ---- c/d/e 冲突消解 + 枚举归一 + 单多值约束
     for attribute, group in surviving.items():
+        # ---- 收入字段只认收入标签（v3.6 / 2026-10-20）：第三方画像里有一批形态相似
+        #      但语义不同的标签——「预测车型价格偏好」「预测手机价格」给的是**车价 /
+        #      手机价**区间，不是收入。模型把它们当作收入写进 ``annual_income``，
+        #      实测产出「中低端（8w-15w）」（13570263031：标签原文 4档收入 → 应 30-40万）。
+        #      非收入标签整条拒收，而不是降级：它描述的根本不是这个字段。
+        if attribute == "annual_income":
+            allowed = [c for c in group if not _non_income_tag(c)]
+            dropped = [c for c in group if _non_income_tag(c)]
+            for claim in dropped:
+                result.rejected.append(
+                    {
+                        "attribute": attribute,
+                        "value": claim.value,
+                        "rule": "e_non_income_tag",
+                        "reason": "取值来自「车型价格 / 手机价格」等非收入标签，"
+                        "描述的不是年收入",
+                    }
+                )
+            if not allowed:
+                # 全是非收入标签：留白转人工，不用一个描述车价的区间冒充收入
+                # （宁空勿错）。L2 兜底仍可据职业等给出软推断。
+                result.to_confirm.append(
+                    {
+                        "attribute_key": attribute,
+                        "candidates": [c.value for c in dropped],
+                        "reason": "收入字段仅有非收入标签支撑（车价/手机价格）",
+                        "suggested_action": "向客户或销售确认年收入",
+                    }
+                )
+                continue
+            group = allowed
         best, same_tier = _pick_best(group)
         values = _diverse(claim.value for claim in same_tier)
 
@@ -859,7 +910,13 @@ def project(
                 )
             result.facts[attribute] = normalized[0] if inf.is_single_value(attribute) else normalized
         else:
-            result.facts[attribute] = values[0] if len(values) == 1 else values
+            chosen = values[0] if len(values) == 1 else values
+            # 第三方收入档位（`N档收入`）在**事实层**就换成金额区间：下游分析、
+            # 卡片、Notes 全读 facts，晚换一处就有一处会漏出「5档收入」。
+            # 非档位形态（客户自述金额、推断金额）原样保留。
+            if attribute == "annual_income" and not isinstance(chosen, (list, tuple)):
+                chosen = normalize_income(chosen) or chosen
+            result.facts[attribute] = chosen
 
     # ---- f 跨字段规则
     _apply_cross_field_rules(result, context)
@@ -867,11 +924,14 @@ def project(
     # ---- 等级唯一化（跨产物字段）
     _unify_level(result)
 
-    # ---- 姓名兜底（v3.5，用户口径）：没有任何可靠来源指向真实姓名时，固定写「未知」。
+    # ---- 姓名兜底（v3.5 / 2026-10-20 用户口径）：没有任何可靠来源指向真实姓名时，
+    #      输出「客户」+手机号后四位（如「客户0087」），没有手机号才写「未知」。
     #      留白会让下游误读成「没提取到」，并被 L2 兜底补一个假姓名（线上实测补出过
     #      ``customer_name="先生"``）。这里一次性落定，兜底层不再经手姓名字段。
     if "customer_name" not in result.facts:
-        result.facts["customer_name"] = CONFIDENCE_UNKNOWN_NAME
+        result.facts["customer_name"] = unresolved_customer_name(
+            result.facts.get("phone_number")
+        )
         result.basis["customer_name"] = INFERRED_LOW
 
     # ---- g 缺失即留白 + 产出 notes_updates
@@ -1000,6 +1060,10 @@ def serialize_value(attribute: str, value: Any) -> str:
     ``driver_license_status`` 写成字典，而基线同字段是字符串。这是**下游契约违约**，
     与「枚举键填中文」同一性质，故在 L2 出口统一收口，不指望模型自觉。
     """
+    if attribute == "annual_income" and not isinstance(value, (Mapping, list, tuple)):
+        # 兜一层：事实层已换算过，但 L2 兜底的候选值与终判可能仍是档位原文，
+        # 它们不经过 ``project()`` 的落值分支，只在这里收口。
+        value = normalize_income(value) or value
     if isinstance(value, Mapping) or (
         isinstance(value, (list, tuple))
         and any(isinstance(item, Mapping) for item in value)
@@ -1025,12 +1089,36 @@ def serialize_value(attribute: str, value: Any) -> str:
 
 
 CONFIDENCE_UNKNOWN_NAME = "未知"
-"""姓名查不到可靠来源时的固定取值（用户口径 v3.5）。
+"""姓名查不到可靠来源、且**没有手机号可拼兜底**时的取值（用户口径 v3.5）。
 
-姓名与其它字段不同：**没有可靠来源时必须显式说「未知」**，而不是留白，更不是拿
+姓名与其它字段不同：**没有可靠来源时必须显式给一个占位值**，而不是留白，更不是拿
 称呼（先生/女士）、昵称、企业名去凑。留白会让下游（卡片、L3 校验）读成「没提取到」，
 进而被兜底层再补一个假姓名——线上实测补出过 ``customer_name="先生"``。
 """
+
+NAME_PLACEHOLDER_PREFIX = "客户"
+"""姓名兜底前缀（用户口径，2026-10-20）：优先输出「客户」+手机号后四位。"""
+
+_NAME_PLACEHOLDER_PATTERN = re.compile(r"^客户\d{4}$")
+"""姓名兜底值「客户0087」的形态。"""
+
+
+def unresolved_customer_name(phone_number: Any) -> str:
+    """姓名查不到可靠来源时的兜底取值。
+
+    有手机号 → 「客户」+后四位（如「客户0087」），销售靠它把卡片对上人；手机号缺失或
+    不足 4 位 → 退回「未知」。
+    """
+    digits = re.sub(r"\D", "", _as_text(phone_number))
+    if len(digits) >= 4:
+        return f"{NAME_PLACEHOLDER_PREFIX}{digits[-4:]}"
+    return CONFIDENCE_UNKNOWN_NAME
+
+
+def name_is_unresolved(value: Any) -> bool:
+    """取值是否为「查不到真实姓名」的兜底形态（固定「未知」或「客户+后四位」）。"""
+    text = _as_text(value)
+    return text == CONFIDENCE_UNKNOWN_NAME or bool(_NAME_PLACEHOLDER_PATTERN.match(text))
 
 NAME_SALUTATION_VALUES: frozenset[str] = frozenset(
     {
@@ -1060,9 +1148,10 @@ def _confidence_for(result: Projection, key: str, sources: Sequence[Claim]) -> f
       （有原文切片或登记档）时 1.0；其余登记档来源 1.0。其它 ``fact`` 落在 0.85–0.95。
     - **高可信结论**：多条不同渠道同向 → 0.95；否则按自报分落在 0.70–0.90。
     - **低置信推断**：按自报分落在 0.40–0.60；自报分低于 0.4 的纯猜测落在 0.20–0.30。
-    - **姓名「未知」** 恒 1.0——「查遍了也没有」本身是确定的事实，不是猜测。
+    - **姓名兜底值**（「未知」或「客户+后四位」）恒 1.0——「查遍了也没有」本身是
+      确定的事实，不是猜测。
     """
-    if key == "customer_name" and result.facts.get(key) == CONFIDENCE_UNKNOWN_NAME:
+    if key == "customer_name" and name_is_unresolved(result.facts.get(key)):
         return 1.0
 
     raw = next((c.confidence for c in sources if c.confidence is not None), None)
@@ -1149,9 +1238,60 @@ def _strip_conclusion(text: str) -> str:
     return head
 
 
+def _speaker_prefix(role: str) -> str:
+    """证据位的说话方前缀（用户口径，2026-10-20）。
+
+    - ``销售方`` → 「销售原话：」——这条证据出自我方销售，**不是客户说的**；
+    - ``客户方`` → 「客户原话：」；
+    - ``未知来源`` → 「说话者身份存疑，信息可靠度低：」——身份不明，销售据此自行打折；
+    - 空值 → 不加前缀。空不是「身份不明」，而是「这条证据不是录音」（截图、登记、
+      第三方画像等），给它们加前缀会凭空造出一个不存在的可信度信号。
+    """
+    if role == SPEAKER_SALES:
+        return "销售原话："
+    if role == SPEAKER_CUSTOMER:
+        return "客户原话："
+    if role == SPEAKER_UNKNOWN:
+        return "说话者身份存疑，信息可靠度低："
+    return ""
+
+
 def _is_conclusion(text: str) -> bool:
     """整段皆为结论（无任何事实部分）时为真。"""
     return not _strip_conclusion(text)
+
+
+INCOME_TAG_KEYWORD = "收入"
+"""收入标签名的判定词：「预测收入水平」含它，「预测车型价格偏好」「预测手机价格」不含。"""
+
+
+def _non_income_tag(claim: Claim) -> bool:
+    """这条收入断言是否由**非收入**的第三方标签支撑（v3.6 / 2026-10-20）。
+
+    只判第三方预测档：一手交互与登记来源的收入表述不在此列（那可能是客户自述或
+    销售确认，不是标签串字段的问题）。
+
+    判定看取值、标签名（``quote``）、当归原文与推断依据——L1 按模板要求把标签名抄进
+    ``quote`` 与 ``basis_of_inference``，旧产物至少有一处。三处都不含「收入」即判非收入。
+    实测形态：``annual_income="中低端（8w-15w）"``，标签名「预测车型价格偏好」
+    （13570263031；该案另有 ``4档收入`` 标签，理应取 30-40万）。
+    """
+    if claim.tier != PREDICTION:
+        return False
+    parts = [
+        _as_text(claim.value),
+        claim.quote or "",
+        claim.source_quote or "",
+        *claim.basis_of_inference,
+    ]
+    text = " ".join(parts)
+    # 只拦**看得出出自标签**的断言：有标签名（quote / 依据里出现「标签」）却没有「收入」。
+    # 没有任何标签痕迹的，是模型基于别的事实自行推断的金额（如「职业为网约车司机，
+    # 推断 20-40 万」），不该按标签串字段处理，原样放行。
+    tagged = bool(claim.quote or claim.source_quote) or "标签" in text
+    if not tagged:
+        return False
+    return INCOME_TAG_KEYWORD not in text
 
 
 def _salesperson_marked(claim: Claim) -> bool:
@@ -1192,12 +1332,15 @@ def _readable_evidence(sources: Sequence[Claim]) -> list[str]:
                 evidence.append(tag)
             continue
         if claim.quote:
-            text = f"{claim.channel}：{claim.quote}" if claim.channel else claim.quote
+            prefix = _speaker_prefix(claim.speaker_role)
+            body = f"{claim.channel}：{claim.quote}" if claim.channel else claim.quote
+            text = f"{prefix}{body}"
             if text not in evidence:
                 evidence.append(text)
             continue
         if claim.source_quote:
-            text = f"原文「{claim.source_quote}」（经纠错归一）"
+            prefix = _speaker_prefix(claim.speaker_role)
+            text = f"{prefix}原文「{claim.source_quote}」（经纠错归一）"
             if text not in evidence:
                 evidence.append(text)
             continue
@@ -1322,9 +1465,9 @@ def _to_notes_updates(
             continue
 
         sources = sorted(grouped.get(key) or [], key=lambda c: c.rank)
-        if key == "customer_name" and result.facts.get(key) == CONFIDENCE_UNKNOWN_NAME:
-            # 姓名查不到可靠来源：固定「未知」，并说清为什么没有——不写「据现有记录归纳」
-            # 这种像是从记录里提取到了什么的措辞。
+        if key == "customer_name" and name_is_unresolved(result.facts.get(key)):
+            # 姓名查不到可靠来源：固定兜底值（「客户+手机号后四位」，无手机号则「未知」），
+            # 并说清为什么没有——不写「据现有记录归纳」这种像是从记录里提取到了什么的措辞。
             detail = {
                 "summary": "客户信息中未查找到真实姓名",
                 "steps": ["现有记录中没有客户本人的姓名信息", "社交资料中的称呼与昵称不作为姓名"],
