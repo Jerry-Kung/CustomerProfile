@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 
 from src.config.observability import elapsed_ms, mask_phone
-from src.domain.task.errors import TaskQueueFullError
+from src.domain.task.errors import TaskExecutionConflictError, TaskQueueFullError
 from src.domain.task.models import TaskRecord
 from src.domain.task.retry_policy import retry_policy_for_task
 from src.infrastructure.db.client import MySQLClient
@@ -47,6 +47,7 @@ class MySQLTaskRepository:
         work_env: str = "test",
         batch_id: str | None = None,
         task_type: str = _DEFAULT_TASK_TYPE,
+        execution_id: str | None = None,
     ) -> TaskRecord:
         start = time.perf_counter()
         conn = self._db_client.connect()
@@ -71,7 +72,7 @@ class MySQLTaskRepository:
             if has_task_type:
                 cursor.execute(
                     """
-                    SELECT status
+                    SELECT status, execution_id, batch_id, work_env
                     FROM customer_profile_tasks
                     WHERE customer_phonenumber = %s AND task_type = %s
                     FOR UPDATE
@@ -89,6 +90,14 @@ class MySQLTaskRepository:
                     (customer_phonenumber,),
                 )
             existed = cursor.fetchone()
+            if execution_id and existed and existed.get("execution_id") == execution_id:
+                if existed.get("batch_id") != batch_id or existed.get("work_env") != work_env:
+                    raise TaskExecutionConflictError("execution_id was already accepted with different inputs")
+                cursor.execute(_select_task_by_phone_sql(has_work_env, has_batch_id, has_task_type),
+                               (customer_phonenumber, task_type) if has_task_type else (customer_phonenumber,))
+                record = self._to_record(cursor.fetchone())
+                conn.commit()
+                return record
             existed_status = str(existed.get("status")) if existed else None
             queued_count = self.count_queued(task_type=task_type, conn=conn)
             if existed_status != "queued" and queued_count >= self._queue_max_waiting:
@@ -114,6 +123,7 @@ class MySQLTaskRepository:
                 has_work_env=has_work_env,
                 has_batch_id=has_batch_id,
                 has_task_type=has_task_type,
+                execution_id=execution_id,
             )
             conn.commit()
             cursor.execute(
@@ -168,6 +178,7 @@ class MySQLTaskRepository:
         has_work_env: bool,
         has_batch_id: bool,
         has_task_type: bool,
+        execution_id: str | None = None,
     ) -> None:
         columns = [
             "customer_phonenumber",
@@ -175,10 +186,12 @@ class MySQLTaskRepository:
             "execution_pool",
             "retry_policy_version",
             "queued_at",
+            "execution_id",
         ]
-        placeholders = ["%s", "'queued'", "'local'", "%s", "CURRENT_TIMESTAMP"]
-        params: list[object] = [customer_phonenumber, retry_policy_version]
+        placeholders = ["%s", "'queued'", "'local'", "%s", "CURRENT_TIMESTAMP", "%s"]
+        params: list[object] = [customer_phonenumber, retry_policy_version, execution_id]
         update_clauses = [
+            "execution_id = VALUES(execution_id)",
             "status = VALUES(status)",
             "generation = generation + 1",
             "output = NULL",
@@ -1748,6 +1761,7 @@ class MySQLTaskRepository:
             queued_at=_to_iso(row.get("queued_at")),
             started_at=_to_iso(row.get("started_at")),
             finished_at=_to_iso(row.get("finished_at")),
+            execution_id=row.get("execution_id"),
         )
 
 
@@ -1790,7 +1804,7 @@ def _select_task_by_phone_sql(has_work_env: bool, has_batch_id: bool, has_task_t
                     {work_env_expr},
                     {batch_id_expr},
                     {task_type_expr},
-                    generation, execution_backend, execution_pool,
+                    execution_id, generation, execution_backend, execution_pool,
                     workflow_target_id, workflow_target_revision, retry_policy_version,
                     workflow_run_id, attempt_count,
                     0 AS local_attempt_count, 0 AS commercial_attempt_count,
@@ -1844,7 +1858,7 @@ def _select_next_queued_sql(
                     {work_env_expr},
                     {batch_id_expr},
                     {task_type_expr},
-                    generation, execution_backend, execution_pool,
+                    execution_id, generation, execution_backend, execution_pool,
                     workflow_target_id, workflow_target_revision, retry_policy_version,
                     workflow_run_id, attempt_count,
                     0 AS local_attempt_count, 0 AS commercial_attempt_count,
@@ -1913,7 +1927,7 @@ def _select_next_eligible_sql(
                     {work_env_expr},
                     {batch_id_expr},
                     {task_type_expr},
-                    task.generation, task.execution_backend, task.execution_pool,
+                    task.execution_id, task.generation, task.execution_backend, task.execution_pool,
                     task.workflow_target_id, task.workflow_target_revision,
                     task.retry_policy_version, task.workflow_run_id, task.attempt_count,
                     (

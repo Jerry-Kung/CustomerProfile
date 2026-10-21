@@ -27,6 +27,7 @@ class DifyClient:
         work_env: str = "test",
         batch_id: str | None = None,
         task_type: str = "customer_profile",
+        execution_id: str | None = None,
     ) -> str:
         workflow_start = time.perf_counter()
         payload = {
@@ -38,6 +39,8 @@ class DifyClient:
             "response_mode": "streaming",
             "user": self.config.user_id,
         }
+        if execution_id:
+            payload["inputs"]["execution_id"] = execution_id
         headers = {
             "Authorization": f"Bearer {self._pick_api_key(task_type=task_type, work_env=work_env)}",
             "Content-Type": "application/json",

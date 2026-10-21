@@ -48,6 +48,7 @@ services:
       WORKER_TARGET_MODE: "${LOCAL_WORKER_TARGET_MODE:-active}"
       # New tasks are invitations only; owned remote runs can still recover.
       WORKER_TASK_TYPES: invitation_strategy
+      WORKER_CONCURRENCY: "${INVITATION_WORKER_CONCURRENCY:-4}"
     volumes:
       - task_uploads:/var/lib/customer-profile/task-uploads
       - ./logs:/app/logs

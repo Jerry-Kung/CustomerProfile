@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import Callable, Protocol
 
 
+class InvitationWriteback(Protocol):
+    def verify(self, *, phone: str, batch_id: str | None, execution_id: str, work_env: str) -> None: ...
+
+
 class WorkflowClient(Protocol):
     """Platform-agnostic workflow client.
 
@@ -19,6 +23,7 @@ class WorkflowClient(Protocol):
         work_env: str,
         batch_id: str | None,
         task_type: str,
+        execution_id: str | None = None,
     ) -> str: ...
 
 
@@ -26,7 +31,7 @@ class ResumableWorkflowClient(WorkflowClient, Protocol):
     """Separate submission from polling so a remote run id can be persisted."""
 
     def submit_workflow(self, *, customer_phonenumber: str, work_env: str,
-                        batch_id: str | None, task_type: str) -> str: ...
+                        batch_id: str | None, task_type: str, execution_id: str | None = None) -> str: ...
 
     def poll_workflow(self, *, workflow_run_id: str, work_env: str, task_type: str,
                       customer_phonenumber: str | None = None, batch_id: str | None = None,

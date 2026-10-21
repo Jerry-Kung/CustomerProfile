@@ -8,6 +8,7 @@
 | 环境变量、平台切换、迁移、运行与故障排查 | [部署运行指南](deploy-and-run.md) |
 | API / Worker 分层、队列、状态与恢复 | [当前架构](architecture.md) |
 | Runner 配置、并发领取、统一启动与回滚 | [Runner 接入与部署](profile-runner-integration.md) |
+| 邀约执行标识、最终失败投递与回写确认 | [邀约状态同步](invitation-delivery.md) |
 | 提交、列表和结果接口 | [前端接口指南](frontend-api-guide.md) |
 | Ubuntu Docker 安装、宿主机网络和端口 | [Ubuntu 环境准备](docker-deploy-ubuntu24.md) |
 | 任务查询、测试提交、Dify 手动探针 | [运维与调试脚本](../scripts/README.md) |

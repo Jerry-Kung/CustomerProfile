@@ -20,6 +20,7 @@ from src.infrastructure.runner.client import RunnerClient
 from src.infrastructure.storage.task_upload_store import TaskUploadStore
 from src.infrastructure.workflow.output_parser import WorkflowOutputParser
 from src.infrastructure.workflow.protocol import WorkflowClient
+from src.infrastructure.workflow.invitation_writeback import InvitationWritebackVerifier
 from src.worker.executor import WorkerExecutor
 from src.worker.routing import CommercialQueueGate, CommercialQueueThreshold
 
@@ -69,6 +70,7 @@ def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskServi
             )
         ),
         retry_config=config.retry,
+        invitation_writeback=InvitationWritebackVerifier(config.failure_callback),
         # Old pre-005 claims have no lease. Recover them only after the
         # configured QingTian poll timeout plus one recovery-scan interval.
         legacy_processing_timeout_seconds=max(

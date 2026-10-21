@@ -52,6 +52,7 @@ class QingTianClient:
         work_env: str = "test",
         batch_id: str | None = None,
         task_type: str = "customer_profile",
+        execution_id: str | None = None,
     ) -> str:
         """Legacy convenience path: submit and poll in one process.
 
@@ -71,6 +72,8 @@ class QingTianClient:
             work_env=work_env,
             batch_id=batch_id,
         )
+        if execution_id:
+            input_data["execution_id"] = execution_id
         run_body: dict[str, Any] = {
             "InputData": json.dumps(input_data, ensure_ascii=False),
             "UserID": self.config.user_id,
@@ -132,6 +135,7 @@ class QingTianClient:
         work_env: str = "test",
         batch_id: str | None = None,
         task_type: str = "customer_profile",
+        execution_id: str | None = None,
     ) -> str:
         """Start a QingTian workflow and return its runId without polling it."""
         started_at = time.perf_counter()
@@ -141,6 +145,8 @@ class QingTianClient:
             work_env=work_env,
             batch_id=batch_id,
         )
+        if execution_id:
+            input_data["execution_id"] = execution_id
         run_url = f"{self.config.base_url.rstrip('/')}{RUN_PATH}"
         run_parts = urlparse(run_url)
         _log.info(

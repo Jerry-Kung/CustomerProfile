@@ -21,6 +21,7 @@ class TaskService:
         work_env: str = "test",
         batch_id: str | None = None,
         task_type: str = "customer_profile",
+        execution_id: str | None = None,
     ) -> TaskRecord:
         start = time.perf_counter()
         with log_context(batch_id=batch_id, task_type=task_type, work_env=work_env):
@@ -30,6 +31,7 @@ class TaskService:
                     work_env=work_env,
                     batch_id=batch_id,
                     task_type=task_type,
+                    **({"execution_id": execution_id} if execution_id is not None else {}),
                 )
             except Exception:
                 self.logger.exception(

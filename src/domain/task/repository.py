@@ -13,6 +13,7 @@ class TaskRepository(Protocol):
         work_env: str = "test",
         batch_id: str | None = None,
         task_type: str = "customer_profile",
+        execution_id: str | None = None,
     ) -> TaskRecord:
         ...
 

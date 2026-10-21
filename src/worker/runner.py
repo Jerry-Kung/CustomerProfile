@@ -216,7 +216,7 @@ class WorkerRunner:
         if self._failure_dispatcher is not None:
             self._callback_thread = threading.Thread(
                 target=self._failure_dispatcher.run, args=(self._stop_event,),
-                name="profile-failure-callbacks", daemon=True,
+                name="task-failure-callbacks", daemon=True,
             )
             self._callback_thread.start()
         try:

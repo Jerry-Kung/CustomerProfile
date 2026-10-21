@@ -36,4 +36,5 @@ class TaskRecord:
     queued_at: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    execution_id: str | None = None
 

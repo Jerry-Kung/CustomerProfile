@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 
+class TaskExecutionConflictError(Exception):
+    """An execution identifier was reused with different submission inputs."""
+
+
 class TaskQueueFullError(Exception):
     def __init__(self, *, max_waiting: int, queued_count: int):
         self.max_waiting = max_waiting

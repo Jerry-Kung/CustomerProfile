@@ -64,11 +64,13 @@ def database(tmp_path):
                 customer_phonenumber TEXT DEFAULT '13800000000', batch_id TEXT DEFAULT 'batch-1',
                 work_env TEXT DEFAULT 'production', status TEXT DEFAULT 'failed',
                 task_type TEXT DEFAULT 'customer_profile', last_error_code TEXT,
+                execution_id TEXT,
                 error_message TEXT DEFAULT 'confirmed failure'
             );
             CREATE TABLE customer_profile_failure_outbox (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, generation INTEGER,
                 customer_phone TEXT, batch_id TEXT, work_env TEXT, error_message TEXT,
+                task_type TEXT DEFAULT 'customer_profile', execution_id TEXT,
                 attempts INTEGER DEFAULT 0, next_attempt_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 delivered_at TEXT, UNIQUE(task_id, generation)
             );
@@ -214,3 +216,31 @@ def test_worker_starts_and_stops_failure_delivery_independently():
         thread.join(timeout=2)
     assert stopped.is_set()
     assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("status,code,execution_id,expected", [
+    ("failed", "QINGTIAN_RETRY_EXHAUSTED", "exec-1", 1),
+    ("failed", "QINGTIAN_SUBMIT_UNKNOWN", "exec-1", 0),
+    ("failed", "QINGTIAN_RUN_STALLED", "exec-1", 0),
+    ("failed", "QINGTIAN_REQUIRES_RECONCILIATION", "exec-1", 0),
+    ("failed", "WORKER_UNEXPECTED_ERROR", "exec-1", 0),
+    ("failed", "INVITATION_WRITEBACK_MISSING", "exec-1", 1),
+    ("retry_wait", "QINGTIAN_REQUEST_FAILED", "exec-1", 0),
+    ("processing", None, "exec-1", 0),
+    ("failed", "QINGTIAN_RETRY_EXHAUSTED", None, 0),
+])
+def test_invitation_delivery_only_claims_identified_final_failures(database, status, code, execution_id, expected):
+    with sqlite3.connect(database) as db:
+        db.execute("INSERT INTO customer_profile_tasks(id,task_type,status,last_error_code,execution_id) VALUES (1,'invitation_strategy',?,?,?)", (status, code, execution_id))
+    store = repository(database)
+    store.enqueue_failed()
+    store.enqueue_failed()
+    seen = []
+    client = ProfileFailureClient(config(), transport=httpx.MockTransport(
+        lambda request: seen.append(request) or httpx.Response(200),
+    ))
+    assert store.deliver_next(client.send) == bool(expected)
+    if expected:
+        assert seen[0].url.path == "/api/v1/remote/callback/invitation-failed"
+        assert json.loads(seen[0].content)["execution_id"] == execution_id
+        assert json.loads(seen[0].content)["final"] is True

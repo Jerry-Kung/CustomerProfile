@@ -119,6 +119,19 @@ def test_submit_workflow_returns_run_id_without_starting_poll(monkeypatch):
     assert calls[0].url.endswith(RUN_PATH)
 
 
+def test_invitation_execution_id_does_not_replace_business_batch(monkeypatch):
+    holder = _install(monkeypatch, post_bodies=[{"runId": "run-identified"}])
+    client = QingTianClient(config=_config())
+    client.submit_workflow(customer_phonenumber="13800138000", task_type="invitation_strategy",
+                           batch_id="audio-recording", execution_id="invocation-2")
+    inputs = json.loads(holder["client"].calls[0].json_body["InputData"])
+    assert inputs["batch_id"] == "audio-recording"
+    assert inputs["execution_id"] == "invocation-2"
+    calls = holder["client"].calls
+    assert len(calls) == 1
+    assert calls[0].url.endswith(RUN_PATH)
+
+
 def test_poll_workflow_reuses_existing_run_id_and_invokes_lease_callback(monkeypatch):
     holder = _install(
         monkeypatch,

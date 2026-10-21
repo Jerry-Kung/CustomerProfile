@@ -95,7 +95,26 @@ class SubmitTaskTypeForm(BaseModel):
         return v
 
 
-class TaskAcceptedResponse(BaseModel):
+class SubmitTaskExecutionIdForm(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    execution_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+
+    @field_validator("execution_id", mode="before")
+    @classmethod
+    def empty_to_none(cls, value):
+        if value is None:
+            return None
+        return str(value).strip() or None
+
+
+class TaskIdentityResponse(BaseModel):
+    task_id: int | None = None
+    generation: int = 1
+    batch_id: str | None = None
+    execution_id: str | None = None
+
+
+class TaskAcceptedResponse(TaskIdentityResponse):
     code: str
     message: str
     customer_phonenumber: str
@@ -153,7 +172,7 @@ class TaskListResponse(BaseModel):
     total: int
 
 
-class TaskResultSucceededResponse(BaseModel):
+class TaskResultSucceededResponse(TaskIdentityResponse):
     code: str
     message: str
     customer_phonenumber: str
@@ -165,7 +184,7 @@ class TaskResultSucceededResponse(BaseModel):
     task_type: str = DEFAULT_TASK_TYPE
 
 
-class TaskResultInProgressResponse(BaseModel):
+class TaskResultInProgressResponse(TaskIdentityResponse):
     code: str
     message: str
     customer_phonenumber: str
@@ -174,7 +193,9 @@ class TaskResultInProgressResponse(BaseModel):
     task_type: str = DEFAULT_TASK_TYPE
 
 
-class TaskResultFailedResponse(BaseModel):
+class TaskResultFailedResponse(TaskIdentityResponse):
+    last_error_code: str | None = None
+    last_error_stage: str | None = None
     code: str
     message: str
     customer_phonenumber: str

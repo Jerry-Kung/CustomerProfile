@@ -27,7 +27,10 @@ from src.infrastructure.workflow.errors import (
     WorkflowTimeout,
 )
 from src.infrastructure.workflow.output_parser import WorkflowOutputParser
-from src.infrastructure.workflow.protocol import WorkflowClient
+from src.infrastructure.workflow.invitation_writeback import (
+    InvitationWritebackMissing, InvitationWritebackSuperseded, InvitationWritebackUnconfirmed,
+)
+from src.infrastructure.workflow.protocol import InvitationWriteback, WorkflowClient
 from src.worker.routing import CommercialQueueGate, QueuePressure
 from src.worker.target_health import TargetCircuitBreaker
 
@@ -64,6 +67,7 @@ class WorkerExecutor:
         commercial_queue_gate: CommercialQueueGate | None = None,
         retry_config: RetryConfig | None = None,
         legacy_processing_timeout_seconds: int = 2400,
+        invitation_writeback: InvitationWriteback | None = None,
     ):
         if worker_role not in {"local", "commercial"}:
             raise ValueError("worker_role must be local or commercial")
@@ -91,6 +95,7 @@ class WorkerExecutor:
         self._commercial_queue_gate = commercial_queue_gate
         self._retry_config = retry_config or RetryConfig()
         self._legacy_processing_timeout_seconds = legacy_processing_timeout_seconds
+        self._invitation_writeback = invitation_writeback
         self._retry_recovery_lock = threading.Lock()
         self._last_retry_recovery_monotonic = 0.0
         self._shutdown_event = threading.Event()
@@ -190,6 +195,7 @@ class WorkerExecutor:
                     work_env=claimed.work_env,
                     batch_id=claimed.batch_id,
                     task_type=claimed.task_type,
+                    **({"execution_id": claimed.execution_id} if claimed.execution_id else {}),
                 )
                 self._logger.info(
                     "worker_workflow_invoke_completed elapsed_ms=%s output_size_bytes=%s",
@@ -199,6 +205,7 @@ class WorkerExecutor:
 
                 parse_start = time.perf_counter()
                 parsed = self._output_parser.parse(output_raw)
+                self._verify_invitation_writeback(claimed)
                 self._logger.info(
                     "worker_output_parse_completed elapsed_ms=%s output_keys=%s",
                     elapsed_ms(parse_start),
@@ -263,6 +270,16 @@ class WorkerExecutor:
         return all(
             callable(getattr(self._workflow_client, method, None))
             for method in ("submit_workflow", "poll_workflow")
+        )
+
+    def _verify_invitation_writeback(self, claimed: TaskRecord) -> None:
+        if claimed.task_type != "invitation_strategy" or not claimed.execution_id:
+            return
+        if self._invitation_writeback is None:
+            raise InvitationWritebackUnconfirmed("invitation writeback verifier is not configured")
+        self._invitation_writeback.verify(
+            phone=claimed.customer_phonenumber, batch_id=claimed.batch_id,
+            execution_id=claimed.execution_id, work_env=claimed.work_env,
         )
 
     def _retry_error_code(self, suffix: str) -> str:
@@ -415,6 +432,7 @@ class WorkerExecutor:
                     work_env=claimed.work_env,
                     batch_id=claimed.batch_id,
                     task_type=claimed.task_type,
+                    **({"execution_id": claimed.execution_id} if claimed.execution_id else {}),
                 )
                 # Receiving a concrete run id is a successful target-level
                 # exchange even if the later result poll times out.
@@ -440,6 +458,7 @@ class WorkerExecutor:
                 workflow_run_id = submitted_run_id
                 output_raw = self._poll_claimed_workflow(claimed, workflow_run_id, heartbeat)
             parsed = self._output_parser.parse(output_raw)
+            self._verify_invitation_writeback(claimed)
         except _WorkerShutdownRequested:
             return self._release_retry_claim_for_shutdown(
                 claimed=claimed,
@@ -453,6 +472,23 @@ class WorkerExecutor:
                 generation,
             )
             return "error"
+        except InvitationWritebackMissing as exc:
+            return self._finish_retry_failure(
+                task_id=task_id, generation=generation, claim_token=claim_token,
+                attempt_no=attempt_no, error_code=exc.code, error_stage="writeback", error_message=str(exc),
+            )
+        except InvitationWritebackSuperseded as exc:
+            return self._finish_retry_failure(
+                task_id=task_id, generation=generation, claim_token=claim_token,
+                attempt_no=attempt_no, error_code=exc.code, error_stage="reconcile", error_message=str(exc),
+            )
+        except InvitationWritebackUnconfirmed as exc:
+            return self._schedule_retry(
+                task_id=task_id, generation=generation, claim_token=claim_token,
+                attempt_no=attempt_no, error_code=exc.code, error_stage="writeback", error_message=str(exc),
+                retain_workflow_run=True, terminal_attempt=False,
+                poll_recovery_count=claimed.poll_recovery_count, increment_poll_recovery=True,
+            )
         except WorkflowTerminated as exc:
             self._record_target_success()
             return self._retry_new_run_or_fail(

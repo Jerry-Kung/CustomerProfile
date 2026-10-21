@@ -7,7 +7,7 @@ from src.config.logging_utils import get_logger, log_runtime_identity
 from src.worker.runner import WorkerRunner
 from src.worker.failure_callbacks import FailureCallbackDispatcher
 from src.infrastructure.db.failure_callback_repository import MySQLFailureCallbackRepository
-from src.infrastructure.workflow.failure_callback import ProfileFailureClient
+from src.infrastructure.workflow.failure_callback import TaskFailureClient
 
 
 def _install_shutdown_signal_handlers(runner: WorkerRunner) -> None:
@@ -30,7 +30,7 @@ def main() -> int:
     dispatcher = None
     if config.failure_callback.enabled:
         dispatcher = FailureCallbackDispatcher(
-            MySQLFailureCallbackRepository(db_client), ProfileFailureClient(config.failure_callback),
+            MySQLFailureCallbackRepository(db_client), TaskFailureClient(config.failure_callback),
         )
     log_runtime_identity(get_logger("worker"), component="worker", app_env=config.app_env)
     runner = WorkerRunner(

@@ -6,6 +6,7 @@ from src.api.errors import AppError
 from src.api.schemas import (
     DEFAULT_TASK_TYPE,
     SubmitTaskBatchIdForm,
+    SubmitTaskExecutionIdForm,
     SubmitTaskPhoneForm,
     SubmitTaskTypeForm,
     SubmitTaskWorkEnvForm,
@@ -17,7 +18,7 @@ from src.api.schemas import (
     TaskResultInProgressResponse,
     TaskResultSucceededResponse,
 )
-from src.domain.task.errors import TaskQueueFullError
+from src.domain.task.errors import TaskExecutionConflictError, TaskQueueFullError
 from src.domain.task.service import TaskService
 from src.config.observability import log_context, mask_phone
 
@@ -30,6 +31,7 @@ async def submit_task(
     customer_phonenumber: str = Form(..., description="Customer phone; digits and + only"),
     work_env: str | None = Form(None, description="Optional workflow environment: test or production"),
     batch_id: str | None = Form(None, description="Optional client batch id for Dify workflow"),
+    execution_id: str | None = Form(None, description="Unique invitation execution id; retrying the same submission is idempotent"),
     task_type: str | None = Form(
         None,
         description="Optional task type: customer_profile (default) or invitation_strategy",
@@ -39,6 +41,11 @@ async def submit_task(
     normalized_work_env = SubmitTaskWorkEnvForm.model_validate({"work_env": work_env}).work_env
     normalized_batch_id = SubmitTaskBatchIdForm.model_validate({"batch_id": batch_id}).batch_id
     normalized_task_type = SubmitTaskTypeForm.model_validate({"task_type": task_type}).task_type
+    normalized_execution_id = SubmitTaskExecutionIdForm.model_validate({"execution_id": execution_id}).execution_id
+    if normalized_execution_id and normalized_task_type != "invitation_strategy":
+        raise AppError(code="INVALID_ARGUMENT", message="execution_id is supported for invitation_strategy only", status_code=400)
+    if normalized_execution_id and not normalized_batch_id:
+        raise AppError(code="INVALID_ARGUMENT", message="batch_id is required with execution_id", status_code=400)
 
     service: TaskService = request.app.state.task_service
     with log_context(
@@ -56,7 +63,10 @@ async def submit_task(
                 work_env=normalized_work_env,
                 batch_id=normalized_batch_id,
                 task_type=normalized_task_type,
+                **({"execution_id": normalized_execution_id} if normalized_execution_id else {}),
             )
+        except TaskExecutionConflictError as exc:
+            raise AppError(code="EXECUTION_CONFLICT", message=str(exc), status_code=409) from exc
         except TaskQueueFullError as exc:
             request.app.state.logger.warning(
                 "submit_task_queue_full customer_phone_masked=%s queued_count=%s max_waiting=%s",
@@ -82,6 +92,7 @@ async def submit_task(
         customer_phonenumber=result.customer_phonenumber,
         status=result.status,
         task_type=result.task_type,
+        **_task_identity(result),
     )
 
 
@@ -159,6 +170,7 @@ def get_task_result(
             status=_public_task_status(item.status),
             updated_at=item.updated_at,
             task_type=item.task_type,
+            **_task_identity(item),
         )
         return JSONResponse(status_code=202, content=payload.model_dump())
     if item.status == "failed":
@@ -171,6 +183,9 @@ def get_task_result(
             error_message=item.error_message,
             updated_at=item.updated_at,
             task_type=item.task_type,
+            last_error_code=item.last_error_code,
+            last_error_stage=item.last_error_stage,
+            **_task_identity(item),
         )
         return JSONResponse(status_code=422, content=payload.model_dump())
 
@@ -184,8 +199,14 @@ def get_task_result(
         nickname=item.nickname,
         updated_at=item.updated_at,
         task_type=item.task_type,
+        **_task_identity(item),
     )
     return payload
+
+
+def _task_identity(item):
+    return {"task_id": item.id, "generation": item.generation,
+            "batch_id": item.batch_id, "execution_id": item.execution_id}
 
 
 def _extract_error_code(error_message: str | None) -> str:

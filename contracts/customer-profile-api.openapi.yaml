@@ -17,12 +17,16 @@ paths:
       summary: Submit customer profile analysis task
       description: |
         Accepts a new task for a phone number. This endpoint is asynchronous and does not
-        wait for Dify final output.
+        wait for workflow final output. Invitation execution_id makes resending the
+        currently accepted execution idempotent; a new analysis uses a new identifier.
       operationId: submitCustomerProfileTask
       requestBody:
         required: true
         content:
-          application/json:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/SubmitTaskRequest'
+          multipart/form-data:
             schema:
               $ref: '#/components/schemas/SubmitTaskRequest'
       responses:
@@ -141,14 +145,33 @@ components:
           minLength: 1
           maxLength: 32
           pattern: '^[0-9+]+$'
+        task_type:
+          type: string
+          enum: [customer_profile, invitation_strategy]
+          default: customer_profile
+        work_env:
+          type: string
+          enum: [test, production, develop]
+          default: test
+        batch_id:
+          type: string
+          nullable: true
+          maxLength: 64
+        execution_id:
+          type: string
+          nullable: true
+          pattern: '^[A-Za-z0-9_-]{1,64}$'
+          description: Invitation only; requires batch_id. Unique for each analysis, even when the business batch is reused.
         wechat_homepage_image:
           type: string
+          format: binary
           nullable: true
-          description: Optional image reference. Can be file_id or URL based on integration mode.
+          description: Optional uploaded image file.
         wechat_moments_image:
           type: string
+          format: binary
           nullable: true
-          description: Optional image reference. Can be file_id or URL based on integration mode.
+          description: Optional uploaded image file.
     TaskAcceptedResponse:
       type: object
       required:
@@ -157,6 +180,19 @@ components:
         - customer_phonenumber
         - status
       properties:
+        task_id:
+          type: integer
+          nullable: true
+        generation:
+          type: integer
+        batch_id:
+          type: string
+          nullable: true
+        execution_id:
+          type: string
+          nullable: true
+        task_type:
+          type: string
         code:
           type: string
           example: TASK_ACCEPTED
@@ -167,7 +203,7 @@ components:
           type: string
         status:
           type: string
-          enum: [queued, processing]
+          enum: [queued, processing, retry_wait, succeeded, failed]
     TaskListItem:
       type: object
       required:
@@ -224,6 +260,19 @@ components:
         - status
         - output
       properties:
+        task_id:
+          type: integer
+          nullable: true
+        generation:
+          type: integer
+        batch_id:
+          type: string
+          nullable: true
+        execution_id:
+          type: string
+          nullable: true
+        task_type:
+          type: string
         code:
           type: string
           example: TASK_SUCCEEDED
@@ -254,6 +303,19 @@ components:
         - customer_phonenumber
         - status
       properties:
+        task_id:
+          type: integer
+          nullable: true
+        generation:
+          type: integer
+        batch_id:
+          type: string
+          nullable: true
+        execution_id:
+          type: string
+          nullable: true
+        task_type:
+          type: string
         code:
           type: string
           enum:
@@ -278,6 +340,25 @@ components:
         - customer_phonenumber
         - status
       properties:
+        task_id:
+          type: integer
+          nullable: true
+        generation:
+          type: integer
+        batch_id:
+          type: string
+          nullable: true
+        execution_id:
+          type: string
+          nullable: true
+        task_type:
+          type: string
+        last_error_code:
+          type: string
+          nullable: true
+        last_error_stage:
+          type: string
+          nullable: true
         code:
           type: string
           enum:
@@ -286,6 +367,8 @@ components:
             - DIFY_TIMEOUT
             - DIFY_OUTPUT_INVALID_JSON
             - DIFY_OUTPUT_SCHEMA_MISMATCH
+            - INVITATION_WRITEBACK_MISSING
+            - INVITATION_REQUIRES_RECONCILIATION
         message:
           type: string
           example: task failed
@@ -346,10 +429,10 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
           examples:
-            duplicateRunningTask:
+            executionInputConflict:
               value:
-                code: TASK_ALREADY_RUNNING
-                message: task is already running for this phone number
+                code: EXECUTION_CONFLICT
+                message: execution_id was already accepted with different inputs
     UnprocessableEntity:
       description: Business rule validation or execution failure
       content:

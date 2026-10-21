@@ -318,6 +318,8 @@ customer-profile-migrate
 
 `007_add_profile_failure_outbox.sql` 新建最终失败通知表，可重复执行；先迁移后启用 `PROFILE_FAILURE_CALLBACK_ENABLED=true`。通知配置和状态规则见 [Runner 接入与部署](profile-runner-integration.md#最终失败通知)。
 
+`008_add_invitation_execution_delivery.sql` 给任务表增加 `execution_id`，给现有失败通知表增加 `task_type` 和 `execution_id`，均先检查字段再添加，可重复执行。必须先迁移，再升级 API 和全部 Worker。启用 customer-profile-api 的邀约执行标识之前，还需更新青天成功回调；步骤见 [邀约状态同步](invitation-delivery.md)。
+
 ## 6. 对外接口一览
 
 | 方法 | 路径 | 说明 |
