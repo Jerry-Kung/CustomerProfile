@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .. import text_utils as tut
+
 
 # ====================================================================
 # 渠道载荷提取：8 个工作流共用（7 个截图类 + 2 个录音类中的同形节点）
@@ -270,13 +272,12 @@ def parse_json_object(value: Any) -> dict:
 
 
 def strip_code_fence(text: str) -> str:
-    """去掉 ```json ... ``` 包裹。各迁移前的定义节点的 ``_strip_code_fence`` 行为一致。"""
-    import re
+    """去掉 ```json ... ``` 包裹。
 
-    text = text.strip()
-    text = re.sub(r"^```(?:json|JSON)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-    return text.strip()
+    实现统一在 :func:`customer_profile.text_utils.strip_code_fence`——各工作流此前
+    各写一份，行为只在少量边角上不同。
+    """
+    return tut.strip_code_fence(text)
 
 
 # ====================================================================

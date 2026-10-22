@@ -2,6 +2,31 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-10-22 — 收敛重复的取值与围栏工具
+
+审查发现同一套小工具在多个模块各写一份，且**同名不同义**——改一处以为全套都改了。
+
+- 新增 `text_utils.py`，按语义给出 `as_payload` / `as_text` / `as_display_text` /
+  `as_flat_list` / `as_json_list` / `strip_code_fence`。`projection`、`callback_build`、
+  `customer_profile_l3`、`executors_iteration` 改为引用，调用点不动。
+  三份 `_as_text` 与三份 `_as_list` 并不等价（布尔、数字、`||`、JSON 串各认各的），
+  因此没有合并成一个函数，而是按语义拆开命名。
+- 六处 `_strip_code_fence`（`shared_code` / `llm` / `production` / `chat_history_data` /
+  `human_corrected_info` / `user_feedback_data` 两份）收敛到一份实现，取各版并集：
+  非字符串透传、语言标签通配。中段围栏仍由 `evidence_subagent._extract_fenced_block`
+  处理，不在此列。
+- 新增 `tests/test_text_utils.py` 固定各语义档的差异，防止以后被「顺手统一」改掉。
+
+## 2026-10-22 — 修审查判据恒真与 resistances 双写
+
+- `review_notes` 的无锚点 fact 判据原先写成 `any("：" in e or e for e in evidence)`，
+  `or e` 让任何非空证据串都成立，且算出的 `has_quote` 从未被使用；改按证据串里的
+  原文标记（`渠道：原文` / `原文「…」` / 标签引号）判定，与 `validate_l3` 同口径。
+  证据位只写推断依据、又无登记渠道的 fact 现在会被记成 `unbacked_fact`。
+- 删掉 `assemble_l3` 把 `resistances` 补挂进 Notes 的那段（v3.3 带入）。该键已不在
+  回传契约内，回传体由 `callback_build` 从表达层直接生成 `deal_battle.loss_conditions`；
+  双写让 37/39 案的 Notes 出现两条同名条目，且补挂的那条根本不经白名单。
+
 ## 2026-10-20 — 收入字段只认收入标签
 
 第三方画像里「预测车型价格偏好」「预测手机价格」与「预测收入水平」形态相似，

@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..definitions import WorkflowDef, make_node
+from .. import text_utils as tut
 
 
 # ---- 迁移前的定义节点 1779671149560 的正文（逐字符，仅函数名不同）
@@ -398,14 +399,8 @@ def _try_json_loads(text):
 
 
 def _strip_code_fence(text):
-    text = text.strip()
-
-    # 去掉 ```json ... ``` 或 ``` ... ```
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-
-    return text.strip()
+    """去掉围栏包裹。实现见 :func:`customer_profile.text_utils.strip_code_fence`。"""
+    return tut.strip_code_fence(text)
 
 
 def _safe_str(value):

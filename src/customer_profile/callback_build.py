@@ -34,6 +34,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import internal_fields as inf
 from . import notes_contract as nc
+from . import text_utils as tut
 
 # ====================================================================
 # 契约常量（逐字取自 docs/business_opt01_v3/AI画像远程回传接口数据结构说明.md §2.4 / §2.5 / §2.6）
@@ -91,54 +92,14 @@ REPLACEMENT_PURCHASE = "replacement"
 # ====================================================================
 
 
-def _payload(value: Any) -> Any:
-    """兼容 String / Object 两种入参（上游时而是 JSON 串、时而是对象）。"""
-    if isinstance(value, (dict, list)):
-        return value
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return {}
-        try:
-            return json.loads(text)
-        except ValueError:
-            return {}
-    return {}
+_payload = tut.as_payload
+"""JSON 串 / 对象的兼容读取。实现见 :mod:`text_utils`。"""
 
+_as_text = tut.as_display_text
+"""展示用文本：布尔不渲染、数字给十进制、列表用顿号连接。"""
 
-def _as_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, bool):
-        return ""
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, (list, tuple)):
-        return "、".join(part for part in (_as_text(v) for v in value) if part)
-    return json.dumps(value, ensure_ascii=False, default=str)
-
-
-def _as_list(value: Any) -> list[Any]:
-    """把取值摊成列表：``a||b`` / 列表 / 单值都认。空值给空列表。"""
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple)):
-        out: list[Any] = []
-        for item in value:
-            out.extend(_as_list(item))
-        return out
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return []
-        if "||" in text:
-            return [part.strip() for part in text.split("||") if part.strip()]
-        return [text]
-    if isinstance(value, dict):
-        return [value]
-    return [value]
+_as_list = tut.as_flat_list
+"""摊成列表：``a||b`` / 列表 / 单值都认。"""
 
 
 def _label(attribute: str, raw: Any) -> str:

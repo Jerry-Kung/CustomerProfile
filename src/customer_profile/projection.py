@@ -43,6 +43,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import internal_fields as inf
 from . import notes_contract as nc
+from . import text_utils as tut
 from .income_band import INCOME_BAND_RANGES, normalize_income
 """档位→区间换算的正身已下沉到 :mod:`customer_profile.income_band`（取数节点也用它）。
 此处保留导出，供离线回放旧产物与直接构造档位断言的调用方沿用。"""
@@ -447,13 +448,8 @@ class Projection:
 # 取值归一
 # ====================================================================
 
-
-def _as_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    return json.dumps(value, ensure_ascii=False, default=str)
+_as_text = tut.as_text
+"""取值 → 文本（字符串去空白，其余 JSON 序列化）。实现见 :mod:`text_utils`。"""
 
 
 def split_multi(value: Any) -> list[Any]:

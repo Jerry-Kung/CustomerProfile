@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from ..definitions import NodeDef, NodeStatus
+from ..text_utils import as_json_list as _as_list
 from .context import MissingValue, NodeResult, RunContext
 from .executors import (
     ExecutionOutcome,
@@ -204,25 +205,6 @@ def _output_sources(node: NodeDef) -> list[tuple[str, str]]:
         for binding in node.bindings
         if binding.target in {"@output", "output_selector"}
     ]
-
-
-def _as_list(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return []
-        import json
-
-        try:
-            parsed = json.loads(text)
-        except ValueError:
-            return [value]
-        return list(parsed) if isinstance(parsed, list) else [parsed]
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    return [value]
 
 
 class _Unset:

@@ -30,6 +30,7 @@ import json
 from typing import Any
 
 from .. import readable as rdb
+from .. import text_utils as tut
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "customer_profile_l3"
@@ -102,27 +103,11 @@ SECTION_KEYS: tuple[str, ...] = (
 # ====================================================================
 
 
-def _as_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    return json.dumps(value, ensure_ascii=False, default=str)
+_as_text = tut.as_text
+"""取值 → 文本。实现见 :mod:`customer_profile.text_utils`。"""
 
-
-def _payload(value: Any) -> Any:
-    """兼容 String / Object 两种入参（上游时而是 JSON 串、时而是对象）。"""
-    if isinstance(value, (dict, list)):
-        return value
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return {}
-        try:
-            return json.loads(text)
-        except ValueError:
-            return {}
-    return {}
+_payload = tut.as_payload
+"""JSON 串 / 对象的兼容读取。实现见 :mod:`customer_profile.text_utils`。"""
 
 
 def _claims_of(claims_json: Any) -> list[dict]:
@@ -402,37 +387,11 @@ def assemble_l3(phone: str, batch_id: str, facts_json, notes_updates_json, expre
         }
         analysis_result["customer_overview"] = overview
 
-    # ---- 拍扁 resistances 数组成一条文本，写进 Notes（v3.3 修复问题1）
-    # resistances 一直存在于画像卡 analysis_result.resistances，但从未写进 Notes。
-    # 现在把它补回来：把数组里的 resistance_name 拼成 "抗性1/抗性2" 格式。
-    resistances_items = analysis_result.get("resistances", [])
-    if resistances_items and isinstance(resistances_items, list):
-        # 格式：「抗性1/抗性2/抗性3」
-        names = [r.get("resistance_name", "") for r in resistances_items if isinstance(r, dict)]
-        names = [n.strip() for n in names if n and n.strip()]
-        if names:
-            resistances_text = "/".join(names)
-            # 拼装 evidence：取每项的 description 前 60 字
-            evidence = []
-            for r in resistances_items[:3]:  # 最多取 3 项作为证据
-                if isinstance(r, dict):
-                    name = r.get("resistance_name", "").strip()
-                    desc = r.get("description", "").strip()[:60]
-                    if name and desc:
-                        evidence.append(f"{name}: {desc}")
-            notes.append({
-                "attribute_key": "resistances",
-                "attribute_value": resistances_text,
-                "reasoning_detail": {
-                    "summary": "由客户抗性分析汇总而来",
-                    "steps": [
-                        f"客户抗性分析得出 {len(names)} 项顾虑",
-                        "汇总为文本：" + resistances_text
-                    ],
-                    "evidence": evidence or ["从客户购车抗性分析中提取"],
-                    "confidence": 0.75
-                }
-            })
+    # ---- resistances **不写进 Notes**（2026-10-22）
+    # 它在回传契约里已下线（``notes_contract`` 不含该键），回传体由 ``callback_build``
+    # 从表达层 ``analysis_result.resistances`` 直接生成 ``deal_battle.loss_conditions``。
+    # v3.3 曾在这里补过一条 Notes 条目，但那条记录不经过回传白名单，只是让排查时
+    # 误以为已经覆盖——保留代码会掩盖真正生效的那条通路。
 
     analysis_result["basic_notes_updates"] = list(notes)
 

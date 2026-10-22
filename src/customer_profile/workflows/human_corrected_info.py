@@ -17,10 +17,10 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from ..definitions import WorkflowDef, make_node
+from .. import text_utils as tut
 
 WORKFLOW_ID = "human_corrected_info"
 DISPLAY_NAME = "人工确认信息提取"
@@ -41,16 +41,8 @@ MHERO_PATH_PREFIX = "/api/v1/remote/data/profile/"
 
 
 def _strip_code_fence(text: str) -> str:
-    """
-    兼容 LLM 输出中可能带有 ```json ... ``` 的情况
-    """
-    text = text.strip()
-
-    # 去掉 ```json / ```JSON / ``` 包裹
-    text = re.sub(r"^```(?:json|JSON)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-
-    return text.strip()
+    """兼容 LLM 输出中可能带有 ```json ... ``` 的情况。实现见 :mod:`text_utils`。"""
+    return tut.strip_code_fence(text)
 
 
 def _parse_json_string(value):

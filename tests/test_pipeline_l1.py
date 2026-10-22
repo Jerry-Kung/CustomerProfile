@@ -683,6 +683,38 @@ def test_review_flags_unbacked_fact():
     assert result["unbacked_fact"] == 1
 
 
+def test_review_flags_fact_whose_evidence_is_not_a_quote():
+    """``fact`` 且证据位只写了推断依据、没有原文、也没有登记渠道 → 记 issue。
+
+    「有 evidence」不等于「指得出原文」：旧判据 ``any("：" in e or e ...)`` 对任何非空
+    证据串都成立，无原文的 fact 会被放行。
+    """
+    result = pipe.review_notes(
+        json.dumps(
+            [note("occupation", "教师",
+                  evidence=["从对话内容可以判断对方在事业单位工作"])],
+            ensure_ascii=False,
+        ),
+        json.dumps({"occupation": "教师"}, ensure_ascii=False),
+        json.dumps({"occupation": "fact"}, ensure_ascii=False),
+    )
+    assert result["unbacked_fact"] == 1
+
+
+def test_review_accepts_fact_with_verbatim_quote():
+    """证据位带原文（``渠道：原文`` 或 ``原文「…」``）且无渠道字段 → 不算无锚点。"""
+    result = pipe.review_notes(
+        json.dumps(
+            [note("occupation", "教师",
+                  evidence=["外呼录音信息：我在学校当老师"])],
+            ensure_ascii=False,
+        ),
+        json.dumps({"occupation": "教师"}, ensure_ascii=False),
+        json.dumps({"occupation": "fact"}, ensure_ascii=False),
+    )
+    assert result["unbacked_fact"] == 0
+
+
 def test_review_flags_evidence_self_reference():
     """证据位出现「推断为…」结论型措辞 → 记 issue。"""
     result = pipe.review_notes(

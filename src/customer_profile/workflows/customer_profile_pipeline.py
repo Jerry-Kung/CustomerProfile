@@ -2027,11 +2027,14 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
                         enum_illegal.append({"attribute": key, "value": item})
 
         # ---- 3 无锚点 fact
+        # 「有 evidence」不等于「有原文」：证据位可能只写了一句推断依据或裸渠道名。
+        # 判据与 ``validate_l3`` 对齐——fact 必须指得出原文切片；指不出原文、
+        # 也没有登记渠道时才算无锚点。
         if str(basis.get(key) or "") == proj.FACT:
             evidence = [str(x) for x in (detail.get("evidence") or [])]
-            has_quote = any("：" in e or e for e in evidence)
+            has_quote = any(_has_quote_marker(e) for e in evidence)
             channel = str(entry.get("record_channel") or "").strip()
-            if not evidence and not channel:
+            if not has_quote and not channel:
                 unbacked.append({"attribute": key, "value": value})
 
         # ---- 4 证据位自指
@@ -2062,6 +2065,19 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
         "enum_illegal": len(enum_illegal),
         "unbacked_fact": len(unbacked),
     }
+
+
+QUOTE_MARKERS: tuple[str, ...] = ("：", "「", "“")
+"""证据串里「这是原文」的标记。
+
+``projection`` 产出的证据只有三种写法：``渠道：原文``、``原文「…」（经纠错归一）``、
+``第三方画像标签“…”给出“…”``；注入字段（手机号）同样带全角冒号。裸渠道名与
+推断依据都不含这些标记，因此不能当作「指得出原文」。
+"""
+
+
+def _has_quote_marker(text: str) -> bool:
+    return any(marker in text for marker in QUOTE_MARKERS)
 
 
 PLACEHOLDER_VALUES: frozenset[str] = frozenset(

@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..definitions import WorkflowDef, make_node
+from .. import text_utils as tut
 
 WORKFLOW_ID = "customer_profile_production"
 DISPLAY_NAME = "画像内容生成与回写"
@@ -254,16 +255,8 @@ import re
 
 
 def _strip_code_fence(text):
-    """
-    去掉 ```json ... ``` 包裹，兼容 LLM 产物。
-    """
-    if not isinstance(text, str):
-        return text
-
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*```$", "", text)
-    return text.strip()
+    """去掉 ```json ... ``` 包裹，兼容 LLM 产物。实现见 :mod:`text_utils`。"""
+    return tut.strip_code_fence(text)
 
 
 def _parse_json_input(value, expected_key, default_value):

@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from .executors import NodeExecutionError
+from .. import text_utils as tut
 
 # ---------------------------------------------------------------- 异常判定
 
@@ -128,12 +128,9 @@ def detect_output_anomaly(
 def strip_code_fence(text: str) -> str:
     """去掉 LLM 常见输出的 ```json ... ``` 包裹。
 
-    逻辑取自迁移前的定义中人工确认提取节点的 ``_strip_code_fence``，保持行为一致。
+    实现统一在 :func:`customer_profile.text_utils.strip_code_fence`。
     """
-    stripped = text.strip()
-    stripped = re.sub(r"^```(?:json|JSON)?\s*", "", stripped)
-    stripped = re.sub(r"\s*```$", "", stripped)
-    return stripped.strip()
+    return tut.strip_code_fence(text)
 
 
 def parse_json_output(text: str) -> Any:
