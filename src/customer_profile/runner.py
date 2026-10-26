@@ -317,10 +317,33 @@ class RunSlotGate:
             return
         self._active -= 1
 
+def _checker_functions(llm: Any, templates: Any) -> dict[str, Any]:
+    """把 checker 的取数节点绑到本次运行的 LLM 客户端上。
+
+    为什么用注入而不是让 code 函数自己去构造客户端：code 节点的签名契约是
+    ``**inputs``（``executors_misc.execute_code``），拿不到 :class:`NodeRuntime`；
+    而 checker 需要复用**同一个**客户端，才能共享限额、重试与留痕。注入点就是
+    ``rt.extra['code_functions']``——``_lookup_code_function`` 优先从这里取。
+
+    ``functools.partial`` 包住异步函数后 ``iscoroutinefunction`` 仍为真，
+    ``execute_code`` 会正确 await，不会丢进线程池。
+    """
+    from functools import partial
+
+    from .workflows import customer_profile_pipeline as pipeline
+
+    return {
+        f"customer_profile.workflows.{pipeline.SLUG}:{pipeline.RULE_CHECK}": partial(
+            pipeline.rule_check, llm=llm, templates=templates
+        ),
+    }
+
+
 async def build_service(
     settings: Settings | None = None,
     *,
     replay: ReplaySource | None = None,
+    http_replay: ReplaySource | None = None,
     enable_store: bool = True,
     strict_replay: bool | None = None,
     max_active_nodes: int = MAX_ACTIVE_NODES_DEFAULT,
@@ -330,9 +353,21 @@ async def build_service(
 
     ``replay`` 给出时，LLM 与 HTTP 全部走固定响应，不出网。回放模式下**任何写请求
     都不会真的发出**，符合「测试与影子模式禁止生产回写」的要求。
+
+    ``http_replay`` 给出时**只有 HTTP 走固定响应，LLM 仍然真实调用**。用途是「用归档
+    的取数结果重跑一遍管线，看新代码在**同一份输入**上产出什么」——输入侧不可复现
+    （数据接口会变、录音会过期），而模型侧必须真实，否则测的是旧结论。
+    两者互斥：给了 ``replay`` 就是全回放。
+
+    **「只回放 HTTP」也可以放在建服务之后接线**（``replay_from_archive.wire_replay``）：
+    对照组跑的是不含本参数的旧提交，测量工具必须两臂通用。本参数留给知道自己在做什么的
+    调用方——它把留痕的 ``is_replay`` 一并置真，接线版需要自己补这一步。
     """
     settings = settings or get_settings()
     settings.ensure_dirs()
+
+    if replay is not None and http_replay is not None:
+        raise ValueError("replay 与 http_replay 只能给一个：全回放与「仅回放 HTTP」互斥")
 
     if replay is None and settings.is_replaying:
         if not settings.fixture_dir.is_dir():
@@ -353,6 +388,9 @@ async def build_service(
     request_limiter = asyncio.Semaphore(max(1, settings.max_concurrent_requests))
 
     transport = _build_transport(replay)
+    # 「只回放 HTTP」时两个客户端的接线必须分开：LLM 拿真实 transport（``None`` 表示
+    # 由客户端自己建连接），HTTP 拿回放来源与不出网的 MockTransport。
+    http_transport = _build_transport(http_replay) if http_replay is not None else transport
     # 配额按**每进程**限额构造（全局限额 = 每进程 × WORKER_REPLICAS，见 Settings）。
     # 限额为 None 时 LlmQuota 内部不建桶，acquire/settle 成为空操作。
     quota = LlmQuota(_per_process_quota_settings(settings))
@@ -365,8 +403,8 @@ async def build_service(
     )
     http_client = HttpClient(
         settings,
-        transport=transport,
-        replay=replay,
+        transport=http_transport,
+        replay=http_replay if http_replay is not None else replay,
         request_limiter=request_limiter,
         transcript_cache=transcript_cache,
     )
@@ -382,7 +420,13 @@ async def build_service(
             marked = await store.mark_running_as_interrupted()
             if marked:
                 logger.warning("启动恢复：{} 个残留任务已标为中断（interrupted），待人工处理", marked)
-        tracker = RunTracker(store, is_replay=replay is not None, code_commit=_code_commit())
+        tracker = RunTracker(
+            store,
+            # 「只回放 HTTP」的产物同样含回放成分（输入侧不是真实取数），
+            # 留痕里必须能看出来，否则会被当成真实链路的结果引用。
+            is_replay=replay is not None or http_replay is not None,
+            code_commit=_code_commit(),
+        )
 
     runtime = NodeRuntime(
         settings=settings,
@@ -390,7 +434,10 @@ async def build_service(
         llm=llm_client,
         http=http_client,
         recorder=tracker,
-        extra={"template_repository": TemplateRepository()},
+        extra={
+            "template_repository": TemplateRepository(),
+            "code_functions": _checker_functions(llm_client, TemplateRepository()),
+        },
     )
     registry = build_default_registry()
 

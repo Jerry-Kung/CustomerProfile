@@ -19,6 +19,7 @@ import json
 import re
 from typing import Any
 
+# rule: INCOME-03 第三方收入档位换成金额区间，只换算一次
 INCOME_BAND_RANGES: dict[str, str] = {
     "1": "8-15万",
     "2": "10-20万",

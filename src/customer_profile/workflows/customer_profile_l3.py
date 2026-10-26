@@ -31,6 +31,7 @@ from typing import Any
 
 from .. import readable as rdb
 from .. import text_utils as tut
+from ..rules.clusters import hard as hard_rules
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "customer_profile_l3"
@@ -163,7 +164,9 @@ def validate_l3(claims_json, facts_json, notes_updates_json, basis_json="{}") ->
         facts_n += 1
         has_quote = bool(str(claim.get("quote") or "").strip())
         channel = str(claim.get("record_channel") or "").strip()
-        if not has_quote and channel not in REGISTRY_CHANNELS:
+        # 判据与 ``review_notes`` 共用一份实现（HARD-03）。两边输入来源不同——
+        # 这里读 ``claim.quote``，Notes 侧读证据串里有没有原文标记——但判定相同。
+        if hard_rules.is_unbacked_fact(has_quote, channel):
             unbacked.append(
                 {
                     "attribute": claim.get("attribute"),
@@ -294,14 +297,12 @@ INFERRED_LOW = "inferred_low"
 本模块是独立工作流，不导入那个模块，靠**用例**钉住两者一致。"""
 
 
-REGISTRY_CHANNELS: frozenset[str] = frozenset(
-    {
-        "销售人员人工确认的客户Notes信息",
-        "客户留存在我方销售数据系统中的信息记录",
-        "销售人员对当前客户历史画像数据的反馈记录",
-    }
-)
-"""登记档渠道：由系统直接给出的事实，本就不需要原文锚点。"""
+REGISTRY_CHANNELS: frozenset[str] = hard_rules.REGISTRY_CHANNELS
+"""登记档渠道：由系统直接给出的事实，本就不需要原文锚点。
+
+正身已随 HARD-03 迁到 :mod:`customer_profile.rules.clusters.hard`，与 ``review_notes``
+共用同一份——此前两处各写一份，正是「改一处漏一处」的来源。
+"""
 
 
 # ====================================================================

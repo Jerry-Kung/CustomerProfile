@@ -322,23 +322,33 @@ def test_field_inference_guide_labels_categories():
 
 
 def test_field_source_notes_keys_are_real_contract_fields():
-    """来源补充说明的键必须是**真取证字段**（契约字段或编外字段）。
+    """取证方向的字段必须是**真取证字段**（契约字段或编外字段）。
 
-    这是**防漂移**的机制：字段改名或下线后，这张表若不跟着改，那段说明就会静默失效——
+    这是**防漂移**的机制：字段改名或下线后，规则若不跟着改，那段说明就会静默失效——
     模型既看不到它，也没人会发现它已经不生效了。校验集合用
     :data:`internal_fields.EXTRACTION_KEYS`：字段从 Notes 下线不等于不再取证，
     ``emotion`` / ``communication_rhythm`` / ``personality_and_preferences``
     三条说明本轮正是这样留下来的。
+
+    M4 起正文由 SPEC 簇承载（``rules/texts/spec.txt``），不再是 ``pipeline`` 里的字典常量。
     """
-    keys = set(pipe.FIELD_SOURCE_NOTES)
-    assert keys, "来源补充表不得为空"
+    from customer_profile.rules import render
+
+    keys = set(render.field_notes(stage="extract"))
+    assert keys, "取证方向不得为空"
     assert keys <= set(inf.EXTRACTION_KEYS), (
         f"不是取证字段的键：{sorted(keys - set(inf.EXTRACTION_KEYS))}"
     )
     guide = pipe.field_inference_guide()
+    lines = guide.splitlines()
     for key in keys:
-        assert f"取证范围：" in guide.split(f"- `{key}`")[1].split("\n")[0] or \
-            "取证范围：" in guide
+        # 取证方向渲染在字段行的**下一行**（缩进子项），不是同一行。
+        index = next(
+            i for i, line in enumerate(lines) if line.startswith(f"- `{key}`")
+        )
+        assert lines[index + 1].startswith("  - 取证范围："), (
+            f"{key} 的取证方向没有贴着字段渲染"
+        )
 
 
 def test_field_inference_guide_renders_source_notes_inline():

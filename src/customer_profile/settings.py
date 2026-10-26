@@ -207,6 +207,29 @@ class Settings(BaseSettings):
     replay_strict: bool = True
     """固定响应未命中时是否直接失败。默认严格，避免「静默走过」被误当成等价验证。"""
 
+    # ------------------------------------------------------------ 规则层
+    rules_disabled: str = ""
+    """禁用的规则编号，逗号分隔（``RULES_DISABLED=INCOME-01,EXPR-01``）。
+
+    **单条规则的回滚开关**：加一个编号即摘除该规则，不整批回滚提示词。未登记的编号
+    被忽略——灰度配置比代码先改是常态，配置里残留一个已退役的编号不该阻断运行。
+    用逗号串而不是列表：环境变量里的列表要写成 JSON，运维侧容易写错。
+    """
+
+    rule_checker_enabled: bool = False
+    """``llm_checker`` 通道总开关。
+
+    缺省 **false**：checker 是新增的 LLM 调用，先离线跑通再开。关闭时规则层的
+    code / prompt 通道照常工作，checker 动作集为空。
+    """
+
+    @property
+    def disabled_rule_ids(self) -> tuple[str, ...]:
+        """``rules_disabled`` 的解析结果（去空白、去空项）。"""
+        return tuple(
+            item.strip() for item in self.rules_disabled.split(",") if item.strip()
+        )
+
     serve_ui: bool = False
     """是否由后端托管前端构建产物（``frontend/dist``）。
 

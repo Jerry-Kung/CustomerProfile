@@ -4,8 +4,13 @@
 枚举填错键下游匹配失败，冲突不消解就出现两个矛盾值，预测撑身份就重演
 「妻子在电力局被写成客户职业」那一类错误。
 
+**M2 起规则判定已迁到 ``customer_profile.rules.clusters``**：本文件的断言仍读
+``rejected`` / ``downgraded`` 的 ``rule`` 字段。那个字段保留的是**迁移前的旧裸串**
+（``f_trade_in`` 这类），因为跨批次对账要靠它对齐旧产物；规则编号记在
+``rule_trace`` 与登记表里（见 ``scripts/rules_index.py``）。
+
 装置口径与 `tests/conftest.py` 一致：干净检出上全绿。
-批次产物的离线回放在 `scripts/probe_pipeline_l2.py`。
+批次产物的离线回放在 `scripts/probe_rules_diff.py`。
 """
 
 from __future__ import annotations
@@ -77,7 +82,10 @@ def test_attribution_filter_blocks_non_customer_identity():
         [claim("occupation", "电力局职工", subject="spouse")],
     )
     assert "occupation" not in result.facts
-    assert any(r["rule"] == "a_attribution" for r in result.rejected)
+    assert any(
+        r["rule"] == "a_attribution"  # IDENT-01
+        for r in result.rejected
+    )
 
 
 def test_attribution_filter_allows_non_customer_for_family_structure():
@@ -207,7 +215,10 @@ def test_social_alone_downgrades_identity_field():
     result = proj.project([claim("company", "某某公司", channel="小红书主页截图信息")])
     assert result.facts.get("company") == "某某公司"
     assert result.basis.get("company") == "inferred_low"
-    assert any(d["rule"] == "b_social_only" for d in result.downgraded)
+    assert any(
+        d["rule"] == "b_social_only"  # IDENT-03
+        for d in result.downgraded
+    )
 
 
 def test_attitude_field_without_firsthand_downgrades():
@@ -215,7 +226,10 @@ def test_attitude_field_without_firsthand_downgrades():
     result = proj.project([claim("emotion", "hate_being_rushed", channel="朋友圈截图内容信息")])
     assert result.facts.get("emotion") == ["hate_being_rushed"]
     assert result.basis.get("emotion") == "inferred_low"
-    assert any(d["rule"] == "b_attitude_weak_source" for d in result.downgraded)
+    assert any(
+        d["rule"] == "b_attitude_weak_source"  # ATTE-01
+        for d in result.downgraded
+    )
 
 
 def test_prediction_channel_claiming_fact_is_capped_at_inferred_high():
@@ -360,7 +374,10 @@ def test_replacement_without_evidence_is_withdrawn():
         context={},
     )
     assert "purchase_nature" not in result.facts
-    assert any(r["rule"] == "f_trade_in" for r in result.rejected)
+    assert any(
+        r["rule"] == "f_trade_in"  # CONSIST-01
+        for r in result.rejected
+    )
 
 
 def test_deregistered_company_is_not_filled():
@@ -374,7 +391,10 @@ def test_deregistered_company_is_not_filled():
     )
     assert "company" not in result.facts
     assert "company_type" not in result.facts
-    assert any(r["rule"] == "f_deregistered" for r in result.rejected)
+    assert any(
+        r["rule"] == "f_deregistered"  # CONSIST-03
+        for r in result.rejected
+    )
 
 
 def test_level_conflict_unified_to_one_value():
@@ -833,14 +853,20 @@ def test_salesperson_value_rejected_from_customer_name():
         ]
     )
     assert result.facts.get("customer_name") == "未知"
-    assert any(r["rule"] == "a_salesperson_value" for r in result.rejected)
+    assert any(
+        r["rule"] == "a_salesperson_value"  # IDENT-02
+        for r in result.rejected
+    )
 
 
 def test_salesperson_occupation_rejected():
     """「销售顾问」这一职业归属我方人员，不得写成客户的职业。"""
     result = proj.project([claim("occupation", "汽车销售顾问", channel="试驾录音信息")])
     assert "occupation" not in result.facts
-    assert any(r["rule"] == "a_salesperson_value" for r in result.rejected)
+    assert any(
+        r["rule"] == "a_salesperson_value"  # IDENT-02
+        for r in result.rejected
+    )
 
 
 def test_salesperson_gate_ignores_basis_of_inference():
