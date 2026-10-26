@@ -12,11 +12,12 @@
 import { useEffect, useState } from 'react'
 
 import { api, type RuntimeInfo } from './api/client'
+import { RuleCatalog } from './components/RuleCatalog'
 import { RunList } from './components/RunList'
 import { RunDetail } from './components/RunDetail'
 import { SubmitRun } from './components/SubmitRun'
 
-type Tab = 'runs' | 'submit'
+type Tab = 'runs' | 'submit' | 'rules'
 
 function App() {
   const [tab, setTab] = useState<Tab>('runs')
@@ -64,6 +65,13 @@ function App() {
           >
             提交任务
           </button>
+          <button
+            type="button"
+            className={tab === 'rules' ? 'active' : ''}
+            onClick={() => setTab('rules')}
+          >
+            规则清单
+          </button>
         </nav>
       </header>
 
@@ -87,6 +95,8 @@ function App() {
             }}
           />
         ) : null}
+
+        {tab === 'rules' ? <RuleCatalog /> : null}
 
         {tab === 'runs' && currentRun ? (
           <RunDetail

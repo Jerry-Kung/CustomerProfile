@@ -98,6 +98,42 @@ async def test_workflow_list_has_counts(client):
     assert by_id[hci.WORKFLOW_ID]["node_count"] == 4
 
 
+async def test_rule_catalog_lists_every_registered_rule(client):
+    """规则清单页的数据源：登记表里每一条都要出现，且带上展示所需的派生值。
+
+    断言不写死条数——规则会随时增删，写死只会让这条测试在正常改动时报红。
+    真正要钉住的是三件事：
+    ``rules`` 与登记表逐条对应、编号不重复、prompt 通道的规则必须带着正文
+    （页面的核心诉求就是「每条规则的内容是什么」，正文缺失等于页面白给）。
+    """
+    from customer_profile.rules import default as default_rules
+
+    body = (await client.get("/rules")).json()
+    rules = body["rules"]
+    registry = default_rules()
+
+    assert body["total"] == len(rules) == len(registry.all())
+    assert body["active"] == len(registry.active())
+    assert [row["id"] for row in rules] == [rule.id for rule in registry.all()], (
+        "接口返回的规则与登记表顺序或内容不一致"
+    )
+    assert len({row["id"] for row in rules}) == len(rules)
+
+    for row in rules:
+        assert row["title"] and row["cluster_title"]
+        if "prompt" in row["channels"]:
+            assert row["text"].strip(), f"{row['id']} 是 prompt 通道却没有正文"
+
+
+async def test_rule_catalog_reports_code_landings(client):
+    """登记了却没有落点是配置错误；接口必须如实返回空列表，而不是编一个。"""
+    rules = (await client.get("/rules")).json()["rules"]
+    by_id = {row["id"]: row for row in rules}
+    # checker 通道的规则至少有一处代码落点（checker.py 里的标记注释）
+    assert by_id["INCOME-01"]["landings"]
+    assert all(item["path"] and item["line"] > 0 for item in by_id["INCOME-01"]["landings"])
+
+
 # ---------------------------------------------------------------- 提交与查询
 
 

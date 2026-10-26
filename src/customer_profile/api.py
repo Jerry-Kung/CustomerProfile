@@ -280,6 +280,54 @@ def create_app(service_factory: Any = None) -> FastAPI:
             if not definition.is_synthetic
         ]
 
+    @app.get("/rules", tags=["meta"])
+    async def list_rules() -> dict[str, Any]:
+        """当前项目配置的全部规则（运行台「规则清单」页用）。
+
+        **只读且不依赖服务实例**：规则集是进程启动期装载的常量，与运行、数据库都无关。
+        因此这里不调 ``get_service()``——服务尚未就绪时也能回答「配了哪些规则」，
+        而这正是排查时最先要问的问题。
+
+        返回字段与登记表一一对应，另补三项便于展示的派生值：
+
+        - ``cluster_title``：簇的中文名。前端不该自己维护一份簇名映射，那会在新增簇时漏掉；
+        - ``text``：prompt 通道的正文（``rules/texts/*.txt`` 去掉标记后）。它是这条规则
+          真正递给模型的话，看规则必须能看到它；
+        - ``landings``：代码/正文里的落点行号。规则「登记了但没落地」只能靠它看出来。
+
+        不返回 ``message_customer`` 以外的任何对客文案拼接结果：对客产物不得出现规则编号
+        与内部解释，这个边界由产出侧保证，此处只是把原始字段交出去给人看。
+        """
+        from dataclasses import asdict
+
+        from .rules import default as default_rules
+        from .rules import guard as rule_guard
+        from .rules import render as rule_render
+        from .rules.clusters import cluster_of
+
+        registry = default_rules()
+        blocks = rule_render.load_blocks()
+        landings: dict[str, list[dict[str, Any]]] = {}
+        for mark in rule_guard.scan_marks():
+            landings.setdefault(mark.rule_id, []).append(
+                {"path": mark.path, "line": mark.line, "kind": mark.kind}
+            )
+
+        rows: list[dict[str, Any]] = []
+        for rule in registry.all():
+            row = asdict(rule)
+            row["cluster_title"] = cluster_of(rule.cluster)
+            block = blocks.get(rule.id)
+            row["text"] = block.text.strip() if block is not None else ""
+            row["landings"] = landings.get(rule.id, [])
+            rows.append(row)
+
+        return {
+            "total": len(rows),
+            "active": len(registry.active()),
+            "rules": rows,
+        }
+
     # ------------------------------------------------------------ 运行
 
     @app.post("/runs", response_model=SubmitResponse, tags=["runs"])

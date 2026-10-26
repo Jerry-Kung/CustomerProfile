@@ -161,6 +161,47 @@ export interface RuntimeInfo {
 }
 
 /** 一个工作流的元信息，用于提交页与列表页的工作流选择。 */
+/** 规则在代码/正文里的落点。`kind` 为 `code`（注释标记）或 `text`（成对标记）。 */
+export interface RuleLanding {
+  path: string
+  line: number
+  kind: string
+}
+
+/**
+ * 一条已配置的规则（`GET /rules`）。
+ *
+ * 与后端登记表一一对应。三项派生字段是给展示用的：`cluster_title`（簇中文名，前端不
+ * 自己维护映射）、`text`（prompt 通道递给模型的正文）、`landings`（落点行号）。
+ */
+export interface RuleConfig {
+  id: string
+  version: number
+  title: string
+  content_kind: string
+  channels: string[]
+  scope: string[]
+  stages: string[]
+  severity: string
+  default_action: string
+  message_internal: string
+  message_customer: string
+  owner: string
+  status: string
+  cluster: string
+  cluster_title: string
+  tests: string[]
+  legacy_codes: string[]
+  text: string
+  landings: RuleLanding[]
+}
+
+export interface RuleCatalog {
+  total: number
+  active: number
+  rules: RuleConfig[]
+}
+
 export interface WorkflowBrief {
   workflow_id: string
   display_name: string
@@ -220,6 +261,9 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 
 export const api = {
   listWorkflows: () => getJson<WorkflowBrief[]>('/workflows'),
+
+  /** 当前项目配置的全部规则。规则集是进程常量，与运行无关，服务未就绪也能取。 */
+  rules: () => getJson<RuleCatalog>('/rules'),
 
   /** 当前运行态（回放模式、回写开关、并发上限）。 */
   runtime: () => getJson<RuntimeInfo>('/runtime'),

@@ -7,6 +7,18 @@ V0.4 起的工作台前端。Vite + React + TypeScript。
 **仍然只读的是「过程」**：运行详情只展示、不编辑。
 V0.5.1 起增加了**唯一的写操作**——提交任务（`POST /runs`），页面为「提交任务」标签页。
 
+三个标签页：**运行列表**（`/runs`）、**提交任务**（`POST /runs`）、**规则清单**（`GET /rules`，只读）。
+
+## 规则清单页
+
+回答一个问题：**这个项目现在配了哪些规则，每条具体是什么。**
+
+- 数据来自 `GET /rules`，由后端从规则登记表实时组装，前端不维护任何规则枚举——
+  新增规则、新增簇时页面自动跟上（簇筛选的下拉项也取自数据）。
+- 列表行点开看详情：一句话口径、对客说法、作用字段、内容类、归属与版本、旧编码、
+  **落点**（登记了却没落地会红字标出）、验证用例，以及 prompt 通道规则的**提示词正文原话**。
+- 页面上会出现规则编号与内部解释，它们**不得出现在对客产物里**；页脚有这条提醒。
+
 ## 构建与入库约定（重要）
 
 **构建产物 `dist/` 是入库的**，而不是加进 `.gitignore`。
@@ -43,7 +55,7 @@ npm run dev          # Vite dev server，API 请求按 vite.config.ts 的 proxy 
    与「执行了但已不在定义里」无从分辨。
 
 相关端点（读）：`GET /workflows`、`GET /runs/{id}/graph`、
-`GET /runs/{id}/nodes/{node_id}/attempts`、`GET /runtime`。
+`GET /runs/{id}/nodes/{node_id}/attempts`、`GET /runtime`、`GET /rules`。
 相关端点（写）：`POST /runs` —— 前端**唯一**的写操作，由 `api/client.ts` 的 `submitRun` 调用。
 
 提交入口有三条约定值得记住：
