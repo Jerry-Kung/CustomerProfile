@@ -26,7 +26,7 @@ def claim(attribute, value, channel="试驾录音信息", **kwargs):
 def test_snapshot_is_stable():
     """契约快照的规模是既定的：45 字段、7 分类、15 基础身份、17 单选 / 7 多选。
 
-    这组数字来自 v2 契约（``docs/business_opt01_v3/Notes_new.txt``，payload 签名 ``b36e78edf9a2``），
+    这组数字来自 v2 契约（``docs/reference/Notes_new.txt``，payload 签名 ``b36e78edf9a2``），
     由 ``scripts/snapshot_note_contract.py --from-response`` 固化。相比上一版
     （47 字段 / 6 分类）：下线 17 个字段、新增 15 个、9 个同名改定义，
     并新增「地域与生活圈」分类。改动此处即改契约，须走评审。

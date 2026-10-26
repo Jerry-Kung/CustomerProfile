@@ -10,10 +10,12 @@
 |---|---|---|
 | `batches/baseline-39-dsv41-noThink/` | **基线臂** 39 案批次 | 改动前的对照物，只读 |
 | `batches/pipeline-v3.3-39/` | **v3.3 实验臂** 39 案批次 | 本轮优化的产出，含全部中间节点输出 |
+| `batches/uat-18-20261026/` | **UAT 快照归档** 18 根运行 / 16 号码 | 写回开启、无代码提交锚点，**不是受控基线**，见其 `README.md` |
 | `transcript_cache/` | 录音转写归档（58 条） | **跨批次共用**，与工作流逻辑无关，删掉等于毁掉复用设计 |
 
-两个批次目录里都含：`runs/<手机号>/{result,nodes,attempts,tree}.json`、`manifest.json`、
-`phones.txt`、`summary.md`、`logs/`、批次独立 `trace.db`。
+两个 39 案批次目录里都含：`runs/<手机号>/{result,nodes,attempts,tree}.json`、`manifest.json`、
+`phones.txt`、`summary.md`、`logs/`、批次独立 `trace.db`。`uat-18-20261026/` 同构，但无 `logs/`，
+另含 `source/`（原始快照）。
 
 ## 不保留什么
 

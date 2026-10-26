@@ -16,8 +16,8 @@
 
 用法::
 
-    python scripts/snapshot_note_contract.py --from-response docs/business_opt01_v3/Notes_new.txt
-    python scripts/snapshot_note_contract.py --from-response docs/business_opt01_v3/Notes_new.txt --check
+    python scripts/snapshot_note_contract.py --from-response docs/reference/Notes_new.txt
+    python scripts/snapshot_note_contract.py --from-response docs/reference/Notes_new.txt --check
     python scripts/snapshot_note_contract.py --batch-dir <批次目录>    # 复现历史快照
 
 **注意**：走 ``--from-response`` 时**不做增量合并**。线上 payload 已是完整现行契约，

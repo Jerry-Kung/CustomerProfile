@@ -4,7 +4,7 @@
 这里从探针结果（``experiments/role_labelling_probe/<时间戳>/``）与转写缓存同时读取，
 原文取自缓存、角色取自探针，两者按句序号对齐，任何一处错位都能立刻看出来。
 
-**输出**：``docs/business_opt01_v3/审核报告-销售方为0的录音原文.md``。该文件名命中该目录
+**输出**：``docs/history/审核报告-销售方为0的录音原文.md``。该文件名命中 `docs/history/`
 ``.gitignore`` 里的 ``审核报告-*.md`` 规则，不进 Git——文件里是客户原话。
 
 用法：
@@ -24,7 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 DEFAULT_PROBE_ROOT = REPO_ROOT / "experiments" / "role_labelling_probe"
-OUT_PATH = REPO_ROOT / "docs" / "business_opt01_v3" / "审核报告-销售方为0的录音原文.md"
+OUT_PATH = REPO_ROOT / "docs" / "history" / "审核报告-销售方为0的录音原文.md"
 
 
 def latest_probe_dir(root: Path) -> Path:
