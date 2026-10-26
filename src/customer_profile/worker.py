@@ -8,9 +8,9 @@
 - API 进程负责提交（把运行写进队列）与查询；
 - worker 进程负责执行。两者共用一个 SQLite 文件，靠 ``Store`` 的原子领取避免双跑。
 
-**只从队列领取，不创建队列。** 入队是提交方的职责；worker 启动时只做两件事：
-把上次崩溃遗留的 ``running`` 标为 ``interrupted``（交人工），以及把租约过期的
-运行退回队列（这是「重启不丢任务」的落地）。
+**只从队列领取，不创建队列。** 入队是提交方的职责；worker 启动时按配置把上次崩溃
+遗留的 ``running`` 标为 ``interrupted``（交人工），未开始的 ``queued`` 继续消费。
+租约过期的运行不自动重领，避免重复产生外部副作用。
 """
 
 from __future__ import annotations
@@ -18,10 +18,12 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
-import sys
 from typing import Any
 
+from loguru import logger
+
 from .definitions import RunStatus
+from .logging_config import configure_logging
 from .runner import Service, build_service
 from .settings import Settings, get_settings
 
@@ -29,8 +31,7 @@ from .settings import Settings, get_settings
 class Worker:
     """队列消费者。
 
-    领取→执行→写终态，循环往复。所有状态都在库里，因此进程随时可以被打断——
-    下次启动会接着做（经租约过期回收），不需要内存里的状态存活。
+    领取→执行→写终态。未开始的任务保留在队列中；中断的运行交人工处理，不自动续跑。
     """
 
     def __init__(self, service: Service, settings: Settings) -> None:
@@ -70,12 +71,12 @@ class Worker:
         if settings.interrupt_on_start:
             marked = await self.service.store.mark_running_as_interrupted()
             if marked:
-                print(
-                    f"[worker] {marked} 个残留运行标为 interrupted，待人工处理",
-                    flush=True,
-                )
+                logger.warning("启动恢复：{} 个残留任务已标为中断（interrupted），待人工处理", marked)
 
-        print(f"[worker] 启动，标识 {self.worker_id}", flush=True)
+        logger.info(
+            "执行进程已启动，标识={}，回写启用={}，回放模式={}",
+            self.worker_id, settings.writeback_enabled, settings.replay_mode,
+        )
         while not self._stopping.is_set():
             ran = await self.run_once()
             if not ran:
@@ -89,12 +90,13 @@ class Worker:
                     pass
 
         await self._drain()
+        logger.info("执行进程已停止，标识={}", self.worker_id)
 
     async def _drain(self) -> None:
         """等在飞运行结束。"""
         if not self._inflight:
             return
-        print(f"[worker] 等待 {len(self._inflight)} 个在飞运行结束", flush=True)
+        logger.info("执行进程正在关停，等待 {} 个运行中的任务结束", len(self._inflight))
         await asyncio.gather(*self._inflight.values(), return_exceptions=True)
 
     async def aclose(self) -> None:
@@ -107,8 +109,8 @@ class Worker:
     async def run_once(self) -> bool:
         """领取并执行一个任务。领取到并执行完成返回 ``True``，队列空返回 ``False``。
 
-        执行是**内联等待**的（不派生后台任务）：worker 的并发度由
-        ``MAX_ACTIVE_RUNS`` 控制，本轮只做单 worker 串行消费，语义最简单也最容易解释。
+        执行是**内联等待**的（不派生后台任务）：单 worker 串行消费，
+        ``MAX_ACTIVE_RUNS`` 只约束服务的进程内提交路径。
         需要并行时把并发闸门接在这一层，而不是靠在这里派生多个 task。
         """
         store = self.service.store
@@ -124,13 +126,13 @@ class Worker:
         workflow_id = str(claimed["workflow_id"])
         inputs = _decode_inputs(claimed.get("inputs_json"))
         business_ref = claimed.get("business_ref")
-        print(f"[worker] 领取 {run_id}（{workflow_id}）", flush=True)
-
-        heartbeat = asyncio.create_task(self._heartbeat(run_id))
-        try:
-            await self._execute(run_id, workflow_id, inputs, business_ref)
-        finally:
-            heartbeat.cancel()
+        with logger.contextualize(run_id=run_id):
+            logger.info("任务已领取，工作流={}，执行进程={}", workflow_id, self.worker_id)
+            heartbeat = asyncio.create_task(self._heartbeat(run_id))
+            try:
+                await self._execute(run_id, workflow_id, inputs, business_ref)
+            finally:
+                heartbeat.cancel()
         return True
 
     async def _execute(
@@ -152,7 +154,7 @@ class Worker:
             workflow = self.service.require_workflow(workflow_id)
         except KeyError as exc:
             # 定义已不存在的运行：如实标失败，否则它会永远停在 running。
-            print(f"[worker] {run_id} 的工作流不可用：{exc}", file=sys.stderr, flush=True)
+            logger.bind(run_id=run_id).error("任务执行失败，工作流不可用：{}", exc)
             await self.service.store.update_run_finished(
                 run_id, status=RunStatus.FAILED, error=str(exc), duration_ms=0
             )
@@ -170,11 +172,7 @@ class Worker:
                 )
             )
         except Exception as exc:  # 调度器已自行落终态；这里只防进程退出
-            print(
-                f"[worker] {run_id} 执行异常：{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-                flush=True,
-            )
+            logger.bind(run_id=run_id).exception("任务执行异常：{}: {}", type(exc).__name__, exc)
 
     async def _heartbeat(self, run_id: str) -> None:
         """周期性续租。租约失效会导致该运行被别的 worker 重领并跑第二遍。"""
@@ -216,7 +214,9 @@ def _install_signal_handlers(worker: Worker, loop: asyncio.AbstractEventLoop) ->
 
 
 async def main_async() -> int:
-    settings = get_settings()
+    # 独立入口自带消费者，不能再由 build_service 创建第二个内联消费者。
+    settings = get_settings().model_copy(update={"inline_worker": False})
+    configure_logging(settings.log_level, component="worker")
     service = await build_service(settings)
     worker = Worker(service, settings)
     loop = asyncio.get_running_loop()

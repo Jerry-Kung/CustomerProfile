@@ -35,9 +35,11 @@ from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable
 
 from fastapi import FastAPI, Header, HTTPException
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from .api import ENTRY_WORKFLOW_ID, PHONE_PATTERN
+from .logging_config import configure_logging
 from .runner import QueueFull, RunSlotUnavailable, Service, build_service
 from .settings import Settings, get_settings
 
@@ -95,6 +97,8 @@ def create_inbound_app(
     ``service_factory`` 可注入（测试给一个用固定响应装配的服务）；缺省在 lifespan 里
     按 ``inbound_settings`` 装配真实服务。
     """
+    if service_factory is None:
+        configure_logging((settings or get_settings()).log_level, component="inbound")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -102,6 +106,7 @@ def create_inbound_app(
             app.state.service = await service_factory()
         else:
             app.state.service = await build_service(inbound_settings(settings))
+        logger.info("对外接单服务已就绪，内联执行与启动恢复已关闭")
         try:
             yield
         finally:
@@ -111,6 +116,7 @@ def create_inbound_app(
                 await service.aclose()
                 if service.store is not None:
                     service.store.close()
+                logger.info("对外接单服务已关闭")
 
     app = FastAPI(
         title="Customer Profile — 对外任务接口",
@@ -229,7 +235,7 @@ def main() -> None:
         "customer_profile.inbound:app",
         host=settings.inbound_host,
         port=settings.inbound_port,
-        log_level=settings.log_level.lower(),
+        log_config=None,  # 日志由 create_inbound_app 统一交给 Loguru。
     )
 
 

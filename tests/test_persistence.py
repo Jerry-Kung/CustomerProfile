@@ -9,12 +9,15 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import sqlite3
+import sys
 
 import pytest
+from loguru import logger
 
 from customer_profile.definitions import RunStatus
 from customer_profile.persistence import RunTracker, Store
-from customer_profile.persistence.schema import RunRecordRow, json_dumps, json_loads
+from customer_profile.persistence.schema import SCHEMA_STATEMENTS, RunRecordRow, json_dumps, json_loads
 from customer_profile.replay import ReplaySource
 from customer_profile.workflows import human_corrected_info as hci
 from customer_profile.workflows import synthetic_fanout as syn
@@ -43,6 +46,47 @@ async def test_schema_applies_idempotently(store):
     await store.insert_run(RunRecordRow(run_id="probe", workflow_id="wf"))
     assert (await store.get_run("probe")) is not None
     assert await store.count_runs() == 1
+
+
+async def test_business_upgrade_preserves_legacy_history_and_adds_attempt_columns(tmp_path):
+    """旧卷中的历史入口记录与快照保留，两进程重连后仍能写入新的异常字段。"""
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as connection:
+        for statement in SCHEMA_STATEMENTS:
+            connection.execute(statement)
+        assert "anomaly" not in {
+            row[1] for row in connection.execute("PRAGMA table_info(request_attempts)")
+        }
+        connection.execute(
+            "INSERT INTO definition_versions "
+            "(workflow_id, definition_hash, definition_json, created_at_ms) "
+            "VALUES (?, ?, ?, ?)",
+            ("customer_profile_entry", "historical", '{"display_name":"历史入口"}', 1),
+        )
+        connection.execute(
+            "INSERT INTO workflow_runs "
+            "(run_id, workflow_id, status, definition_version_id, outputs_json, created_at_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("old-run", "customer_profile_entry", "succeeded", 1,
+             '{"result1":"historical-result"}', 1),
+        )
+    stores = [Store(path), Store(path)]
+    try:
+        for ledger in stores:
+            ledger.connect()
+        old = await stores[0].get_run("old-run")
+        assert old["outputs_json"] == {"result1": "historical-result"}
+        assert (await stores[1].definition_version(1))["definition"] == {"display_name": "历史入口"}
+        await stores[1].insert_attempt(
+            run_id="old-run", node_id="probe", call_path="", attempt_no=1,
+            kind="llm", anomaly="empty_text", finish_reason="length",
+        )
+        attempts = await stores[0].list_attempts("old-run")
+        assert attempts[0]["anomaly"] == "empty_text"
+        assert attempts[0]["finish_reason"] == "length"
+    finally:
+        for ledger in stores:
+            ledger.close()
 
 
 # ---------------------------------------------------------------- 版本快照
@@ -344,8 +388,12 @@ async def test_tracker_fails_soft_by_default(store, capsys):
         executions: list = []
         node_started_at: dict = {}
 
-    await tracker.run_started(DummyRun())  # 不应抛异常
-    captured = capsys.readouterr()
+    sink_id = logger.add(lambda message: sys.stderr.write(str(message)), diagnose=False)
+    try:
+        await tracker.run_started(DummyRun())  # 不应抛异常
+        captured = capsys.readouterr()
+    finally:
+        logger.remove(sink_id)
     assert "留痕" in captured.err
 
 

@@ -1,34 +1,24 @@
-# 构建上下文裁剪。仓库里最重的是 experiments/（批次产物）、data/（运行期库与产物）
-# 与 frontend/node_modules/，三者都不该进出镜像的构建上下文。
-#
-# 注意：被排除的目录**无法**用 ! 重新包含其内部文件，所以这里只排「整块不要」的目录，
-# tests/ 整块保留在上下文里，由 Dockerfile 精确 COPY 其中需要的部分。
+# Allow only runtime code, dependencies, and the committed UI bundle into builds.
+# In particular, .env, Git history, customer data, and local replay recordings
+# never enter the build context; only the checked-in sample fixture is allowed.
+**
+!Dockerfile
+!requirements.txt
+!src/
+!src/**
+!frontend/
+!frontend/dist/
+!frontend/dist/**
+!tests/
+!tests/fixtures/
+!tests/fixtures/replay/
+!tests/fixtures/replay/human_corrected_info.json
 
-# 版本控制与本地配置
-.git
-.gitignore
-.dockerignore
-.env
-.env.*
-!.env.example
-
-# 运行期数据与实验产物（可重建，体积大）
-data/
-experiments/
-.pytest_cache/
 **/__pycache__/
-*.py[cod]
-
-# 文档与参考文件
-docs/
-Dockerfile.example
-
-# 前端依赖与源码：镜像只需要构建产物 frontend/dist
-frontend/node_modules/
-frontend/src/
-frontend/public/
-frontend/index.html
-frontend/package.json
-frontend/package-lock.json
-frontend/tsconfig*.json
-frontend/vite.config.ts
+**/*.py[cod]
+**/.env
+**/.env.*
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.log

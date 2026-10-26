@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import json
 
+import httpx
 import pytest
 
+from customer_profile.api import create_app
 from customer_profile.definitions import NodeStatus, WorkflowDef, make_node
 from customer_profile.execution.executors import NodeRuntime, build_default_registry
 from customer_profile.execution.http import HttpClient
@@ -24,6 +26,7 @@ from customer_profile.execution.llm import LlmClient
 from customer_profile.execution.scheduler import RunRequest, Scheduler
 from customer_profile.execution.subworkflow import register_tool_executor
 from customer_profile.replay import ReplaySource
+from customer_profile.runner import build_service
 from customer_profile.settings import Settings
 from customer_profile.workflows import customer_profile_entry as entry
 
@@ -131,6 +134,28 @@ async def test_entry_result1_comes_from_the_production_subworkflow(tmp_path):
     assert outcome.succeeded, outcome.error
     assert isinstance(outcome.outputs["result1"], str)
     assert outcome.outputs["result1"] == "13800000000"
+
+
+async def test_retired_entry_is_not_accepted_by_api(tmp_path):
+    """旧图保留作嵌套调度样本，但 API 不再接受旧入口的新任务。"""
+    settings = make_settings(tmp_path, _env_file=None, inline_worker=False)
+    service = await build_service(settings, replay=ReplaySource(strict=True))
+
+    async def factory():
+        return service
+
+    app = create_app(service_factory=factory)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/runs",
+                json={"workflow_id": entry.WORKFLOW_ID,
+                      "inputs": {"phone_number": "13800000000"}},
+            )
+            assert response.status_code == 404
+            assert await service.store.queue_depth() == 0
 
 
 async def test_each_tool_node_opens_a_nested_run(tmp_path):

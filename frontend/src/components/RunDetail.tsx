@@ -19,7 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, type RunDetailPayload, type RunGraph } from '../api/client'
 import { NodeDetail } from './NodeDetail'
 import { NodeList } from './NodeList'
-import { callbackPayloadOf, executionKey } from '../lib/nodeSummary'
+import { callbackPayloadOf, executionKey, parseJsonLoose } from '../lib/nodeSummary'
 import { ResultView } from './ResultView'
 import { RunOverview } from './RunOverview'
 
@@ -98,12 +98,17 @@ export function RunDetail({ runId, onDrillDown, onBack }: RunDetailProps) {
 
   const hasResult = payload !== null && Object.keys(payload.outputs ?? {}).length > 0
 
-  // 回传体：本轮改造的**第二份产物**（六键 analysis_result），运行级 outputs 里没有它，
-  // 只在构造节点的产出里。定位方式见 callbackPayloadOf，不写死工作流名或节点 ID。
+  // 历史运行可能将回传体保留为第二份产物；新运行的 result1 已直接指向回传体。
   const callbackPayload = useMemo(
     () => callbackPayloadOf(definitionNodes, executions),
     [definitionNodes, executions],
   )
+  const callbackAlreadyShown = useMemo(() => {
+    if (!callbackPayload) return false
+    const result = payload?.outputs?.result1
+    const parsed = typeof result === 'string' ? parseJsonLoose(result) : result
+    return JSON.stringify(parsed) === JSON.stringify(callbackPayload)
+  }, [payload, callbackPayload])
 
   const copyResult = useCallback(async () => {
     if (!payload) return
@@ -212,20 +217,19 @@ export function RunDetail({ runId, onDrillDown, onBack }: RunDetailProps) {
               </button>
             </header>
             <div className="modal-body">
-              {/* 设计稿 §5：本轮对外产物**有两份**，形状不同、不要混读。
-                  两份并列呈现，各自可折叠；回传体只在业务测试臂上存在，缺则整段不渲染。 */}
+              {/* 兼容历史双产物；新运行的最终结果已是回传体时只展示一次。 */}
               <details className="result-block" open>
                 <summary className="result-block-summary">
-                  画像卡（result1）
+                  最终结果（result1）
                   <span className="result-block-note">工作流出口，对外契约</span>
                 </summary>
                 <ResultView outputs={payload.outputs} />
               </details>
-              {callbackPayload ? (
+              {callbackPayload && !callbackAlreadyShown ? (
                 <details className="result-block" open>
                   <summary className="result-block-summary">
                     回传体（analysis_result 六键）
-                    <span className="result-block-note">构造节点产出，调测期不发请求</span>
+                    <span className="result-block-note">回写节点的上游产物</span>
                   </summary>
                   <ResultView outputs={callbackPayload} />
                 </details>

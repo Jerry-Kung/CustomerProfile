@@ -27,7 +27,7 @@ def main() -> None:
         "customer_profile.main:app",
         host=settings.api_host,
         port=settings.api_port,
-        log_level=settings.log_level.lower(),
+        log_config=None,  # 日志已由 create_app 统一交给 Loguru。
     )
 
 
