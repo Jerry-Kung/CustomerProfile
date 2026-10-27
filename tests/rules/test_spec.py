@@ -83,10 +83,13 @@ def test_l1_guide_is_unchanged_by_the_migration():
     """L1 提示词**逐字不变**：这是 M4 的验收点，也是「迁移不是改提示词」的证据。
 
     字符数与哈希都钉住。改这条断言等于改了提示词，必须走业务确认。
+
+    2026-10-27 经业务确认追加一条：``SPEC-16`` 消费等级档位方向（8240 → 8327 字符）。
     """
     guide = pipe.l1_guide()
-    assert len(guide) == 8240
+    assert len(guide) == 8327
     assert "取证范围：从沟通记录里的时间表述推断" in guide
+    assert "数字越大代表消费水平越高" in guide
     # 标记不得漏进提示词：它们是落点凭据，不是给模型看的内容
     assert "<!-- rule:" not in guide
 

@@ -299,7 +299,35 @@ RULES: tuple[Rule, ...] = (
             "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
         ),
     ),
+    Rule(
+        id="SPEC-16",
+        version=1,
+        title="消费等级的档位方向",
+        content_kind="spec",
+        channels=("prompt", "code"),
+        scope=("consumption_level",),
+        stages=("extract", "project"),
+        severity="warn",
+        default_action="annotate",
+        message_internal="消费等级按 1-6 档取值，**数字越大代表消费水平越高**（1 档最低、6 档最高）。第三方标签给出的「N档消费」直接取该档位，**不得**把方向读反。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/test_callback_build.py::test_consumption_level_summary_carries_band_note",
+            "tests/test_callback_build.py::test_other_fields_summary_has_no_band_note",
+        ),
+    ),
 )
+
+CONSUMPTION_LEVEL_NOTE = "（消费等级分{bands}档，数字越大代表消费水平越高）"
+"""回写时拼在「AI 分析总结」末尾的固定注释（``SPEC-16`` 的 code 通道）。
+
+档位数**从契约推导**（``legal_keys('consumption_level')``），不写死：契约增删档位时
+回写给销售的说明随之变化，不会出现「注释说 6 档、枚举却有 7 个键」这种自相矛盾。
+拼接处见 :func:`customer_profile.callback_build.build_basic_notes_updates`。
+"""
 
 FIELD_OF: dict[str, str] = {rule.scope[0]: rule.id for rule in RULES}
 """``{字段: 规则编号}`` 反向索引：排查「这句取证口径来自哪条规则」时用它。"""

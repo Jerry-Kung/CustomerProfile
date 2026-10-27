@@ -391,9 +391,27 @@ def build_basic_notes_updates(notes: Sequence[Any]) -> list[dict[str, Any]]:
         item: dict[str, Any] = {"attribute_key": key, "attribute_value": str(value)}
         detail = entry.get("reasoning_detail")
         if isinstance(detail, dict):
-            item["reasoning_detail"] = _normalize_detail(detail)
+            detail = _normalize_detail(detail)
+            if key == "consumption_level":
+                # rule: SPEC-16 消费等级档位方向：分析总结末尾固定拼接说明
+                detail["summary"] = _append_consumption_note(detail["summary"])
+            item["reasoning_detail"] = detail
         updates.append(item)
     return updates
+
+
+def _append_consumption_note(summary: str) -> str:
+    """在「AI 分析总结」末尾拼接档位说明；已拼过则原样返回（重复回写不叠加）。"""
+    from .rules.clusters.spec import CONSUMPTION_LEVEL_NOTE
+
+    bands = len(nc.legal_keys("consumption_level"))
+    note = CONSUMPTION_LEVEL_NOTE.format(bands=bands)
+    text = (summary or "").strip()
+    if not text:
+        return note
+    if text.endswith(note):
+        return text
+    return text + note
 
 
 def _enum_items(attribute: str, value: Any) -> list[str]:
