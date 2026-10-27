@@ -947,3 +947,68 @@ def test_injected_phone_evidence_carries_number():
         n for n in json.loads(result["notes_updates_json"]) if n["attribute_key"] == "phone_number"
     )
     assert any("15308826588" in str(e) for e in note["reasoning_detail"]["evidence"])
+
+
+# ------------------------------------------- 英文残留治理（EXPR-01 / EXPR-03）
+
+def test_review_rewrites_enum_keys_in_prose():
+    """正文里的枚举键在审查层就换成中文，取值本身保持契约键（前端按 display_name 映射）。
+
+    实测来源：``uat-18-20261026`` 的 13207117251 / 13100792128 / 18271918797 /
+    18356093957 四案，``已定稿事实：`` 后面直接跟着 ``power、appearance`` 这类键。
+    """
+    result = pipe.review_notes(
+        json.dumps(
+            [
+                {
+                    "attribute_key": "core_concerns",
+                    "attribute_value": "power||appearance",
+                    "reasoning_detail": {
+                        "summary": "已定稿事实：power、appearance",
+                        "steps": [],
+                        "evidence": [],
+                        "confidence": 0.8,
+                    },
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        json.dumps({"core_concerns": "power||appearance"}, ensure_ascii=False),
+        "{}",
+    )
+    entry = json.loads(result["notes_updates_json"])[0]
+    assert entry["attribute_value"] == "power||appearance", "取值是契约键，不得改写"
+    assert entry["reasoning_detail"]["summary"] == "已定稿事实：动力、颜值"
+    assert result["english_rule_hits"] == 1
+
+
+def test_review_removes_english_placeholder_entries():
+    """``payment_method = unknown`` 这类英文占位串整条删除，不留在产物里占位。
+
+    实测来源：``uat-18-20261026`` 的 17652815077（payment_method / license_plate_status
+    均为 ``unknown``）。
+    """
+    result = pipe.review_notes(
+        json.dumps(
+            [
+                {
+                    "attribute_key": "payment_method",
+                    "attribute_value": "unknown",
+                    "reasoning_detail": {
+                        "summary": "现有信息只有社交渠道给出的 unknown",
+                        "steps": ["维持 unknown 供人工确认"],
+                        "evidence": [],
+                        "confidence": 0.2,
+                    },
+                },
+                {"attribute_key": "occupation", "attribute_value": "教师",
+                 "reasoning_detail": {"summary": "", "steps": [], "evidence": [], "confidence": 0.9}},
+            ],
+            ensure_ascii=False,
+        ),
+        json.dumps({"payment_method": "unknown", "occupation": "教师"}, ensure_ascii=False),
+        "{}",
+    )
+    kept = json.loads(result["notes_updates_json"])
+    assert [entry["attribute_key"] for entry in kept] == ["occupation"]
+    assert result["english_rule_hits"] == 1

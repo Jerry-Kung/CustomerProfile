@@ -89,9 +89,14 @@ def test_attribution_filter_blocks_non_customer_identity():
 
 
 def test_attribution_filter_allows_non_customer_for_family_structure():
-    """家庭结构不受归属过滤限制——配偶的信息本就是家庭结构的一部分。"""
-    result = proj.project([claim("family_structure", "married", subject="spouse")])
-    assert result.facts.get("family_structure") == "married"
+    """家庭结构不受归属过滤限制——配偶的信息本就是家庭结构的一部分。
+
+    这里用现行合法键：2026-10-27 起 ``married`` / ``unmarried`` 属旧版键，
+    会在归一层被映射成 ``*_no_child``（见 ``docs/history/旧版枚举键与production臂整改方案.md``），
+    若仍用旧键，本用例断言的就不是「归属过滤」而是「别名映射」了。
+    """
+    result = proj.project([claim("family_structure", "married_no_child", subject="spouse")])
+    assert result.facts.get("family_structure") == "married_no_child"
 
 
 # ---------------------------------------------------------------- b 来源分级

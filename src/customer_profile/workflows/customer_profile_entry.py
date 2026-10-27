@@ -43,7 +43,12 @@ REMOVED_EDGES = (
 
 EVIDENCE_WORKFLOW = "evidence_subagent"
 PROFILE_WORKFLOW = "profile_features_analysis"
-PRODUCTION_WORKFLOW = "customer_profile_production"
+PRODUCTION_WORKFLOW = "customer_profile_pipeline"
+"""末端子流程：**2026-10-27 由 ``customer_profile_production`` 改指本臂**。
+
+生产臂已整臂退役（``docs/history/旧版枚举键与production臂整改方案.md`` §4.4），
+本入口图只作「子流程编排」的历史样本，节点与边的形态不变，末端换成当前在用的管线。
+"""
 
 
 WORKFLOW = WorkflowDef(

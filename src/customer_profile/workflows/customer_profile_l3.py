@@ -19,8 +19,8 @@ L2 facts（代码投影，已定稿）
    共享输入，冲突只能靠事后「Notes 审核」补救——那是治不好的。
 2. **表达不新增事实**（§7.4）。LLM 只做组织与措辞；装配层逐条核对它引用的取值能否在
    ``facts`` 里找到出处，找不到即剔除并留痕。
-3. **复用预置资产，不复制**。6 个业务资产按**原名**引用 production 的模板
-   （见 :data:`PRODUCTION_ASSET`），仓库里只有一份正文。
+3. **复用预置资产，不复制**。6 个业务资产按**原名**引用公共资产模板
+   （见 :func:`SHARED_ASSET`，前缀 ``customer_profile_shared__``），仓库里只有一份正文。
    复制到本模块的 slug 下会造出第二份副本，日后必然漂移。
 """
 
@@ -52,14 +52,23 @@ def template_name(node_id: str) -> str:
     return f"{SLUG}__{node_id}"
 
 
-def PRODUCTION_ASSET(node_id: str) -> str:
-    """按**原名**取生产图里的预置资产模板。
+def SHARED_ASSET(node_id: str) -> str:
+    """按**原名**取公共业务资产模板。
 
     「必须原样保留的业务资产」共 6 份（设计稿 §7.5），它们属于**业务资产**而非
-    某张图的私有物。本模块直接引用生产图那 6 个文件，不在 ``customer_profile_l3__*``
+    某张图的私有物。本模块直接引用那 6 个文件，不在 ``customer_profile_l3__*``
     下另存副本——一份正文、一处维护，才是「一字不改」能被验证的前提。
+
+    **2026-10-27 改名**：这 6 份原叫 ``customer_profile_production__*``，随生产臂
+    整臂退役一并改成 ``customer_profile_shared__*``。改名不是改正文——文件内容是业务
+    资产，逐字未动；改的只是前缀，免得「production」这个名字在仓库里继续指着一个
+    已删除的工作流。见 ``docs/history/旧版枚举键与production臂整改方案.md`` §4.4。
     """
-    return f"customer_profile_production__{node_id}"
+    return f"customer_profile_shared__{node_id}"
+
+
+PRODUCTION_ASSET = SHARED_ASSET
+"""旧名保留一处，供文档与历史脚本引用；新代码请用 :func:`SHARED_ASSET`。"""
 
 
 EXPRESS_TEMPLATE = template_name(EXPRESS)

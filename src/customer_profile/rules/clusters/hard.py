@@ -78,6 +78,30 @@ RULES: tuple[Rule, ...] = (
         ),
         legacy_codes=("unbacked_fact",),
     ),
+    Rule(
+        id="ENUM-01",
+        version=1,
+        title="回写枚举取值必须是契约合法键",
+        content_kind="hard",
+        channels=("code",),
+        scope=("*",),
+        stages=("gate",),
+        severity="block",
+        default_action="reject",
+        message_internal=(
+            "枚举字段降级后取值仍归不到契约合法键：整条剔除，不把内部键回传给前端"
+        ),
+        message_customer="",
+        owner="engineering",
+        status="active",
+        cluster="hard",
+        tests=(
+            "tests/rules/test_enum_legacy.py::test_illegal_enum_after_downgrade_is_removed",
+            "tests/rules/test_enum_legacy.py::test_legal_enum_after_downgrade_is_kept",
+            "tests/rules/test_enum_legacy.py::test_legacy_key_is_not_treated_as_illegal",
+        ),
+        legacy_codes=("enum_illegal_after_downgrade",),
+    ),
 )
 
 
@@ -165,6 +189,7 @@ def check_notes(
     enum_known: Any,
     legal_keys: Any,
     display_to_key: Any,
+    is_enum_key: Any,
 ) -> list[Action]:
     """gate 阶段：占位串、非法枚举、无锚点 fact。
 
@@ -173,6 +198,8 @@ def check_notes(
 
     枚举与归一的实现由调用方注入（``internal_fields`` 的那几个函数），规则簇不自己
     抄一份契约知识：合法键的全部来源是契约快照，抄一份就会在下一次契约变动时漂移。
+    ``is_enum_key`` 判「取值看起来是不是枚举键」，ENUM-01 靠它把废弃内部键与客户原话
+    分开（``replacement`` 删、``说不清`` 留）。
     """
     actions: list[Action] = []
     for entry in entries:
@@ -223,6 +250,38 @@ def check_notes(
                                 value=item,
                             )
                         )
+
+        # rule: ENUM-01 回写枚举取值必须是契约合法键
+        # ---- ENUM-01 回写枚举取值必须是契约合法键
+        # 与 HARD-02 的分工：HARD-02 管「L1 给了非法值**且尚未降级**」，动作是降级转确认
+        # （保留取值，让销售看到并核）；ENUM-01 管「**降级后**取值仍然是**键形态**」，
+        # 动作是剔除——前端点开看到一个 ``replacement`` 就是不可读的内部串。
+        #
+        # **判据必须带形态**：只按「不在合法键集合」判，会把客户原话（``说不清``）一起删掉，
+        # 那是 P3 规则 d 刻意保留的东西。``looks_like_enum_key`` 是这里的唯一分界线。
+        if (
+            enum_known(key)
+            and str(basis.get(key) or "") == BASIS_INFERRED_LOW
+            and legal_keys(key)
+        ):
+            for item in enum_values(value):
+                if item in legal_keys(key) or display_to_key(key, item):
+                    continue
+                if not is_enum_key(item):
+                    continue
+                actions.append(
+                    Action(
+                        rule="ENUM-01",
+                        attribute=key,
+                        action="reject",
+                        severity="block",
+                        reason="枚举取值降级后仍是废弃的内部键，整条剔除",
+                        stage="gate",
+                        target="note",
+                        value=item,
+                    )
+                )
+                break
 
         # rule: HARD-03 标为事实的字段必须指得出原文
         # ---- HARD-03 标为事实的字段必须指得出原文

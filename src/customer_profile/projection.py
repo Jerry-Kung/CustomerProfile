@@ -500,12 +500,18 @@ def _parse_structured(value: Any) -> dict | None:
 def normalize_enum(attribute: str, value: Any) -> Any:
     """把一个取值归一到契约枚举键。
 
-    接受四种形态，全部实测出现过：
+    接受五种形态，全部实测出现过：
 
     1. **已是合法键**（``"fuel_efficiency"``）→ 原样；
     2. **中文展示名**（``"油耗"``）→ 反查得键；
     3. **结构化对象**（``'{"key":"yes","input_value":"..."}'``）→ 解出并补 ``input_value``；
-    4. **不合法** → ``None``（由调用方决定拒绝还是留白）。
+    4. **旧版枚举键**（``"unmarried"`` / ``"commute"``）→ 查
+       :data:`internal_fields.LEGACY_ENUM_ALIASES` 换成现行键；
+    5. **不合法** → ``None``（由调用方决定拒绝还是留白）。
+
+    第 4 条的位置刻意放在「精确匹配失败之后、返回 ``None`` 之前」：旧键在本字段的
+    展示名表里查不到，若不在这里接住，它会走 ``None`` 分支被当作「归不了」而原值留库，
+    最终原样回写（2026-10-27 旧键整改的起点现象）。
 
     多选字段由调用方先 :func:`split_multi`，本函数只处理单个值。
     """
@@ -517,7 +523,7 @@ def normalize_enum(attribute: str, value: Any) -> Any:
     if structured is not None:
         key = _as_text(structured.get("key"))
         if key not in legal:
-            key = inf.display_to_key(attribute, key) or ""
+            key = inf.display_to_key(attribute, key) or inf.legacy_alias(attribute, key) or ""
         if not key:
             return None
         if inf.is_structured(attribute, key):
@@ -536,7 +542,43 @@ def normalize_enum(attribute: str, value: Any) -> Any:
             # 只给了展示名、没给 input_value：按契约补空串，由 L4 校验提示补充。
             return {"key": by_display, "input_value": ""}
         return by_display
-    return None
+    # 旧版枚举键（``unmarried`` / ``commute``）：契约与展示名都查不到，查别名表。
+    # 放在这里而不是更前面，是因为现行键与展示名的匹配优先级必须高于历史映射。
+    return inf.legacy_alias(attribute, text)
+
+
+def _route_legacy_cross_field(attribute: str, values: Sequence[Any], result: Any) -> bool:
+    """旧字段名贴错的取值搬到正确的字段（``purchase_type`` → ``purchase_nature``）。
+
+    ``purchase_type`` 的新契约只剩个户/公户，而它的旧取值 ``first`` / ``additional`` /
+    ``replacement`` 恰好是今天 ``purchase_nature``（首购/增购/换购）的合法键——这不是
+    「取值非法」，而是**贴错了字段名**。搬过去之后 ``purchase_type`` 本字段留空，
+    该值仍参与购车决策与成交攻防的推理。
+
+    返回 ``True`` 表示本字段已处理完（调用方 ``continue``，不再走常规归一）。
+    """
+    for raw in values:
+        target = inf.legacy_cross_field(attribute, raw)
+        if target is None:
+            continue
+        moved = normalize_enum(target, raw)
+        if not moved:
+            continue
+        if not result.facts.get(target):
+            result.facts[target] = moved
+            result.basis[target] = INFERRED_LOW
+        if hasattr(result, "downgraded"):
+            result.downgraded.append(
+                {
+                    "attribute": target,
+                    "value": raw,
+                    "rule": "legacy_cross_field",
+                    "reason": f"旧值写在 {attribute} 上，已搬到 {target}",
+                    "action": "换字段保留 + 降为 inferred_low",
+                }
+            )
+        return True
+    return False
 
 
 IDENTITY_GUARD_KEYS: frozenset[str] = nc.IDENTITY_KEYS | inf.INTERNAL_IDENTITY_KEYS
@@ -830,6 +872,8 @@ def project(
             continue
 
         if inf.is_enum(attribute):
+            if _route_legacy_cross_field(attribute, values, result):
+                continue
             normalized: list[Any] = []
             illegal: list[Any] = []
             pool = values if inf.is_multi_value(attribute) else [best.value]

@@ -385,17 +385,19 @@ def test_evidence_format_asset_is_not_bound_to_the_expression_node():
     assert l3.EVIDENCE_FORMAT not in sources
 
 
-def test_preset_assets_reference_production_templates_by_original_name():
+def test_preset_assets_reference_shared_templates_by_original_name():
     """6 个业务资产按**原名**引用，不复制副本——「一字不改」由此可验证。
 
     若有人把它们复制到本模块的 slug 下，这里会红：正文就有了第二份，日后必然漂移。
+    前缀 ``customer_profile_shared__``：这 6 份原挂在生产臂下，随生产臂退役改名，
+    正文逐字未动（2026-10-27，见 ``docs/history/旧版枚举键与production臂整改方案.md``）。
     """
     nodes = {n.node_id: n for n in l3.WORKFLOW.nodes}
     for node_id, _title in l3.PRESET_ASSETS:
         node = nodes[node_id]
         assert node.node_type == "template-transform"
-        assert node.config["template"] == f"customer_profile_production__{node_id}"
-        assert node.config["template"].startswith("customer_profile_production__")
+        assert node.config["template"] == f"customer_profile_shared__{node_id}"
+        assert node.config["template"].startswith("customer_profile_shared__")
 
 
 def test_expression_node_binds_only_facts_and_assets():

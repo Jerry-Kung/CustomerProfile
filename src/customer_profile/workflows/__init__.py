@@ -33,12 +33,18 @@ WORKFLOW_MODULES: tuple[str, ...] = (
     "customer_profile.workflows.profile_features_analysis",
     "customer_profile.workflows.evidence_subagent",
     "customer_profile.workflows.phone_company_analysis",
-    "customer_profile.workflows.customer_profile_production",
+    # ``customer_profile_production``（生产臂）于 2026-10-27 整臂退役并删除：
+    # 它承载的是 v1 的 45 字段旧清单（``married`` / ``commute`` / ``transport`` 等已废弃
+    # 枚举键仍在它的两份提示词里），入口早已改指 ``customer_profile_pipeline``，
+    # 留着只会让旧键继续被引用。见 ``docs/history/旧版枚举键与production臂整改方案.md``。
+    # 它复用的 6 份业务资产模板已改名为 ``customer_profile_shared__*``，由 L3 表达层继续引用。
+    #
     # ``customer_profile_entry``（客户初始画像，基线臂）于 2026-10-16 从注册表摘除：
     # 该臂已无业务用途，入口改指 ``customer_profile_pipeline``（业务测试臂）。
     # 模块文件保留——`tests/test_contract.py` 等仍以它为「子流程编排」的样本，
     # 且它是 AB 基线可复位的前提。它引用的 ``evidence_subagent`` 与
     # ``profile_features_analysis`` 因此保留在册（摘除会让基线臂无法复位）。
+    # 它的末端节点原指生产臂，生产臂退役后改指 ``customer_profile_pipeline``。
     "customer_profile.workflows.customer_profile_pipeline",
     "customer_profile.workflows.customer_profile_l3",
 )

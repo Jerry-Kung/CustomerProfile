@@ -4,10 +4,10 @@
 同一套取数子流程与同一个成文工作流，只在**中间的取证与投影**上换实现。AB 实验按
 ``scripts/run_baseline.py --workflow-id`` 切换两臂，产物形状与归档逻辑完全一致。
 
-    基线臂（customer_profile_entry）:
+    基线臂（customer_profile_entry，2026-10-16 已从注册表摘除，仅作历史样本）:
       evidence_subagent（21 节点 / 14 路扇出，含 1 个 LLM 取证节点）
         → profile_features_analysis（人设特征判断）
-          → customer_profile_production（41 节点 / 11 路 LLM 生成）
+          → customer_profile_pipeline → result1
 
     业务测试臂（本模块，阶段一/二）:
       取数层（14 路 tool，**原样复用**既有子流程）
@@ -15,7 +15,7 @@
           → L4 分诊层（纯代码）：sufficient / thin / empty
             → 取证输入包（纯代码）：只喂「有内容」的渠道
               → 证据线索整理（复用既有提示词）
-                → profile_features_analysis → customer_profile_production → result1
+                → profile_features_analysis → 本模块 → result1
 
 **阶段一/二的范围**：本模块此刻只落 L0 与 L4（``落地方案.md`` §2 阶段一），
 以及把 L0 的渠道分级接进取证输入包。L1 取证层与 L2 投影层在阶段二接入，
@@ -68,10 +68,10 @@ DISPLAY_NAME = "业务测试臂"
 会一并断掉。"""
 
 PROFILE_API_PREFIX = "/api/v1/remote/"
-"""画像服务的 API 前缀。与 :mod:`customer_profile_production` 里同名常量一致。
+"""画像服务的 API 前缀。
 
-**为什么不 import 那一份**：两个工作流模块互不依赖是有意的——production 是基线臂、本模块
-是业务测试臂，两臂共用同一套取数子流程但各自独立演进。为一个字符串建依赖会造出反向耦合。
+原先与此常量同形的定义在生产臂 ``customer_profile_production`` 里，该臂已于
+2026-10-27 整臂退役删除；现在这里是唯一一处定义。
 """
 
 # ---------------------------------------------------------------- 节点 ID
@@ -2007,8 +2007,13 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
         enum_known=inf.is_enum,
         legal_keys=inf.legal_keys,
         display_to_key=inf.display_to_key,
+        is_enum_key=inf.looks_like_enum_key,
     ) + expression_rules.check_evidence(
         state.notes, is_conclusion=proj._is_conclusion
+    ) + expression_rules.check_prose_keys(
+        state.notes, is_placeholder=inf.is_english_placeholder
+    ) + expression_rules.check_placeholders(
+        state.notes, is_placeholder=inf.is_english_placeholder
     )
     gate_actions = [item for item in gate_actions if item.rule in table]
     applied = rules.apply(state, gate_actions, max_rounds=1, registry=table)
@@ -2048,12 +2053,37 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
                 "detail": _detail("HARD-03"),
             }
         )
+    if by_rule.get("ENUM-01"):
+        issues.append(
+            {
+                "rule": "enum_illegal_after_downgrade",
+                "count": len(by_rule["ENUM-01"]),
+                "detail": [item["attribute"] for item in _detail("ENUM-01")],
+            }
+        )
     if by_rule.get("EXPR-02"):
         issues.append(
             {
                 "rule": "evidence_self_reference",
                 "count": len(by_rule["EXPR-02"]),
                 "detail": _detail("EXPR-02"),
+            }
+        )
+    # ---- 英文残留治理：旧口径出裸串（跨批次对账沿用），编号与新 trace 一一对应。
+    if by_rule.get("EXPR-01"):
+        issues.append(
+            {
+                "rule": "english_in_prose",
+                "count": len(by_rule["EXPR-01"]),
+                "detail": [item["attribute"] for item in _detail("EXPR-01")],
+            }
+        )
+    if by_rule.get("EXPR-03"):
+        issues.append(
+            {
+                "rule": "english_placeholder_removed",
+                "count": len(by_rule["EXPR-03"]),
+                "detail": [item["attribute"] for item in _detail("EXPR-03")],
             }
         )
 
@@ -2064,7 +2094,14 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
         "issue_count": sum(int(item["count"]) for item in issues),
         "placeholder_removed": len(by_rule.get("HARD-01") or ()),
         "enum_illegal": len(by_rule.get("HARD-02") or ()),
+        # 降级后仍非法、整条剔除的条数（ENUM-01）。与 ``enum_illegal`` 分开计数：
+        # 前者是「拦下了、取值还在」，后者是「取值已删」，对账时含义不同。
+        "enum_illegal_after_downgrade": len(by_rule.get("ENUM-01") or ()),
         "unbacked_fact": len(by_rule.get("HARD-03") or ()),
+        # 英文残留治理的两条规则合并计数：对下游与报告而言它们是一件事
+        # （「这一条 Notes 曾带英文形态、已处置」），分开数会让规则报表出现两条永远同涨的线。
+        "english_rule_hits": len(by_rule.get("EXPR-01") or ())
+        + len(by_rule.get("EXPR-03") or ()),
         # 降级后的字段置信档：L3 据此区分「已明确降级的软值」与「写成确定值却没依据」。
         # 不往外传的话，本层的降级对表达层不可见，等于只改了一半。
         "basis_json": json.dumps(state.basis, ensure_ascii=False, default=str),

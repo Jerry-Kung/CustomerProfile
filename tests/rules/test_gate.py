@@ -48,6 +48,7 @@ def gate_actions(entries, basis=None):
         enum_known=inf.is_enum,
         legal_keys=inf.legal_keys,
         display_to_key=inf.display_to_key,
+        is_enum_key=inf.looks_like_enum_key,
     )
 
 

@@ -13,7 +13,7 @@ SEVERITIES` / `ACTIONS` 的取值在 :mod:`customer_profile.rules.registry`。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .registry import RuleRegistry, default as default_registry
 from .trace import RuleTrace, RuleTraceCollector
@@ -380,6 +380,17 @@ def _apply_note(state: Any, action: Action) -> tuple[bool, Any, Any]:
                         },
                     )
                 )
+    elif action.action == "rewrite":
+        # 改写 Notes 的**说明文字**（``reasoning_detail``），不动 ``attribute_value``：
+        # 取值是契约枚举键（前端按 ``display_name`` 映射），正文才是给销售看的文案。
+        # ``payload["reasoning_detail"]`` 由规则簇给出替换后的完整四键，执行器只落地。
+        replacement = (action.payload or {}).get("reasoning_detail")
+        if isinstance(replacement, Mapping):
+            for entry in notes:
+                if entry.get("attribute_key") != action.attribute:
+                    continue
+                entry["reasoning_detail"] = dict(replacement)
+                changed = True
     elif action.action == "require_confirm":
         _confirm(state, action)
         changed = True

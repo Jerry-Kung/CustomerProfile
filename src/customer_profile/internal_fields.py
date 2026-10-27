@@ -321,6 +321,57 @@ def display_map(attribute_key: str) -> dict[str, str | None]:
     return out
 
 
+ENGLISH_PLACEHOLDER_VALUES: frozenset[str] = frozenset(
+    {"unknown", "null", "none", "n/a", "na", "tbd", "undefined", "unspecified"}
+)
+"""**英文占位串**：L1 在无线索时给枚举字段填的 ``unknown`` 一类取值。
+
+与 ``rules.clusters.hard.PLACEHOLDER_VALUES``（中文占位串）分工：那张表管「未提供 /
+暂无」，这张表管英文形态。**必须先查字段的合法枚举键**——``unknown`` 在
+``knowledge_of_*`` / ``electronic_ecosystem`` 是合法取值（「未知」），在那里它不是占位串。
+"""
+
+
+def is_english_placeholder(attribute_key: str, value: Any) -> bool:
+    """``value`` 是不是该字段的**英文占位串**（合法枚举键不算）。
+
+    判据是「英文占位串 + 不是本字段的合法键」，不是「含英文字母」——后者会误伤
+    ``Model Y`` / ``BMW`` / ``max版`` 这类品牌与车型名（见英文残留治理方案 §4.1）。
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if text.lower() not in ENGLISH_PLACEHOLDER_VALUES:
+        return False
+    return text not in legal_keys(attribute_key)
+
+
+def enum_display_index() -> dict[str, str]:
+    """``枚举键 -> 展示名`` 的**全局索引**，只收「含义唯一」的键。
+
+    用于把正文里漏出来的枚举键换回中文（``power`` → 动力）。两条排除：
+
+    - 展示名与键相同（``A`` / ``B`` / ``待识别``）：换了等于没换，还徒增误判；
+    - 同一个键在不同字段下有不同展示名：无法判断该用哪个，留给字段级判据。
+
+    索引随契约快照变化，因此在读取时构建而不是写成常量。
+    """
+    seen: dict[str, str] = {}
+    conflicts: set[str] = set()
+    for attribute_key in EXTRACTION_KEYS:
+        for key, name in display_map(attribute_key).items():
+            if not isinstance(name, str) or not name.strip() or name == key:
+                continue
+            previous = seen.get(key)
+            if previous is None:
+                seen[key] = name
+            elif previous != name:
+                conflicts.add(key)
+    for key in conflicts:
+        seen.pop(key, None)
+    return seen
+
+
 def display_to_key(attribute_key: str, display: str) -> str | None:
     """展示名反向查键（把「讨厌被催」这类中文值归一到 ``hate_being_rushed``）。"""
     target = (display or "").strip()
@@ -330,6 +381,105 @@ def display_to_key(attribute_key: str, display: str) -> str | None:
         if name == target:
             return key
     return None
+
+
+LEGACY_ENUM_ALIASES: dict[str, dict[str, str]] = {
+    "family_structure": {
+        "married": "married_no_child",
+        "unmarried": "unmarried_no_child",
+    },
+    "purchase_purpose": {
+        "commute": "family",
+        "transport": "family",
+    },
+    "driving_preference": {
+        "easy-to-drive": "easy_to_drive",
+    },
+}
+"""**旧版枚举键 → 现行合法键**的别名表（2026-10-27 旧键整改）。
+
+只收「语义可无损落到新键」的映射，三条口径：
+
+- ``family_structure``：旧契约只有 ``married`` / ``unmarried``，新契约按有无子女拆成
+  三个键。旧值本身不含子女信息，落到「无孩」是**最保守且不改原意**的选择——把
+  ``unmarried`` 映射成 ``has_children`` 会凭空造出子女。
+- ``purchase_purpose``：新契约砍掉了「通勤」「代步」两项，只余家用/越野/商务。
+  通勤与代步在业务上都属家用场景的上位，并入 ``family``。
+- ``driving_preference``：``easy-to-drive`` 是带连字符的错误拼写，正确键是
+  ``easy_to_drive``。这是拼写纠正，不是语义迁移。
+
+**刻意不收的两类**：
+
+1. ``planned_purchase_time`` 的 ``within_6_months``——它与 ``within_3_months`` /
+   ``over_3_months`` 区间重叠但不等价，硬映射等于伪造精度，按整改方案 §3 丢弃并记 trace；
+2. ``purchase_type`` 的 ``first`` / ``additional`` / ``replacement``——它们与新契约的
+   ``company`` / ``personal`` 语义完全不重叠，属于**换字段**而非改键，走
+   :func:`legacy_cross_field` 的跨字段路由。
+
+来源：``docs/reference/AI画像v2回传改造核查清单.md`` §2.3 与
+``docs/history/旧版枚举键与production臂整改方案.md`` §3。
+"""
+
+
+LEGACY_CROSS_FIELD: dict[str, str] = {"purchase_type": "purchase_nature"}
+"""**旧键搬到了另一个字段**的情形：``{旧字段: 新字段}``。
+
+``purchase_type`` 的新契约只剩个户/公户，而它的旧取值 ``first`` / ``additional`` /
+``replacement`` 恰好就是今天 ``purchase_nature``（首购/增购/换购）的合法键。
+因此这类值不是「非法」，而是**贴错了字段名**：这里把它路由到正确的字段，
+``purchase_type`` 本字段留空。
+
+``purchase_nature`` 属编外字段（``EXTRACTION_ONLY_KEYS``），取证留用、不进 Notes
+白名单，因此该值不会出现在回传体里，但仍参与购车决策与成交攻防的推理。
+"""
+
+
+def legacy_alias(attribute_key: str, value: Any) -> str | None:
+    """旧版枚举键 → 现行合法键；不是旧键则返回 ``None``。"""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    mapped = (LEGACY_ENUM_ALIASES.get(attribute_key) or {}).get(text)
+    if mapped and mapped in legal_keys(attribute_key):
+        return mapped
+    return None
+
+
+_SHAPE_KEY = __import__("re").compile(r"^[A-Za-z][A-Za-z0-9_\-]*$")
+"""**枚举键形态**：全 ASCII 标识符（含历史遗留的连字符拼写）。"""
+
+
+def looks_like_enum_key(value: Any) -> bool:
+    """``value`` 看起来是不是一个**枚举键**（而不是客户原话）。
+
+    用途只有一个：区分「废弃的内部键」与「客户说的中文短语」。两者的处置天差地别——
+    前者回传给前端就是一个不可读的英文词（``replacement``），必须删；后者是客户的
+    真实表述（``说不清``），降级保留才是对的，删掉等于「因为格式对不上就把事实扔了」。
+
+    判据是**形态**而非「是否为某字段的合法键」：``unmarried`` / ``commute`` 这类旧键
+    在现行契约里根本不存在，查合法键集合永远查不到，只能按形态识别。
+    纯数字、中文、含中文标点的一律不算——那些是取值，不是键。
+
+    刻意不判「只含小写字母」：``A`` / ``B``（商机等级）、``Mr`` / ``Ms``（称呼）
+    都是合法取值，收窄到小写会漏掉 ``within_6_months`` 这类带下划线与数字的旧键。
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or len(text) > 40:
+        return False
+    return bool(_SHAPE_KEY.match(text))
+
+
+def legacy_cross_field(attribute_key: str, value: Any) -> str | None:
+    """旧字段名贴错的取值应搬去的**目标字段名**；不适用则返回 ``None``。"""
+    target = LEGACY_CROSS_FIELD.get(attribute_key)
+    if target is None or not isinstance(value, str):
+        return None
+    text = value.strip()
+    return target if text in legal_keys(target) else None
 
 
 def structured_spec(attribute_key: str, enum_key: str) -> str | None:

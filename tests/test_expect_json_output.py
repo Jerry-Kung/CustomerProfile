@@ -153,15 +153,3 @@ async def test_real_audio_validity_node_can_parse_the_text(tmp_path):
     text = outcome.outputs["text"]
     # 与 audio_content_extract 的 code 节点同形：json.loads 后取 is_valid
     assert shared_code.extract_validity(text) == {"is_valid": True}
-
-
-async def test_notes_split_node_can_parse_the_text(tmp_path):
-    """另一个真实消费方 ``Notes结果拆分``（主入口链路）同样必须能解析。"""
-    from customer_profile.workflows import customer_profile_production as cpp
-
-    payload = {"problem_list": [{"a": 1}], "basic_notes_updates": [{"b": 2}]}
-    text = json.dumps(payload, ensure_ascii=False)
-
-    parsed = cpp.split_notes_result(text)
-    assert json.loads(parsed["problem_list"]) == {"problem_list": [{"a": 1}]}
-    assert json.loads(parsed["basic_notes_updates"]) == {"basic_notes_updates": [{"b": 2}]}

@@ -71,10 +71,19 @@ FALLBACK_FIELD_NAMES: dict[str, str] = {
 
 
 def _enum_display(attribute: str, text: str) -> str:
-    """单个枚举键 → 展示名；不是合法键则原样返回（客户原话不得被改写）。"""
+    """单个枚举键 → 展示名；不是合法键则原样返回（客户原话不得被改写）。
+
+    一处例外：**英文占位串**（``unknown`` 一类）不原样透出。它是 L1 在无线索时填的
+    空值标记，不是客户说的话，映射不到展示名时给空串让整行省略——「付款方式：unknown」
+    对销售没有信息量，反而让内部取值形态漏进画像卡（英文残留治理方案 §4.3）。
+    """
     display = inf.display_map(attribute)
     mapped = display.get(text)
-    return str(mapped) if mapped else text
+    if mapped:
+        return str(mapped)
+    if inf.is_english_placeholder(attribute, text):
+        return ""
+    return text
 
 
 def readable_value(attribute: str, value: Any) -> str:
