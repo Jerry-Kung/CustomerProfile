@@ -267,7 +267,7 @@ def test_rule_apply_is_noop_on_empty_verdict():
 # ---------------------------------------------------------------- 基线回放（离线）
 
 BASELINE = Path(__file__).resolve().parents[2] / (
-    "experiments/batches/rules-opt01-baseline-8-20261026"
+    "experiments/uat_data/uat-18-20261026"
 )
 
 

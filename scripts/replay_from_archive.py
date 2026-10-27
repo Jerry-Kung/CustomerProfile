@@ -31,7 +31,7 @@
     python scripts/replay_from_archive.py --source uat-18-20261026
     python scripts/replay_from_archive.py --source uat-18-20261026 --only 13367265521
 
-产物落在 ``experiments/batches/<batch-id>/``，与真实跑批同构（result/nodes/tree/attempts），
+产物落在 ``experiments/uat_data/<batch-id>/``，与真实跑批同构（result/nodes/tree/attempts），
 因此可以直接用 ``scripts/compare_batches.py`` 对比。
 """
 
@@ -65,8 +65,8 @@ from customer_profile.execution.transcript_cache import TranscriptCache  # noqa:
 from customer_profile.replay import ReplaySource, http_key  # noqa: E402
 from customer_profile.runner import build_service  # noqa: E402
 
-BATCH_ROOT = REPO_ROOT / "experiments" / "batches"
-DEFAULT_SOURCE = "uat-18-20261026"
+BATCH_ROOT = REPO_ROOT / "experiments" / "uat_data"
+DEFAULT_SOURCE = "uat-all-tasks-20261026-20261027"
 
 SKIP_TARGETS = ("/callback/update-profile", "/submit_analyze", "/query_analyze")
 """这些请求不进 HTTP fixture。
@@ -97,7 +97,7 @@ def _load(path: Path) -> Any:
 
 
 def _resolve_source(value: str) -> Path:
-    """``--source`` 可以是批次名（``experiments/batches`` 下），也可以是目录路径。"""
+    """``--source`` 可以是批次名（``experiments/uat_data`` 下），也可以是目录路径。"""
     path = Path(value)
     if path.is_dir():
         return path.resolve()
@@ -332,7 +332,7 @@ async def run(args: argparse.Namespace) -> int:
         raise SystemExit(f"归档批次不存在：{source}")
 
     batch_id = args.batch_id or f"{source.name}-replay"
-    batch_dir = (REPO_ROOT / "experiments" / "batches" / batch_id).resolve()
+    batch_dir = (REPO_ROOT / "experiments" / "uat_data" / batch_id).resolve()
     batch_dir.mkdir(parents=True, exist_ok=True)
     log_path = batch_dir / "logs" / "run.log"
 

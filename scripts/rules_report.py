@@ -19,14 +19,13 @@
 
 ## 同源批次会被合并
 
-``uat-18-20261026`` 与 ``rules-opt01-baseline-8-20261026`` 是同一批运行的两个视图
-（后者是前者 8 案的复制）。按目录数算「连续三批」会把同一次运行数两遍，因此这里按
-``source_snapshot`` / ``source_batch`` 认亲，同源只取一份（取案件多的那份）。
+``uat-18-20261026`` 与 ``uat-all-tasks-20261026-20261027`` 有号码重合，但不是同一次
+运行的复制——按导出窗口认亲，同源只取一份（取案件多的那份）。
 
 用法：
 
     python scripts/rules_report.py                       # 全部批次
-    python scripts/rules_report.py --batch rules-opt01-baseline-8-20261026
+    python scripts/rules_report.py --batch uat-18-20261026
     python scripts/rules_report.py --json                # 机器可读
     python scripts/rules_report.py --zero-batches 3      # 零命中告警的批次数
 """
@@ -46,7 +45,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from customer_profile.rules import default as default_registry  # noqa: E402
 
-BATCH_ROOT = REPO_ROOT / "experiments/batches"
+BATCH_ROOT = REPO_ROOT / "experiments/uat_data"
 SKIP_DIRS = {"__pycache__"}
 
 TRACE_NODES = (
@@ -425,7 +424,7 @@ def main() -> int:
     parser.add_argument("--batch", action="append", default=[])
     parser.add_argument("--root", default=str(BATCH_ROOT))
     parser.add_argument("--zero-batches", type=int, default=3)
-    parser.add_argument("--cases-batch", default="rules-opt01-baseline-8-20261026")
+    parser.add_argument("--cases-batch", default="uat-18-20261026")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 

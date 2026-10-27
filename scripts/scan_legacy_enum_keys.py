@@ -23,7 +23,7 @@
 
 ## 用法
 
-    python scripts/scan_legacy_enum_keys.py --batch uat-18-legacykeys-20261027
+    python scripts/scan_legacy_enum_keys.py --batch uat-all-tasks-20261026-20261027
     python scripts/scan_legacy_enum_keys.py --batch X --json
 
 退出码 1 表示仍有「可映射」或「非法」的取值——可直接用于验收与 CI。
@@ -43,7 +43,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from customer_profile import internal_fields as inf  # noqa: E402
 
-BATCH_ROOT = REPO_ROOT / "experiments" / "batches"
+BATCH_ROOT = REPO_ROOT / "experiments" / "uat_data"
 
 LEGACY_KEYS: tuple[str, ...] = (
     "married",

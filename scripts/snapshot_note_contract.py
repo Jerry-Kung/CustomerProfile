@@ -36,7 +36,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-DEFAULT_BATCH = REPO_ROOT / "experiments" / "batches" / "baseline-39-dsv41-noThink"
+DEFAULT_BATCH = REPO_ROOT / "experiments" / "uat_data" / "uat-18-20261026"
 OUTPUT = REPO_ROOT / "src" / "customer_profile" / "notes_contract.py"
 EXTENSION = REPO_ROOT / "src" / "customer_profile" / "notes_contract_extension.json"
 """**补充字段**：基线快照固化之后线上契约新增的字段。

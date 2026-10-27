@@ -20,7 +20,7 @@
 
 ## 用法
 
-    python scripts/scan_english_residue.py --batch english-residue-8-20261026
+    python scripts/scan_english_residue.py --batch uat-all-tasks-20261026-20261027
     python scripts/scan_english_residue.py --batch uat-18-20261026 --json
 """
 
@@ -39,7 +39,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from customer_profile import internal_fields as inf  # noqa: E402
 
-BATCH_ROOT = REPO_ROOT / "experiments" / "batches"
+BATCH_ROOT = REPO_ROOT / "experiments" / "uat_data"
 
 TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 
@@ -159,7 +159,7 @@ def _print_human(report: dict[str, Any]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--batch", required=True, help="experiments/batches 下的批次目录名")
+    parser.add_argument("--batch", required=True, help="experiments/uat_data 下的批次目录名")
     parser.add_argument("--json", action="store_true", help="输出机器可读结果")
     args = parser.parse_args(argv)
 

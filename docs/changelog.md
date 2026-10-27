@@ -2,6 +2,29 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-10-27 — experiments 定位改为功能验证与问题回归
+
+`experiments/` 从「AB 实验专属目录」改为**功能验证与问题回归**场地：存放从 UAT 同步回
+本地的真实运行记录，用于功能开发、测试验证与问题定位。本地跑批仍落 `batches/`。
+
+- 新增 `experiments/uat_data/`：UAT 运行数据统一入口。
+  - `uat-all-tasks-20261026-20261027/`：由运行台全量任务导出
+    （`runtime-all-tasks-last24h-20261027-092607.zip`）整理入库，**69 根运行 / 57 号码 /
+    1316 次运行 / 16324 节点 / 1365 次出网尝试**，批内 `trace.db` 完整性 ok。
+    转换脚本 `scripts/ingest_uat_export.py`，可对任何同格式导出复跑。
+  - `uat-18-20261026/`：原 `batches/uat-18-20261026` 整目录迁入。
+  - `phones.txt`：两批次号码总清单，72 个唯一号码，仅 `18062597750` 跨批次重合。
+- 过期批次清理（已另行手工归档）：`baseline-39-dsv41-noThink`、`pipeline-v3.3-39`、
+  `rules-opt01-baseline-8-20261026`、`english-residue-*`、`uat-18-*-replay/rerun/legacykeys`、
+  `_wirecheck`，以及失效的 `income_band/`、`smoke/` 临时分析目录；`experiments/` 由约
+  1.5 GB 降到约 460 MB。
+- 脚本默认批次改为 `experiments/uat_data/`：`replay_from_archive.py`（缺省源改为
+  `uat-all-tasks-20261026-20261027`）、`rules_report.py`、`compare_batches.py`、
+  `scan_english_residue.py`、`scan_legacy_enum_keys.py`、两个 `probe_*` 与
+  `snapshot_note_contract.py` 的缺省批次、`tests/rules/test_checker.py` 的基线路径。
+- 文档明确一条长期约束：**本地环境访问不到 UAT 取数接口**。使用 UAT 数据时不走 API 取数，
+  直接用归档保存的客户全量原始响应（`runs/<号码>/attempts.json`）作为输入往下跑。
+
 ## 2026-10-27 — 旧版枚举键清理与生产臂退役
 
 前端在测试用例 `13733451677` 上看到「购买类型 = `replacement`」「用车场景 = `commute，家用，
