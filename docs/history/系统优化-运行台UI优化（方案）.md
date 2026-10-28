@@ -1,6 +1,6 @@
 # 运行台 UI 优化（计划）
 
-> 依据 `docs/design/Workflow_UI_Implementation_Guide.md` 与 `docs/design/运行台示例.png`。
+> 依据 `docs/history/Workflow_UI_Implementation_Guide.md` 与 `docs/history/运行台示例.png`。
 > 本文是**开发期临时产出**（docs/README 对 `specs/` 的定位），收口后按需归档或删除。
 
 ## 1. 目标与边界

@@ -43,7 +43,15 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import internal_fields as inf
 from . import notes_contract as nc
+from . import text_utils as tut
 from .income_band import INCOME_BAND_RANGES, normalize_income
+from .rules import RuleRegistry
+from .rules import actions as rule_actions
+from .rules import default as default_rules
+from .rules.clusters import consistency as consistency_rules
+from .rules.clusters import identity as identity_rules
+from .rules.clusters import income as income_rules
+from .rules.clusters import level as level_rules
 """档位→区间换算的正身已下沉到 :mod:`customer_profile.income_band`（取数节点也用它）。
 此处保留导出，供离线回放旧产物与直接构造档位断言的调用方沿用。"""
 
@@ -432,6 +440,14 @@ class Projection:
     误以为模型很有把握，而静默丢弃会让人误以为模型没提取到。
     """
 
+    rule_trace: list[dict[str, Any]] = field(default_factory=list)
+    """规则留痕：每条规则动作一条，带规则编号与版本。
+
+    与 ``rejected`` / ``downgraded`` 的关系是**追加而非替换**：后两者进回传体，
+    形状属契约；本字段只进批次产物与报告（``rule_trace_json``）。迁移完成后
+    ``rejected`` / ``downgraded`` 的条目仍由规则产出，但归属改由规则编号表达。
+    """
+
     def asdict(self) -> dict[str, Any]:
         return {
             "facts": self.facts,
@@ -447,13 +463,8 @@ class Projection:
 # 取值归一
 # ====================================================================
 
-
-def _as_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    return json.dumps(value, ensure_ascii=False, default=str)
+_as_text = tut.as_text
+"""取值 → 文本（字符串去空白，其余 JSON 序列化）。实现见 :mod:`text_utils`。"""
 
 
 def split_multi(value: Any) -> list[Any]:
@@ -489,12 +500,18 @@ def _parse_structured(value: Any) -> dict | None:
 def normalize_enum(attribute: str, value: Any) -> Any:
     """把一个取值归一到契约枚举键。
 
-    接受四种形态，全部实测出现过：
+    接受五种形态，全部实测出现过：
 
     1. **已是合法键**（``"fuel_efficiency"``）→ 原样；
     2. **中文展示名**（``"油耗"``）→ 反查得键；
     3. **结构化对象**（``'{"key":"yes","input_value":"..."}'``）→ 解出并补 ``input_value``；
-    4. **不合法** → ``None``（由调用方决定拒绝还是留白）。
+    4. **旧版枚举键**（``"unmarried"`` / ``"commute"``）→ 查
+       :data:`internal_fields.LEGACY_ENUM_ALIASES` 换成现行键；
+    5. **不合法** → ``None``（由调用方决定拒绝还是留白）。
+
+    第 4 条的位置刻意放在「精确匹配失败之后、返回 ``None`` 之前」：旧键在本字段的
+    展示名表里查不到，若不在这里接住，它会走 ``None`` 分支被当作「归不了」而原值留库，
+    最终原样回写（2026-10-27 旧键整改的起点现象）。
 
     多选字段由调用方先 :func:`split_multi`，本函数只处理单个值。
     """
@@ -506,7 +523,7 @@ def normalize_enum(attribute: str, value: Any) -> Any:
     if structured is not None:
         key = _as_text(structured.get("key"))
         if key not in legal:
-            key = inf.display_to_key(attribute, key) or ""
+            key = inf.display_to_key(attribute, key) or inf.legacy_alias(attribute, key) or ""
         if not key:
             return None
         if inf.is_structured(attribute, key):
@@ -525,7 +542,43 @@ def normalize_enum(attribute: str, value: Any) -> Any:
             # 只给了展示名、没给 input_value：按契约补空串，由 L4 校验提示补充。
             return {"key": by_display, "input_value": ""}
         return by_display
-    return None
+    # 旧版枚举键（``unmarried`` / ``commute``）：契约与展示名都查不到，查别名表。
+    # 放在这里而不是更前面，是因为现行键与展示名的匹配优先级必须高于历史映射。
+    return inf.legacy_alias(attribute, text)
+
+
+def _route_legacy_cross_field(attribute: str, values: Sequence[Any], result: Any) -> bool:
+    """旧字段名贴错的取值搬到正确的字段（``purchase_type`` → ``purchase_nature``）。
+
+    ``purchase_type`` 的新契约只剩个户/公户，而它的旧取值 ``first`` / ``additional`` /
+    ``replacement`` 恰好是今天 ``purchase_nature``（首购/增购/换购）的合法键——这不是
+    「取值非法」，而是**贴错了字段名**。搬过去之后 ``purchase_type`` 本字段留空，
+    该值仍参与购车决策与成交攻防的推理。
+
+    返回 ``True`` 表示本字段已处理完（调用方 ``continue``，不再走常规归一）。
+    """
+    for raw in values:
+        target = inf.legacy_cross_field(attribute, raw)
+        if target is None:
+            continue
+        moved = normalize_enum(target, raw)
+        if not moved:
+            continue
+        if not result.facts.get(target):
+            result.facts[target] = moved
+            result.basis[target] = INFERRED_LOW
+        if hasattr(result, "downgraded"):
+            result.downgraded.append(
+                {
+                    "attribute": target,
+                    "value": raw,
+                    "rule": "legacy_cross_field",
+                    "reason": f"旧值写在 {attribute} 上，已搬到 {target}",
+                    "action": "换字段保留 + 降为 inferred_low",
+                }
+            )
+        return True
+    return False
 
 
 IDENTITY_GUARD_KEYS: frozenset[str] = nc.IDENTITY_KEYS | inf.INTERNAL_IDENTITY_KEYS
@@ -623,6 +676,7 @@ def project(
     claims: Sequence[Claim],
     *,
     context: Mapping[str, Any] | None = None,
+    disabled_rules: Iterable[str] = (),
 ) -> Projection:
     """把断言账本投影成规范事实与 Notes 更新项。
 
@@ -635,48 +689,35 @@ def project(
     """
     context = dict(context or {})
     result = Projection()
+    table = _rule_table(disabled_rules)
 
+    # rule: IDENT-01 非客户本人的断言不得写入身份字段
+    # rule: IDENT-02 取值或锚点指向销售顾问的，不得写进客户字段
     # ---- a 归属过滤：非客户本人的断言不得写入身份字段
-    kept: list[Claim] = []
-    for claim in claims:
-        if not claim.attribute:
-            continue
-        if (
-            claim.attribute in IDENTITY_GUARD_KEYS
-            and claim.attribute not in IDENTITY_SUBJECT_EXEMPT
-            and claim.subject != "customer"
-        ):
-            result.rejected.append(
-                {
-                    "attribute": claim.attribute,
-                    "value": claim.value,
-                    "rule": "a_attribution",
-                    "reason": f"事实主体是 {claim.subject}，不是客户本人",
-                }
-            )
-            continue
-        # ---- a2 值形态门（v3.1 改造二）：取值或锚点明写「销售顾问 / 我方人员」的，
-        #      不得进客户字段。归属过滤只看 `subject`（模型自报，默认 customer），
-        #      这一门看**取值本身说了什么**，两者是与关系。
-        #      实测 `13435844484` 的姓名取值为「郑小姐（顾问自称，非客户姓名）」，
-        #      subject 仍是 customer，只靠归属过滤拦不住。
-        #      **豁免登记档**：人工/系统登记的取值是销售本人确认过的，客户职业确实可能
-        #      就是销售顾问（「我是做销售的」），据此拒收会误杀真实事实。
-        if (
-            claim.attribute in IDENTITY_GUARD_KEYS
-            and claim.tier != REGISTRY
-            and _salesperson_marked(claim)
-        ):
-            result.rejected.append(
-                {
-                    "attribute": claim.attribute,
-                    "value": claim.value,
-                    "rule": "a_salesperson_value",
-                    "reason": "取值/锚点指向我方销售顾问，不是客户本人信息",
-                }
-            )
-            continue
-        kept.append(claim)
+    #      两道门都是**断言级**拒收（拦的是这条话，不是这个字段的值），因此簇函数同时
+    #      返回「通过的断言」与「留痕动作」，动作只写 rejected、不改 facts。
+    #
+    #      归属过滤只看 `subject`（模型自报，默认 customer）；值形态门看**取值本身说了
+    #      什么**，两者是与关系。实测 `13435844484` 的姓名取值为「郑小姐（顾问自称，
+    #      非客户姓名）」，subject 仍是 customer，只靠归属过滤拦不住。
+    #      **豁免登记档**：人工/系统登记的取值是销售本人确认过的，客户职业确实可能
+    #      就是销售顾问（「我是做销售的」），据此拒收会误杀真实事实。
+    kept, gate_actions = identity_rules.check_attribution(
+        claims,
+        guard_keys=IDENTITY_GUARD_KEYS,
+        subject_exempt=IDENTITY_SUBJECT_EXEMPT,
+        registry_tier=REGISTRY,
+        salesperson_markers=SALESPERSON_MARKERS,
+    )
+    _run_rule_actions(result, gate_actions, table)
+
+    # rule: CONSIST-04 小订/大定不是拥车
+    # ---- a2 下单动作过滤：小订/大定的车型不得当作拥车或置换证据
+    #      与 a 段同形——拦的是「这条断言怎么被读的」，不是某个字段的值，因此同样
+    #      在进入分组裁决之前整条拒收。放进来之前拦，CONSIST-01 才不会被它带偏
+    #      （有旧车 ⇒ 换购），否则一条「x700小订客户」会被拦出一条「换购」。
+    kept, deposit_actions = consistency_rules.check_deposit_claims(kept)
+    _run_rule_actions(result, deposit_actions, table)
 
     # ---- b 来源分级：身份字段的弱来源处置
     #      社交自呈现仍降级并转人工确认；**第三方画像标签单独支撑改记 inferred_high**
@@ -747,48 +788,35 @@ def project(
         weak_only = all(c.tier in WEAK_TIERS for c in group)
         # ``wechat_id`` 豁免社交降级（v3.5）：它的唯一现实来源就是主页截图，
         # 且「截图里能明确读出微信号」正是用户口径认定的铁的事实（1.0）。
+        #
+        # 第三方画像标签单独撑身份字段是**相反方向**的政策（升为 inferred_high），
+        # 因此仍留在本层判定，不塞进 IDENT-03（一条规则只表达一种意图）。
         if attribute in IDENTITY_GUARD_KEYS and weak_only and attribute != "wechat_id":
-            only_prediction = all(c.is_prediction for c in group)
-            if only_prediction:
-                # v3.2：**第三方画像标签单独撑身份字段 → 记为可信的高置信推断**。
-                # 它不再是「低置信线索」：这批标签是采购来的商用画像数据，在客户既无
-                # 试驾也无沟通记录时，往往是唯一可靠的画像信源。既不降级、也不转人工
-                # 确认——它已被当作可用的推断结论（用户口径）。
+            if all(c.is_prediction for c in group):
+                # v3.2：这批标签是采购来的商用画像数据，在客户既无试驾也无沟通记录时
+                # 往往是唯一可靠的画像信源。既不降级、也不转人工确认。
                 result.basis[attribute] = INFERRED_HIGH
-            else:
-                # 社交自呈现（昵称 / 头像 / 主页截图）仍不作数：那是客户**对外表演**的
-                # 身份，与本人实际情况可以不一致。降级保留并转确认。
-                result.basis[attribute] = INFERRED_LOW
-                result.downgraded.append(
-                    {
-                        "attribute": attribute,
-                        "value": [c.value for c in group],
-                        "rule": "b_social_only",
-                        "reason": "身份字段仅由社交自呈现支撑",
-                        "action": "降为 inferred_low 写入（不丢字段）",
-                    }
-                )
-                result.to_confirm.append(
-                    {
-                        "attribute_key": attribute,
-                        "candidates": [c.value for c in group],
-                        "reason": "身份字段仅由社交自呈现支撑，不构成客户事实",
-                        "suggested_action": "向客户或销售确认后补充",
-                    }
-                )
-            # 注意：**没有 continue** —— 该组继续进入 c/d/e，仍会被写入 facts。
-        if attribute in ATTITUDE_KEYS and all(c.tier in WEAK_TIERS for c in group):
-            # 硬规则 2：态度/行为类字段须有一手依据。只有弱来源时降级保留。
-            result.basis[attribute] = INFERRED_LOW
-            result.downgraded.append(
+        # rule: IDENT-03 身份字段不得只由社交自呈现支撑
+        # rule: ATTE-01 态度与行为类字段须有一手依据
+        weak_actions = identity_rules.check_weak_source(
+            attribute,
+            group,
+            guard_keys=IDENTITY_GUARD_KEYS,
+            weak_tiers=WEAK_TIERS,
+            attitude_keys=ATTITUDE_KEYS,
+        )
+        _run_rule_actions(result, weak_actions, table)
+        if any(action.rule == "IDENT-03" for action in weak_actions):
+            # 降级只是把「已写入但不硬」记下来；「向客户核实」属于装配层的动作。
+            result.to_confirm.append(
                 {
-                    "attribute": attribute,
-                    "value": [c.value for c in group],
-                    "rule": "b_attitude_weak_source",
-                    "reason": "态度类字段仅有社交/预测依据，无一手或登记来源",
-                    "action": "降为 inferred_low 写入（不丢字段）",
+                    "attribute_key": attribute,
+                    "candidates": [c.value for c in group],
+                    "reason": "身份字段仅由社交自呈现支撑，不构成客户事实",
+                    "suggested_action": "向客户或销售确认后补充",
                 }
             )
+        # 注意：**没有 continue** —— 该组继续进入 c/d/e，仍会被写入 facts。
         surviving[attribute] = group
 
     # ---- c/d/e 冲突消解 + 枚举归一 + 单多值约束
@@ -798,26 +826,17 @@ def project(
         #      手机价**区间，不是收入。模型把它们当作收入写进 ``annual_income``，
         #      实测产出「中低端（8w-15w）」（13570263031：标签原文 4档收入 → 应 30-40万）。
         #      非收入标签整条拒收，而不是降级：它描述的根本不是这个字段。
-        if attribute == "annual_income":
-            allowed = [c for c in group if not _non_income_tag(c)]
-            dropped = [c for c in group if _non_income_tag(c)]
-            for claim in dropped:
-                result.rejected.append(
-                    {
-                        "attribute": attribute,
-                        "value": claim.value,
-                        "rule": "e_non_income_tag",
-                        "reason": "取值来自「车型价格 / 手机价格」等非收入标签，"
-                        "描述的不是年收入",
-                    }
-                )
+        # rule: INCOME-02 收入字段只认收入标签
+        allowed, income_actions = income_rules.check_income_tag(attribute, group)
+        _run_rule_actions(result, income_actions, table)
+        if attribute == "annual_income" and income_actions:
             if not allowed:
                 # 全是非收入标签：留白转人工，不用一个描述车价的区间冒充收入
                 # （宁空勿错）。L2 兜底仍可据职业等给出软推断。
                 result.to_confirm.append(
                     {
                         "attribute_key": attribute,
-                        "candidates": [c.value for c in dropped],
+                        "candidates": [c.value for c in group],
                         "reason": "收入字段仅有非收入标签支撑（车价/手机价格）",
                         "suggested_action": "向客户或销售确认年收入",
                     }
@@ -861,6 +880,8 @@ def project(
             continue
 
         if inf.is_enum(attribute):
+            if _route_legacy_cross_field(attribute, values, result):
+                continue
             normalized: list[Any] = []
             illegal: list[Any] = []
             pool = values if inf.is_multi_value(attribute) else [best.value]
@@ -919,10 +940,10 @@ def project(
             result.facts[attribute] = chosen
 
     # ---- f 跨字段规则
-    _apply_cross_field_rules(result, context)
+    _apply_cross_field_rules(result, context, disabled_rules=disabled_rules)
 
     # ---- 等级唯一化（跨产物字段）
-    _unify_level(result)
+    _unify_level(result, disabled_rules=disabled_rules)
 
     # ---- 姓名兜底（v3.5 / 2026-10-20 用户口径）：没有任何可靠来源指向真实姓名时，
     #      输出「客户」+手机号后四位（如「客户0087」），没有手机号才写「未知」。
@@ -946,95 +967,61 @@ def group_by_attribute(claims: Sequence[Claim]) -> dict[str, list[Claim]]:
     return grouped
 
 
-def _apply_cross_field_rules(result: Projection, context: Mapping[str, Any]) -> None:
-    """跨字段一致性：一处有证据，另一处必须跟上；一处被否，另一处不得留。"""
-    facts = result.facts
+def _rule_table(disabled: Iterable[str]) -> RuleRegistry:
+    """当前运行生效的登记表：全局登记表减去灰度关闭的规则。
 
-    # —— 旧车 ⇒ 换购。基线多案正文写了旧车、购买性质却仍填 ``first``。
-    #
-    # 注意落点：v2 契约的 ``purchase_type`` 只剩「个户/公户」，购车性质（首购/增购/换购）
-    # 已由编外字段 ``purchase_nature`` 承接。这条规则原本写 ``purchase_type``，
-    # 不改落点的话它会写进一个只认 ``company``/``personal`` 的单选字段——
-    # ``replacement`` 既非法、又会在回传时被静默丢弃。
-    old_car = _as_text(facts.get("old_car_model"))
-    has_old_car = bool(old_car) and old_car not in {"无", "没有", "无旧车"}
-    has_old_car = has_old_car or bool(context.get("has_old_car_evidence"))
-    trade_in = facts.get("trade_in_requirement")
-    trade_in_yes = trade_in == "yes" or (isinstance(trade_in, dict) and trade_in.get("key") == "yes")
-
-    # ``trade_in_requirement=yes`` **本身就是**「有旧车」的凭据，因此它与旧车证据同权：
-    # 任一条成立即把购买性质定为换购。这里**不**清除 ``trade_in_requirement``——
-    # 清除它会抹掉置换的唯一凭据，反而制造新的自相矛盾。
-    if (has_old_car or trade_in_yes) and facts.get("purchase_nature") != "replacement":
-        facts["purchase_nature"] = "replacement"
-    if not (has_old_car or trade_in_yes) and facts.get("purchase_nature") == "replacement":
-        # 声称换购却没有任何旧车凭据 → 撤销该断言，而不是留一个无证的「换购」。
-        facts.pop("purchase_nature", None)
-        result.rejected.append(
-            {
-                "attribute": "purchase_nature",
-                "value": "replacement",
-                "rule": "f_trade_in",
-                "reason": "声称换购但无旧车证据支撑",
-            }
-        )
-        result.to_confirm.append(
-            {
-                "attribute_key": "purchase_nature",
-                "reason": "换购与其证据不一致",
-                "suggested_action": "确认客户是否有旧车置换",
-            }
-        )
-
-    # —— 已注销企业 ⇒ 不填在职属性
-    if context.get("company_deregistered"):
-        for key in ("company", "company_type"):
-            if key in facts:
-                result.rejected.append(
-                    {
-                        "attribute": key,
-                        "value": facts.pop(key),
-                        "rule": "f_deregistered",
-                        "reason": "关联企业登记状态为注销，不得当作在职企业",
-                    }
-                )
-
-    # —— 年龄/姓名等跨产物字段在卡片侧的唯一化由 _to_notes_updates 与 L3 共用同一 facts。
+    ``RULES_DISABLED`` 是**单条规则的回滚开关**——加一个编号即摘除该规则，不必整批
+    回滚提示词。未登记的编号被忽略（配置比代码先改是常态）。
+    """
+    table = default_rules()
+    trimmed = table.without(disabled)
+    return trimmed if len(trimmed) != len(table) else table
 
 
-def _unify_level(result: Projection) -> None:
-    """把 ``deal_level`` 与 ``business_opp_level`` 收敛成一个 ``deal_level``。"""
-    values: list[tuple[str, str]] = []
-    for key in LEVEL_KEYS:
-        if key in result.facts:
-            level = normalize_level(result.facts[key])
-            if level:
-                values.append((key, level))
-            if key != "deal_level":
-                result.facts.pop(key, None)
+def _run_rule_actions(
+    result: Projection,
+    actions: Iterable[rule_actions.Action],
+    table: RuleRegistry,
+) -> None:
+    """把簇函数产出的动作交给执行器，并把留痕收进 ``result.rule_trace``。
 
-    if not values:
+    只在**本段**应用一轮、不做收敛：投影层的 a/b/c/d/e 是有序的流水线（归属 → 来源
+    分级 → 冲突消解），段内收敛会打破这个顺序。跨字段规则的复查由调用方在 facts
+    落定后单独跑一次。
+    """
+    batch = [action for action in actions if action.rule in table]
+    if not batch:
         return
-    distinct = {level for _, level in values}
-    chosen = min(distinct, key=lambda lv: LEVEL_ORDER.index(lv))
-    result.facts["deal_level"] = chosen
-    if len(distinct) > 1:
-        result.rejected.append(
-            {
-                "attribute": "deal_level",
-                "value": dict(values),
-                "rule": "f_level",
-                "reason": "两处等级不一致，取较高档并转人工确认",
-            }
-        )
-        result.to_confirm.append(
-            {
-                "attribute_key": "deal_level",
-                "candidates": sorted(distinct, key=lambda lv: LEVEL_ORDER.index(lv)),
-                "reason": "卡片与商机等级不一致",
-                "suggested_action": "人工确认最终等级",
-            }
-        )
+    applied = rule_actions.apply(result, batch, max_rounds=1, registry=table)
+    result.rule_trace.extend(trace.asdict() for trace in applied.traces)
+
+
+# rule: CONSIST-01 有旧车 ⇔ 换购
+# rule: CONSIST-03 已注销企业不得当作在职企业
+def _apply_cross_field_rules(
+    result: Projection,
+    context: Mapping[str, Any],
+    *,
+    disabled_rules: Iterable[str] = (),
+) -> None:
+    """跨字段一致性：一处有证据，另一处必须跟上；一处被否，另一处不得留。
+
+    判定与动作都在 :mod:`customer_profile.rules.clusters.consistency`；本函数只负责
+    把旁证（原文里是否有旧车证据、企业是否注销）传进去并应用结果。
+    """
+    actions = consistency_rules.check_cross_field(result.facts, context)
+    _run_rule_actions(result, actions, _rule_table(disabled_rules))
+
+# rule: LEVEL-01 卡片与商机两处等级不一致时唯一化
+def _unify_level(result: Projection, *, disabled_rules: Iterable[str] = ()) -> None:
+    """把 ``deal_level`` 与 ``business_opp_level`` 收敛成一个 ``deal_level``。"""
+    actions = level_rules.check_level_unify(
+        result.facts,
+        level_keys=LEVEL_KEYS,
+        level_order=LEVEL_ORDER,
+        normalize=normalize_level,
+    )
+    _run_rule_actions(result, actions, _rule_table(disabled_rules))
 
 
 MULTI_JOIN = "||"
@@ -1259,51 +1246,6 @@ def _speaker_prefix(role: str) -> str:
 def _is_conclusion(text: str) -> bool:
     """整段皆为结论（无任何事实部分）时为真。"""
     return not _strip_conclusion(text)
-
-
-INCOME_TAG_KEYWORD = "收入"
-"""收入标签名的判定词：「预测收入水平」含它，「预测车型价格偏好」「预测手机价格」不含。"""
-
-
-def _non_income_tag(claim: Claim) -> bool:
-    """这条收入断言是否由**非收入**的第三方标签支撑（v3.6 / 2026-10-20）。
-
-    只判第三方预测档：一手交互与登记来源的收入表述不在此列（那可能是客户自述或
-    销售确认，不是标签串字段的问题）。
-
-    判定看取值、标签名（``quote``）、当归原文与推断依据——L1 按模板要求把标签名抄进
-    ``quote`` 与 ``basis_of_inference``，旧产物至少有一处。三处都不含「收入」即判非收入。
-    实测形态：``annual_income="中低端（8w-15w）"``，标签名「预测车型价格偏好」
-    （13570263031；该案另有 ``4档收入`` 标签，理应取 30-40万）。
-    """
-    if claim.tier != PREDICTION:
-        return False
-    parts = [
-        _as_text(claim.value),
-        claim.quote or "",
-        claim.source_quote or "",
-        *claim.basis_of_inference,
-    ]
-    text = " ".join(parts)
-    # 只拦**看得出出自标签**的断言：有标签名（quote / 依据里出现「标签」）却没有「收入」。
-    # 没有任何标签痕迹的，是模型基于别的事实自行推断的金额（如「职业为网约车司机，
-    # 推断 20-40 万」），不该按标签串字段处理，原样放行。
-    tagged = bool(claim.quote or claim.source_quote) or "标签" in text
-    if not tagged:
-        return False
-    return INCOME_TAG_KEYWORD not in text
-
-
-def _salesperson_marked(claim: Claim) -> bool:
-    """取值、引文或当归原文里出现销售顾问指向词（v3.1 改造二）。
-
-    同时看三处：``value``（取值本身）、``quote``（原文切片）、``source_quote``（当归前原文）。
-    **不看** ``basis_of_inference``——那是推断依据，本就常提到「销售说…」，把它算进来会
-    误杀大量正确的推断（实测 ``title`` 的依据多为「销售以『大哥』称呼对方」）。
-    """
-    parts = (_as_text(claim.value), claim.quote or "", claim.source_quote or "")
-    text = " ".join(parts)
-    return any(marker in text for marker in SALESPERSON_MARKERS)
 
 
 def _readable_evidence(sources: Sequence[Claim]) -> list[str]:

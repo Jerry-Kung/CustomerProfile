@@ -39,7 +39,7 @@ CURRENT_CALL_PATH: ContextVar[str] = ContextVar("current_call_path", default="")
 **它所属那次执行**的路径。这个值过去存在 ``_RunRecord.call_path`` 上——那是整个运行
 共用的一份句柄，运行内各节点又是并发的，于是循环体覆盖它的那段时间里，同时结束的
 兄弟节点会读到别人的路径，把自己的终态写进另一条调用路径（详见
-``docs/design/提交臂切换与极光节点卡死修复方案.md``）。
+``docs/history/提交臂切换与极光节点卡死修复方案.md``）。
 
 改用 ``ContextVar``：每个 ``asyncio.Task`` 在创建时各自复制一份上下文，因此同一个
 运行里并发跑的节点互不可见，而循环体（在迭代节点那个 task 内被 await）能读到它。

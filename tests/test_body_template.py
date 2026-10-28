@@ -172,11 +172,15 @@ async def test_reference_inside_string_is_escaped_not_double_quoted(tmp_path):
 
 
 async def test_audio_body_template_nodes_use_resolvable_references():
-    """真实录音定义的两个模板：每个引用都必须能在自己的图里解析。"""
-    from customer_profile.workflows import audio_content_extract, customer_profile_production
+    """真实录音定义的两个模板：每个引用都必须能在自己的图里解析。
+
+    原先这里一并遍历 ``customer_profile_production``；该臂于 2026-10-27 整臂退役删除，
+    实测它的 ``@body_template`` 节点为 0，剔除后计数仍是 2，覆盖不减。
+    """
+    from customer_profile.workflows import audio_content_extract
 
     candidates = []
-    for workflow in (audio_content_extract.WORKFLOW, customer_profile_production.WORKFLOW):
+    for workflow in (audio_content_extract.WORKFLOW,):
         for node in workflow.nodes:
             template = node.config.get("@body_template")
             if template:

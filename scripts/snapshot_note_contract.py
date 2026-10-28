@@ -16,8 +16,8 @@
 
 用法::
 
-    python scripts/snapshot_note_contract.py --from-response docs/business_opt01_v3/Notes_new.txt
-    python scripts/snapshot_note_contract.py --from-response docs/business_opt01_v3/Notes_new.txt --check
+    python scripts/snapshot_note_contract.py --from-response docs/reference/Notes_new.txt
+    python scripts/snapshot_note_contract.py --from-response docs/reference/Notes_new.txt --check
     python scripts/snapshot_note_contract.py --batch-dir <批次目录>    # 复现历史快照
 
 **注意**：走 ``--from-response`` 时**不做增量合并**。线上 payload 已是完整现行契约，
@@ -36,7 +36,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-DEFAULT_BATCH = REPO_ROOT / "experiments" / "batches" / "baseline-39-dsv41-noThink"
+DEFAULT_BATCH = REPO_ROOT / "experiments" / "uat_data" / "uat-18-20261026"
 OUTPUT = REPO_ROOT / "src" / "customer_profile" / "notes_contract.py"
 EXTENSION = REPO_ROOT / "src" / "customer_profile" / "notes_contract_extension.json"
 """**补充字段**：基线快照固化之后线上契约新增的字段。

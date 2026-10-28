@@ -244,7 +244,10 @@ def test_car_price_tag_is_not_written_as_income():
                        ["第三方画像标签“预测车型价格偏好”给出“中低端（8w-15w）”"])]
     )
     assert "annual_income" not in result.facts
-    assert any(r["rule"] == "e_non_income_tag" for r in result.rejected)
+    assert any(
+        r["rule"] == "e_non_income_tag"  # INCOME-02
+        for r in result.rejected
+    )
     assert any(t["attribute_key"] == "annual_income" for t in result.to_confirm)
 
 
@@ -261,7 +264,10 @@ def test_income_tag_wins_over_car_price_tag():
         ]
     )
     assert result.facts["annual_income"] == "30-40万"
-    assert any(r["rule"] == "e_non_income_tag" for r in result.rejected)
+    assert any(
+        r["rule"] == "e_non_income_tag"  # INCOME-02
+        for r in result.rejected
+    )
 
 
 def test_untagged_prediction_amount_passes_through():

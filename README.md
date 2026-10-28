@@ -58,7 +58,7 @@ curl -X POST localhost:18173/runs \
 | `scripts/` | 运维脚本：基线跑批、冒烟、回放录制、号码收集 |
 | `tests/` | 测试（不触达外网，全部走固定响应或确定性代码节点） |
 | `data/` | 运行期 SQLite 与产物（可重建，已 gitignore） |
-| `experiments/` | 数据基线批次产物（体积大，已 gitignore） |
+| `experiments/` | 功能验证与问题回归场地：UAT 运行数据（`uat_data/`）与本地跑批批次（`batches/`），体积大，已 gitignore |
 | `docs/` | 文档：架构、设计决策、运行手册、变更日志；历史归档见 `docs/history/` |
 
 ## 文档

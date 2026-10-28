@@ -280,6 +280,73 @@ def create_app(service_factory: Any = None) -> FastAPI:
             if not definition.is_synthetic
         ]
 
+    @app.get("/rules", tags=["meta"])
+    async def list_rules() -> dict[str, Any]:
+        """当前项目配置的全部规则（运行台「规则清单」页用）。
+
+        **只读且不依赖服务实例**：规则集是进程启动期装载的常量，与运行、数据库都无关。
+        因此这里不调 ``get_service()``——服务尚未就绪时也能回答「配了哪些规则」，
+        而这正是排查时最先要问的问题。
+
+        返回字段与登记表一一对应，另补三项便于展示的派生值：
+
+        - ``cluster_title``：簇的中文名。前端不该自己维护一份簇名映射，那会在新增簇时漏掉；
+        - ``text``：prompt 通道的正文（``rules/texts/*.txt`` 去掉标记后）。它是这条规则
+          真正递给模型的话，看规则必须能看到它；
+        - ``landings``：代码/正文里的落点行号。规则「登记了但没落地」只能靠它看出来。
+
+        不返回 ``message_customer`` 以外的任何对客文案拼接结果：对客产物不得出现规则编号
+        与内部解释，这个边界由产出侧保证，此处只是把原始字段交出去给人看。
+        """
+        from dataclasses import asdict
+
+        from .reference_standards import is_field_bound
+        from .rules import default as default_rules
+        from .rules import guard as rule_guard
+        from .rules import render as rule_render
+        from .rules.clusters import cluster_of
+
+        registry = default_rules()
+        blocks = rule_render.load_blocks()
+        landings: dict[str, list[dict[str, Any]]] = {}
+        for mark in rule_guard.scan_marks():
+            landings.setdefault(mark.rule_id, []).append(
+                {"path": mark.path, "line": mark.line, "kind": mark.kind}
+            )
+
+        rows: list[dict[str, Any]] = []
+        for rule in registry.all():
+            row = asdict(rule)
+            row["cluster_title"] = cluster_of(rule.cluster)
+            block = blocks.get(rule.id)
+            row["text"] = block.text.strip() if block is not None else ""
+            row["landings"] = landings.get(rule.id, [])
+            # 逐字段口径已收进参考标准表。**不在这里过滤**：接口仍返回全量，
+            # 由页面决定显示哪一页。规则本身照旧生效，过滤只是视图层的事——
+            # 若在此处删行，``total`` 与登记表就不再对得上。
+            row["in_reference_standards"] = is_field_bound(rule)
+            rows.append(row)
+
+        return {
+            "total": len(rows),
+            "active": len(registry.active()),
+            "rules": rows,
+        }
+
+    @app.get("/standards", tags=["meta"])
+    async def list_standards() -> dict[str, Any]:
+        """参考标准表（运行台「参考标准表」页用）。
+
+        与 ``/rules`` 同一定位：只读、不依赖服务实例、进程常量现拼。**没有写接口**——
+        这一页只是把散在契约、编外登记表与规则正文里的字段口径汇到一处给人看。
+
+        派生列（名称/业务类型/定义/输出模式）全部现读，不在这里留副本；表里真正
+        手写的只有准入模式与三列说明。因此契约一变，刷新页面即对齐。
+        """
+        from .reference_standards import build_payload
+
+        return build_payload()
+
     # ------------------------------------------------------------ 运行
 
     @app.post("/runs", response_model=SubmitResponse, tags=["runs"])

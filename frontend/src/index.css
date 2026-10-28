@@ -1466,6 +1466,33 @@ button {
   text-align: center;
 }
 
+/* 参考标准表的准入模式徽标。两类用不同色调：事实是「有原文」，推断是「有依据」，
+ * 不是好坏之分，所以两类都用中性偏冷的色，不借用 ok/danger。 */
+.admission-fact {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  color: var(--accent);
+}
+
+.admission-controlled_inference {
+  background: var(--tone-muted-bg);
+  border: 1px solid var(--tone-muted-line);
+  color: var(--tone-muted);
+}
+
+/* 一个字段下挂多条规则时，逐条给标题行，正文各自成块。 */
+.standard-rule + .standard-rule {
+  margin-top: 12px;
+}
+
+.standard-rule-head {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
 .pager {
   align-items: center;
   border-top: 1px solid var(--border);
@@ -1494,6 +1521,103 @@ button {
 .pager button:disabled {
   color: var(--text-faint);
   cursor: default;
+}
+
+/* ---------------------------------------------------------------- 规则清单 */
+
+/* 顶部规模行：先说「配了多少条」，再让读者决定要不要用筛选。
+   与工具栏分开而不是塞进工具栏，避免一行里同时出现「结论」与「操作」。 */
+.rule-summary {
+  align-items: center;
+  color: var(--text-soft);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+  gap: 8px;
+  padding: 0 2px 12px;
+}
+
+.rule-summary strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.rule-count {
+  background: var(--tone-muted-bg);
+  border-radius: 4px;
+  font-size: 12px;
+  padding: 0 7px;
+}
+
+/* 规则编号与文件路径用等宽：它们要靠字符形状区分（IDENT-01 与 IDENT-02）。 */
+.cell-mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+/* 展开行不参与 hover 与指针：它本身不可点击，可点的是上面那一行。 */
+.data-table tbody tr.rule-detail-row,
+.data-table tbody tr.rule-detail-row:hover {
+  background: var(--panel-soft);
+  cursor: default;
+}
+
+.rule-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px 2px 8px;
+}
+
+.rule-detail .meta-list > div {
+  grid-template-columns: 88px 1fr;
+}
+
+.rule-landing {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: 12px;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+
+.rule-test {
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* 登记了却检索不到落点：红字而不是灰字，它是配置错误，不是「暂无」。 */
+.rule-missing {
+  color: var(--tone-danger);
+}
+
+/* 提示词正文：保留换行与粗体标记，原文不改写。 */
+.rule-text h4 {
+  color: var(--text-soft);
+  font-size: 12.5px;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+
+.rule-text pre {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.7;
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 12px 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* ---------------------------------------------------------------- 提交任务 */

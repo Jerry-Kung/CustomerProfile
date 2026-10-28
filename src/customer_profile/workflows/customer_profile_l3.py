@@ -19,8 +19,8 @@ L2 facts（代码投影，已定稿）
    共享输入，冲突只能靠事后「Notes 审核」补救——那是治不好的。
 2. **表达不新增事实**（§7.4）。LLM 只做组织与措辞；装配层逐条核对它引用的取值能否在
    ``facts`` 里找到出处，找不到即剔除并留痕。
-3. **复用预置资产，不复制**。6 个业务资产按**原名**引用 production 的模板
-   （见 :data:`PRODUCTION_ASSET`），仓库里只有一份正文。
+3. **复用预置资产，不复制**。6 个业务资产按**原名**引用公共资产模板
+   （见 :func:`SHARED_ASSET`，前缀 ``customer_profile_shared__``），仓库里只有一份正文。
    复制到本模块的 slug 下会造出第二份副本，日后必然漂移。
 """
 
@@ -30,6 +30,8 @@ import json
 from typing import Any
 
 from .. import readable as rdb
+from .. import text_utils as tut
+from ..rules.clusters import hard as hard_rules
 from ..definitions import WorkflowDef, make_node
 
 WORKFLOW_ID = "customer_profile_l3"
@@ -50,14 +52,23 @@ def template_name(node_id: str) -> str:
     return f"{SLUG}__{node_id}"
 
 
-def PRODUCTION_ASSET(node_id: str) -> str:
-    """按**原名**取生产图里的预置资产模板。
+def SHARED_ASSET(node_id: str) -> str:
+    """按**原名**取公共业务资产模板。
 
     「必须原样保留的业务资产」共 6 份（设计稿 §7.5），它们属于**业务资产**而非
-    某张图的私有物。本模块直接引用生产图那 6 个文件，不在 ``customer_profile_l3__*``
+    某张图的私有物。本模块直接引用那 6 个文件，不在 ``customer_profile_l3__*``
     下另存副本——一份正文、一处维护，才是「一字不改」能被验证的前提。
+
+    **2026-10-27 改名**：这 6 份原叫 ``customer_profile_production__*``，随生产臂
+    整臂退役一并改成 ``customer_profile_shared__*``。改名不是改正文——文件内容是业务
+    资产，逐字未动；改的只是前缀，免得「production」这个名字在仓库里继续指着一个
+    已删除的工作流。见 ``docs/history/旧版枚举键与production臂整改方案.md`` §4.4。
     """
-    return f"customer_profile_production__{node_id}"
+    return f"customer_profile_shared__{node_id}"
+
+
+PRODUCTION_ASSET = SHARED_ASSET
+"""旧名保留一处，供文档与历史脚本引用；新代码请用 :func:`SHARED_ASSET`。"""
 
 
 EXPRESS_TEMPLATE = template_name(EXPRESS)
@@ -102,27 +113,11 @@ SECTION_KEYS: tuple[str, ...] = (
 # ====================================================================
 
 
-def _as_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    return json.dumps(value, ensure_ascii=False, default=str)
+_as_text = tut.as_text
+"""取值 → 文本。实现见 :mod:`customer_profile.text_utils`。"""
 
-
-def _payload(value: Any) -> Any:
-    """兼容 String / Object 两种入参（上游时而是 JSON 串、时而是对象）。"""
-    if isinstance(value, (dict, list)):
-        return value
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return {}
-        try:
-            return json.loads(text)
-        except ValueError:
-            return {}
-    return {}
+_payload = tut.as_payload
+"""JSON 串 / 对象的兼容读取。实现见 :mod:`customer_profile.text_utils`。"""
 
 
 def _claims_of(claims_json: Any) -> list[dict]:
@@ -178,7 +173,9 @@ def validate_l3(claims_json, facts_json, notes_updates_json, basis_json="{}") ->
         facts_n += 1
         has_quote = bool(str(claim.get("quote") or "").strip())
         channel = str(claim.get("record_channel") or "").strip()
-        if not has_quote and channel not in REGISTRY_CHANNELS:
+        # 判据与 ``review_notes`` 共用一份实现（HARD-03）。两边输入来源不同——
+        # 这里读 ``claim.quote``，Notes 侧读证据串里有没有原文标记——但判定相同。
+        if hard_rules.is_unbacked_fact(has_quote, channel):
             unbacked.append(
                 {
                     "attribute": claim.get("attribute"),
@@ -309,14 +306,12 @@ INFERRED_LOW = "inferred_low"
 本模块是独立工作流，不导入那个模块，靠**用例**钉住两者一致。"""
 
 
-REGISTRY_CHANNELS: frozenset[str] = frozenset(
-    {
-        "销售人员人工确认的客户Notes信息",
-        "客户留存在我方销售数据系统中的信息记录",
-        "销售人员对当前客户历史画像数据的反馈记录",
-    }
-)
-"""登记档渠道：由系统直接给出的事实，本就不需要原文锚点。"""
+REGISTRY_CHANNELS: frozenset[str] = hard_rules.REGISTRY_CHANNELS
+"""登记档渠道：由系统直接给出的事实，本就不需要原文锚点。
+
+正身已随 HARD-03 迁到 :mod:`customer_profile.rules.clusters.hard`，与 ``review_notes``
+共用同一份——此前两处各写一份，正是「改一处漏一处」的来源。
+"""
 
 
 # ====================================================================
@@ -402,37 +397,11 @@ def assemble_l3(phone: str, batch_id: str, facts_json, notes_updates_json, expre
         }
         analysis_result["customer_overview"] = overview
 
-    # ---- 拍扁 resistances 数组成一条文本，写进 Notes（v3.3 修复问题1）
-    # resistances 一直存在于画像卡 analysis_result.resistances，但从未写进 Notes。
-    # 现在把它补回来：把数组里的 resistance_name 拼成 "抗性1/抗性2" 格式。
-    resistances_items = analysis_result.get("resistances", [])
-    if resistances_items and isinstance(resistances_items, list):
-        # 格式：「抗性1/抗性2/抗性3」
-        names = [r.get("resistance_name", "") for r in resistances_items if isinstance(r, dict)]
-        names = [n.strip() for n in names if n and n.strip()]
-        if names:
-            resistances_text = "/".join(names)
-            # 拼装 evidence：取每项的 description 前 60 字
-            evidence = []
-            for r in resistances_items[:3]:  # 最多取 3 项作为证据
-                if isinstance(r, dict):
-                    name = r.get("resistance_name", "").strip()
-                    desc = r.get("description", "").strip()[:60]
-                    if name and desc:
-                        evidence.append(f"{name}: {desc}")
-            notes.append({
-                "attribute_key": "resistances",
-                "attribute_value": resistances_text,
-                "reasoning_detail": {
-                    "summary": "由客户抗性分析汇总而来",
-                    "steps": [
-                        f"客户抗性分析得出 {len(names)} 项顾虑",
-                        "汇总为文本：" + resistances_text
-                    ],
-                    "evidence": evidence or ["从客户购车抗性分析中提取"],
-                    "confidence": 0.75
-                }
-            })
+    # ---- resistances **不写进 Notes**（2026-10-22）
+    # 它在回传契约里已下线（``notes_contract`` 不含该键），回传体由 ``callback_build``
+    # 从表达层 ``analysis_result.resistances`` 直接生成 ``deal_battle.loss_conditions``。
+    # v3.3 曾在这里补过一条 Notes 条目，但那条记录不经过回传白名单，只是让排查时
+    # 误以为已经覆盖——保留代码会掩盖真正生效的那条通路。
 
     analysis_result["basic_notes_updates"] = list(notes)
 

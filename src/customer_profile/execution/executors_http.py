@@ -70,6 +70,14 @@ async def execute_http_request(
     headers = _build_headers(node, rt, config, service)
     params = config.get("@params") or None
     json_body = _resolve_body(node, ctx, config)
+    if config.get("@writeback") and json_body is not None and not isinstance(json_body, dict):
+        # 回写契约要求顶层三键（phone / batch_id / analysis_result），因此请求体**必须是对象**。
+        # ``@body_ref`` 的通用整理只保证「是合法 JSON」——``[]`` 与 ``"string"`` 都能过关，
+        # 发出去后端只会回一个笼统的 4xx。回写节点多一道形状校验，别的节点不受影响。
+        raise NodeExecutionError(
+            f"http-request 节点 {node.node_id} 是回写节点，请求体须为 JSON 对象，"
+            f"实际拿到 {type(json_body).__name__}"
+        )
     retry_enabled = config.get("@retry_enabled")
     retry_max = config.get("@retry_max")
     ssl_verify = config.get("@ssl_verify")

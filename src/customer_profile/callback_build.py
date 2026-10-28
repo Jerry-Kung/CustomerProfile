@@ -1,6 +1,6 @@
 """回传体构造：把**已定稿的 facts** 投影成 v2 契约的 ``analysis_result`` 六键。
 
-**为什么这层是纯代码、0 token**（L-002 的定论，见 ``docs/business_opt01_v3/AI画像v2回传改造核查清单.md`` §6.1）：
+**为什么这层是纯代码、0 token**（L-002 的定论，见 ``docs/reference/AI画像v2回传改造核查清单.md`` §6.1）：
 
 1. **唯一 id 必须由代码生成。** 契约要求 ``(phone, item_id)`` 与
    ``(phone, psychology_key)`` 全局唯一，且回写是**先删后建**。id 撞号会让整次回传 500——
@@ -34,9 +34,10 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import internal_fields as inf
 from . import notes_contract as nc
+from . import text_utils as tut
 
 # ====================================================================
-# 契约常量（逐字取自 docs/business_opt01_v3/AI画像远程回传接口数据结构说明.md §2.4 / §2.5 / §2.6）
+# 契约常量（逐字取自 docs/reference/AI画像远程回传接口数据结构说明.md §2.4 / §2.5 / §2.6）
 # ====================================================================
 
 CATEGORY_VISIT = "到店动因"
@@ -91,54 +92,14 @@ REPLACEMENT_PURCHASE = "replacement"
 # ====================================================================
 
 
-def _payload(value: Any) -> Any:
-    """兼容 String / Object 两种入参（上游时而是 JSON 串、时而是对象）。"""
-    if isinstance(value, (dict, list)):
-        return value
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return {}
-        try:
-            return json.loads(text)
-        except ValueError:
-            return {}
-    return {}
+_payload = tut.as_payload
+"""JSON 串 / 对象的兼容读取。实现见 :mod:`text_utils`。"""
 
+_as_text = tut.as_display_text
+"""展示用文本：布尔不渲染、数字给十进制、列表用顿号连接。"""
 
-def _as_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, bool):
-        return ""
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, (list, tuple)):
-        return "、".join(part for part in (_as_text(v) for v in value) if part)
-    return json.dumps(value, ensure_ascii=False, default=str)
-
-
-def _as_list(value: Any) -> list[Any]:
-    """把取值摊成列表：``a||b`` / 列表 / 单值都认。空值给空列表。"""
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple)):
-        out: list[Any] = []
-        for item in value:
-            out.extend(_as_list(item))
-        return out
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return []
-        if "||" in text:
-            return [part.strip() for part in text.split("||") if part.strip()]
-        return [text]
-    if isinstance(value, dict):
-        return [value]
-    return [value]
+_as_list = tut.as_flat_list
+"""摊成列表：``a||b`` / 列表 / 单值都认。"""
 
 
 def _label(attribute: str, raw: Any) -> str:
@@ -146,7 +107,18 @@ def _label(attribute: str, raw: Any) -> str:
 
     为什么不直接写英文键：四个区块是**给销售看的**卡片，写 ``fuel_efficiency``
     等于把内部字段键端到用户面前（L3 表达层的硬边界第 5 条同口径）。
+
+    多值（``power||appearance``）逐项翻译后用顿号连接——只查整串的展示名会让
+    ``已定稿事实：power、appearance`` 这类内部键原样漏进对客文案
+    （英文残留治理方案 §3.2）。英文占位串（``unknown``）给空串：它不是客户说的话，
+    留着只会让「牌照条件：unknown」这种行出现在画像卡上。
     """
+    # rule: EXPR-01 对客产出不得出现英文枚举键
+    # 列表/元组：逐项翻译后再连接。``_as_text`` 会先用顿号拼成 ``power、appearance``，
+    # 拼完再查展示名就查不到了——这是 uat-18 实测残留的成因之一。
+    if isinstance(raw, (list, tuple)):
+        parts = [_label(attribute, item) for item in raw]
+        return "、".join(part for part in parts if part)
     text = _as_text(raw)
     if not text:
         return ""
@@ -163,6 +135,17 @@ def _label(attribute: str, raw: Any) -> str:
                 if display:
                     extra = _as_text(item.get("input_value"))
                     return f"{display}（{extra}）" if extra else str(display)
+        if "||" in text:
+            parts = [
+                _label(attribute, part)
+                for part in text.split("||")
+                if part.strip()
+            ]
+            joined = "、".join(part for part in parts if part)
+            if joined:
+                return joined
+        if inf.is_english_placeholder(attribute, text):
+            return ""
     return text
 
 
@@ -377,6 +360,16 @@ def build_basic_notes_updates(notes: Sequence[Any]) -> list[dict[str, Any]]:
     （``old_car_model`` / ``company`` / ``purchase_nature`` …），它们对内部推理有用，
     但回传体里多一个契约没有的 ``attribute_key`` 反应不可预期。因此这里**遍历契约键**
     而不是遍历 ``facts``——白名单来自 :data:`internal_fields.CALLBACK_KEYS`。
+
+    **取值也要校验**（2026-10-27 旧键整改，``ENUM-01`` 的最后一道闸）：白名单只挡住
+    「字段名不认识」，挡不住「字段对、取值是内部枚举键」。改前实测有
+    ``purchase_type=换购`` / ``education=本科及以上`` / ``internet_preference=微信``
+    这类值被原样回写，前端点开看到的就是内部键。规则层已从入口拦一次，这里再判一次
+    ——本函数是回传体的唯一出口，不依赖上游任何环节是否守约。
+
+    处置是**单条剔除、其余照发**：一条脏值不该拖累整案的白写。
+    剔除前先尝试两种确定性修正：旧版枚举键查别名表（``unmarried`` → ``unmarried_no_child``）、
+    中文展示名反查键（``本科`` → ``bachelor``）。两者都救不回来才丢。
     """
     allowed = set(inf.CALLBACK_KEYS)
     updates: list[dict[str, Any]] = []
@@ -389,12 +382,123 @@ def build_basic_notes_updates(notes: Sequence[Any]) -> list[dict[str, Any]]:
         value = entry.get("attribute_value")
         if value is None:
             value = ""
+        # rule: ENUM-01 回写枚举取值必须是契约合法键
+        if inf.is_enum(key):
+            repaired = _repair_enum_value(key, value)
+            if repaired is None:
+                continue
+            value = repaired
         item: dict[str, Any] = {"attribute_key": key, "attribute_value": str(value)}
         detail = entry.get("reasoning_detail")
         if isinstance(detail, dict):
-            item["reasoning_detail"] = _normalize_detail(detail)
+            detail = _normalize_detail(detail)
+            if key == "consumption_level":
+                # rule: SPEC-16 消费等级档位方向：分析总结末尾固定拼接说明
+                detail["summary"] = _append_consumption_note(detail["summary"])
+            item["reasoning_detail"] = detail
         updates.append(item)
     return updates
+
+
+def _append_consumption_note(summary: str) -> str:
+    """在「AI 分析总结」末尾拼接档位说明；已拼过则原样返回（重复回写不叠加）。"""
+    from .rules.clusters.spec import CONSUMPTION_LEVEL_NOTE
+
+    bands = len(nc.legal_keys("consumption_level"))
+    note = CONSUMPTION_LEVEL_NOTE.format(bands=bands)
+    text = (summary or "").strip()
+    if not text:
+        return note
+    if text.endswith(note):
+        return text
+    return text + note
+
+
+def _enum_items(attribute: str, value: Any) -> list[str]:
+    """把取值拆成待校验的字符串列表（多选 ``||`` / 结构化取 ``key``）。
+
+    **结构化串必须先解析再校验**（2026-10-28 修复）：``attribute_value`` 落库时结构化
+    枚举是 JSON **字符串**（``'{"key":"yes","input_value":""}'``），若直接当成普通文本，
+    整串既不是合法键也不是展示名，``_repair_enum_value`` 会判它救不回来而**整条剔除**。
+    实测 ``driver_license_status`` 就是这样消失的——``basis=fact``、置信 1.0 的字段
+    因为一个引号结构被判成非法值。``projection.normalize_enum`` 一直是解析的，出错的是
+    回写出口这一侧，因此修在这里而不是放宽校验。
+    """
+    if isinstance(value, (list, tuple)):
+        out: list[str] = []
+        for item in value:
+            out.extend(_enum_items(attribute, item))
+        return out
+    if isinstance(value, Mapping):
+        key = _as_text(value.get("key"))
+        return [key] if key else []
+    text = _as_text(value)
+    if not text:
+        return []
+    structured = _parse_json_object(text)
+    if structured is not None:
+        key = _as_text(structured.get("key"))
+        return [key] if key else []
+    if inf.is_multi_value(attribute) and "||" in text:
+        return [part.strip() for part in text.split("||") if part.strip()]
+    return [text]
+
+
+def _parse_json_object(text: str) -> dict | None:
+    """``'{"key":"yes",...}'`` → dict；不是 JSON 对象则 ``None``。"""
+    stripped = text.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _repair_enum_value(attribute: str, value: Any) -> Any:
+    """规整枚举取值；**救不回来时返回 ``None``**，由调用方剔除该条。
+
+    返回原形态（字符串 / 结构化串 / 列表）而不是列表：``attribute_value`` 的契约是
+    单个字符串，多选仍用 ``||`` 连接，不能因为校验就把形状改了。
+    """
+    legal = inf.legal_keys(attribute)
+    if not legal:
+        return value
+    items = _enum_items(attribute, value)
+    if not items:
+        return value
+    fixed: list[str] = []
+    for item in items:
+        if item in legal:
+            fixed.append(item)
+            continue
+        normal = (
+            inf.display_to_key(attribute, item)
+            or inf.legacy_alias(attribute, item)
+        )
+        if not normal:
+            return None
+        fixed.append(normal)
+    if isinstance(value, (list, tuple)):
+        return fixed
+    if isinstance(value, Mapping) or (
+        isinstance(value, str) and value.strip().startswith("{")
+    ):
+        # 结构化枚举：只修 key，``input_value`` 原样保留。
+        if isinstance(value, Mapping):
+            patched = dict(value)
+            patched["key"] = fixed[0]
+            return patched
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        parsed["key"] = fixed[0]
+        return json.dumps(parsed, ensure_ascii=False)
+    return "||".join(fixed) if inf.is_multi_value(attribute) else fixed[0]
 
 
 # ====================================================================
@@ -776,10 +880,12 @@ def _win_conditions(view: _FactView) -> list[dict[str, Any]]:
         )
 
     plate = _as_text(view.raw("license_plate_status"))
-    if plate:
+    plate_label = _label("license_plate_status", plate) if plate else ""
+    # 展示名为空说明取值是英文占位串（``unknown``），不是可用事实——不拼「牌照条件：」。
+    if plate_label:
         items.append(
             _item("win", "license_plate_status",
-                  f"牌照条件：{_label('license_plate_status', plate)}",
+                  f"牌照条件：{plate_label}",
                   view.detail("license_plate_status"), len(items) + 1, extra_digest=plate)
         )
     return items

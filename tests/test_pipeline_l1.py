@@ -322,23 +322,33 @@ def test_field_inference_guide_labels_categories():
 
 
 def test_field_source_notes_keys_are_real_contract_fields():
-    """来源补充说明的键必须是**真取证字段**（契约字段或编外字段）。
+    """取证方向的字段必须是**真取证字段**（契约字段或编外字段）。
 
-    这是**防漂移**的机制：字段改名或下线后，这张表若不跟着改，那段说明就会静默失效——
+    这是**防漂移**的机制：字段改名或下线后，规则若不跟着改，那段说明就会静默失效——
     模型既看不到它，也没人会发现它已经不生效了。校验集合用
     :data:`internal_fields.EXTRACTION_KEYS`：字段从 Notes 下线不等于不再取证，
     ``emotion`` / ``communication_rhythm`` / ``personality_and_preferences``
     三条说明本轮正是这样留下来的。
+
+    M4 起正文由 SPEC 簇承载（``rules/texts/spec.txt``），不再是 ``pipeline`` 里的字典常量。
     """
-    keys = set(pipe.FIELD_SOURCE_NOTES)
-    assert keys, "来源补充表不得为空"
+    from customer_profile.rules import render
+
+    keys = set(render.field_notes(stage="extract"))
+    assert keys, "取证方向不得为空"
     assert keys <= set(inf.EXTRACTION_KEYS), (
         f"不是取证字段的键：{sorted(keys - set(inf.EXTRACTION_KEYS))}"
     )
     guide = pipe.field_inference_guide()
+    lines = guide.splitlines()
     for key in keys:
-        assert f"取证范围：" in guide.split(f"- `{key}`")[1].split("\n")[0] or \
-            "取证范围：" in guide
+        # 取证方向渲染在字段行的**下一行**（缩进子项），不是同一行。
+        index = next(
+            i for i, line in enumerate(lines) if line.startswith(f"- `{key}`")
+        )
+        assert lines[index + 1].startswith("  - 取证范围："), (
+            f"{key} 的取证方向没有贴着字段渲染"
+        )
 
 
 def test_field_inference_guide_renders_source_notes_inline():
@@ -475,15 +485,63 @@ def test_project_claims_notes_shape_matches_baseline():
     assert set(notes[0]["reasoning_detail"]) == {"summary", "steps", "evidence", "confidence"}
 
 
-def test_project_claims_thin_tier_keeps_registry_only():
-    """thin 档只输出登记档坐实的字段；姓名的「未知」交代不受档位影响。"""
+def test_thin_keep_predicate_covers_six_arms():
+    """thin 保留判据按「来源档位 + 字段置信档」判（P2 口径），六条分支逐条钉住。
+
+    旧判据在 ``reasoning_detail.evidence`` 里找「人工/系统登记」标签，而证据位只写
+    「渠道：原文」，全量 87 案 1234 条 Notes 命中 0——thin 档被整批清空。
+    """
+    keep = pipe._thin_keeps
+    # 1 登记档：不论置信档都留（销售本人确认或系统留痕，取值可回溯）
+    assert keep(["客户留存在我方销售数据系统中的信息记录"], "inferred_low")
+    # 2 第三方画像 + 非低置信：v3.2 起商用画像在无一手记录时是唯一可靠信源
+    assert keep(["第三方画像数据"], "inferred_high")
+    # 3 第三方画像 + 低置信：不留
+    assert not keep(["第三方画像数据"], "inferred_low")
+    # 4 无渠道 + 非低置信：留
+    assert keep([""], "inferred_high")
+    # 5 无渠道 + 低置信：不留
+    assert not keep([""], "inferred_low")
+    # 6 仅社交自呈现：不留（thin 案无一手记录可核对，宁可少写）
+    assert not keep(["小红书主页截图信息"], "inferred_high")
+
+
+def test_project_claims_thin_tier_keeps_registry_and_trusted_prediction():
+    """thin 档输出：登记档（含低置信）+ 第三方画像高置信；姓名恒留。"""
     result = pipe.project_claims(
-        claims_json(claim(attribute="occupation", value="教师", record_channel="小红书主页截图信息")),
+        claims_json(
+            claim(attribute="occupation", value="教师", claim_id="c_001",
+                  record_channel="客户留存在我方销售数据系统中的信息记录", basis="inferred_low"),
+            claim(attribute="industry", value="充电桩", claim_id="c_002",
+                  record_channel="第三方画像数据", basis="inferred_high"),
+            claim(attribute="residence_address", value="广州", claim_id="c_003",
+                  record_channel="第三方画像数据", basis="inferred_low"),
+            claim(attribute="license_plate_address", value="深圳", claim_id="c_004",
+                  record_channel="小红书主页截图信息", basis="inferred_high"),
+        ),
         tier="thin",
     )
-    assert result["notes_count"] == 1
-    notes = json.loads(result["notes_updates_json"])
-    assert [n["attribute_key"] for n in notes] == ["customer_name"]
+    keys = [n["attribute_key"] for n in json.loads(result["notes_updates_json"])]
+    assert "customer_name" in keys
+    assert "occupation" in keys, "登记档字段应保留（哪怕置信档低）"
+    assert "industry" in keys, "第三方画像高置信应保留"
+    assert "residence_address" not in keys, "第三方画像低置信不留"
+    assert "license_plate_address" not in keys, "仅社交自呈现不留"
+
+
+def test_thin_tier_empty_channel_claim_goes_to_confirm_not_notes():
+    """空渠道断言在投影层即被判为社交档转 ``to_confirm``，够不着 thin 过滤器的保留臂。"""
+    result = pipe.project_claims(
+        claims_json(
+            claim(attribute="current_vehicle_info", value="无车", claim_id="c_005",
+                  record_channel="", basis="inferred_high"),
+        ),
+        tier="thin",
+    )
+    keys = [n["attribute_key"] for n in json.loads(result["notes_updates_json"])]
+    to_confirm = [e["attribute_key"] for e in json.loads(result["to_confirm_json"])]
+    assert "current_vehicle_info" not in keys
+    assert "current_vehicle_info" in to_confirm
 
 
 def test_project_claims_empty_tier_outputs_only_name():
@@ -681,6 +739,38 @@ def test_review_flags_unbacked_fact():
         json.dumps({"occupation": "fact"}, ensure_ascii=False),
     )
     assert result["unbacked_fact"] == 1
+
+
+def test_review_flags_fact_whose_evidence_is_not_a_quote():
+    """``fact`` 且证据位只写了推断依据、没有原文、也没有登记渠道 → 记 issue。
+
+    「有 evidence」不等于「指得出原文」：旧判据 ``any("：" in e or e ...)`` 对任何非空
+    证据串都成立，无原文的 fact 会被放行。
+    """
+    result = pipe.review_notes(
+        json.dumps(
+            [note("occupation", "教师",
+                  evidence=["从对话内容可以判断对方在事业单位工作"])],
+            ensure_ascii=False,
+        ),
+        json.dumps({"occupation": "教师"}, ensure_ascii=False),
+        json.dumps({"occupation": "fact"}, ensure_ascii=False),
+    )
+    assert result["unbacked_fact"] == 1
+
+
+def test_review_accepts_fact_with_verbatim_quote():
+    """证据位带原文（``渠道：原文`` 或 ``原文「…」``）且无渠道字段 → 不算无锚点。"""
+    result = pipe.review_notes(
+        json.dumps(
+            [note("occupation", "教师",
+                  evidence=["外呼录音信息：我在学校当老师"])],
+            ensure_ascii=False,
+        ),
+        json.dumps({"occupation": "教师"}, ensure_ascii=False),
+        json.dumps({"occupation": "fact"}, ensure_ascii=False),
+    )
+    assert result["unbacked_fact"] == 0
 
 
 def test_review_flags_evidence_self_reference():
@@ -905,3 +995,68 @@ def test_injected_phone_evidence_carries_number():
         n for n in json.loads(result["notes_updates_json"]) if n["attribute_key"] == "phone_number"
     )
     assert any("15308826588" in str(e) for e in note["reasoning_detail"]["evidence"])
+
+
+# ------------------------------------------- 英文残留治理（EXPR-01 / EXPR-03）
+
+def test_review_rewrites_enum_keys_in_prose():
+    """正文里的枚举键在审查层就换成中文，取值本身保持契约键（前端按 display_name 映射）。
+
+    实测来源：``uat-18-20261026`` 的 13207117251 / 13100792128 / 18271918797 /
+    18356093957 四案，``已定稿事实：`` 后面直接跟着 ``power、appearance`` 这类键。
+    """
+    result = pipe.review_notes(
+        json.dumps(
+            [
+                {
+                    "attribute_key": "core_concerns",
+                    "attribute_value": "power||appearance",
+                    "reasoning_detail": {
+                        "summary": "已定稿事实：power、appearance",
+                        "steps": [],
+                        "evidence": [],
+                        "confidence": 0.8,
+                    },
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        json.dumps({"core_concerns": "power||appearance"}, ensure_ascii=False),
+        "{}",
+    )
+    entry = json.loads(result["notes_updates_json"])[0]
+    assert entry["attribute_value"] == "power||appearance", "取值是契约键，不得改写"
+    assert entry["reasoning_detail"]["summary"] == "已定稿事实：动力、颜值"
+    assert result["english_rule_hits"] == 1
+
+
+def test_review_removes_english_placeholder_entries():
+    """``payment_method = unknown`` 这类英文占位串整条删除，不留在产物里占位。
+
+    实测来源：``uat-18-20261026`` 的 17652815077（payment_method / license_plate_status
+    均为 ``unknown``）。
+    """
+    result = pipe.review_notes(
+        json.dumps(
+            [
+                {
+                    "attribute_key": "payment_method",
+                    "attribute_value": "unknown",
+                    "reasoning_detail": {
+                        "summary": "现有信息只有社交渠道给出的 unknown",
+                        "steps": ["维持 unknown 供人工确认"],
+                        "evidence": [],
+                        "confidence": 0.2,
+                    },
+                },
+                {"attribute_key": "occupation", "attribute_value": "教师",
+                 "reasoning_detail": {"summary": "", "steps": [], "evidence": [], "confidence": 0.9}},
+            ],
+            ensure_ascii=False,
+        ),
+        json.dumps({"payment_method": "unknown", "occupation": "教师"}, ensure_ascii=False),
+        "{}",
+    )
+    kept = json.loads(result["notes_updates_json"])
+    assert [entry["attribute_key"] for entry in kept] == ["occupation"]
+    assert result["english_rule_hits"] == 1

@@ -25,24 +25,16 @@ from __future__ import annotations
 from typing import Any
 
 from ..definitions import WorkflowDef, make_node
+from .. import text_utils as tut
 
 
 # ---- 迁移前的定义节点 1779414084761 的正文（逐字符，仅函数名不同）
 import json
-import re
 
 
 def _strip_code_fence(text: str) -> str:
-    """
-    兼容 LLM 输出中可能带有 ```json ... ``` 的情况。
-    """
-    text = text.strip()
-
-    # 去掉 ```json / ```JSON / ``` 包裹
-    text = re.sub(r"^```(?:json|JSON)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-
-    return text.strip()
+    """兼容 LLM 输出中可能带有 ```json ... ``` 的情况。实现见 :mod:`text_utils`。"""
+    return tut.strip_code_fence(text)
 
 
 def _parse_json_string(value):
@@ -167,19 +159,11 @@ def split_feedback_notes(input_json) -> dict:
 
 # ---- 迁移前的定义节点 1779414516946 的正文（逐字符，仅函数名不同）
 import json
-import re
 
 
 def _strip_code_fence__6946(text: str) -> str:
-    """
-    兼容上游可能传入 ```json ... ``` 的情况。
-    """
-    text = text.strip()
-
-    text = re.sub(r"^```(?:json|JSON)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-
-    return text.strip()
+    """兼容上游可能传入 ```json ... ``` 的情况。实现见 :mod:`text_utils`。"""
+    return tut.strip_code_fence(text)
 
 
 def _parse_json_loose(value):

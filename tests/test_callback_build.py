@@ -150,6 +150,37 @@ def test_basic_notes_updates_keeps_reasoning_detail_shape():
     assert entry["attribute_value"] == "教师"
 
 
+def test_consumption_level_summary_carries_band_note():
+    """SPEC-16 正例：消费等级的「AI 分析总结」末尾固定拼接档位说明，且不重复叠加。"""
+    note = "（消费等级分6档，数字越大代表消费水平越高）"
+    notes = _notes(
+        {
+            "attribute_key": "consumption_level",
+            "attribute_value": "level_3",
+            "reasoning_detail": {"summary": "第三方标签给出 3 档消费", "steps": [], "evidence": [], "confidence": 0.8},
+        }
+    )
+    first = cb.build_basic_notes_updates(json.loads(notes))
+    assert first[0]["reasoning_detail"]["summary"] == "第三方标签给出 3 档消费" + note
+
+    # 回写结果再走一遍出口（离线重放/二次回写）不得叠加第二句。
+    again = cb.build_basic_notes_updates(first)
+    assert again[0]["reasoning_detail"]["summary"] == first[0]["reasoning_detail"]["summary"]
+
+
+def test_other_fields_summary_has_no_band_note():
+    """SPEC-16 反例：档位说明只贴消费等级，不污染其它字段的分析总结。"""
+    notes = _notes(
+        {
+            "attribute_key": "occupation",
+            "attribute_value": "教师",
+            "reasoning_detail": {"summary": "客户自称", "steps": [], "evidence": [], "confidence": 0.9},
+        }
+    )
+    entry = cb.build_basic_notes_updates(json.loads(notes))[0]
+    assert entry["reasoning_detail"]["summary"] == "客户自称"
+
+
 # ---------------------------------------------------------------- ai_insight
 
 def test_purchase_intent_level_is_normalized_without_the_suffix():

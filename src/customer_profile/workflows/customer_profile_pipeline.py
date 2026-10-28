@@ -4,10 +4,10 @@
 同一套取数子流程与同一个成文工作流，只在**中间的取证与投影**上换实现。AB 实验按
 ``scripts/run_baseline.py --workflow-id`` 切换两臂，产物形状与归档逻辑完全一致。
 
-    基线臂（customer_profile_entry）:
+    基线臂（customer_profile_entry，2026-10-16 已从注册表摘除，仅作历史样本）:
       evidence_subagent（21 节点 / 14 路扇出，含 1 个 LLM 取证节点）
         → profile_features_analysis（人设特征判断）
-          → customer_profile_production（41 节点 / 11 路 LLM 生成）
+          → customer_profile_pipeline → result1
 
     业务测试臂（本模块，阶段一/二）:
       取数层（14 路 tool，**原样复用**既有子流程）
@@ -15,7 +15,7 @@
           → L4 分诊层（纯代码）：sufficient / thin / empty
             → 取证输入包（纯代码）：只喂「有内容」的渠道
               → 证据线索整理（复用既有提示词）
-                → profile_features_analysis → customer_profile_production → result1
+                → profile_features_analysis → 本模块 → result1
 
 **阶段一/二的范围**：本模块此刻只落 L0 与 L4（``落地方案.md`` §2 阶段一），
 以及把 L0 的渠道分级接进取证输入包。L1 取证层与 L2 投影层在阶段二接入，
@@ -47,10 +47,15 @@ import re
 from typing import Any
 
 from .. import internal_fields as inf
+from .. import enum_mapping
 from .. import notes_contract as nc
 from .. import projection as proj
 from .. import readable as rdb
+from .. import rules
 from ..definitions import WorkflowDef, make_node
+from ..rules.clusters import expression as expression_rules
+from ..rules.clusters import hard as hard_rules
+from ..rules import checker as rule_checker
 
 WORKFLOW_ID = "customer_profile_pipeline"
 """**稳定标识，不得改动。** 模板资源名是 ``<slug>__<node_id>``，而 ``scripts/run_baseline.py
@@ -64,10 +69,10 @@ DISPLAY_NAME = "业务测试臂"
 会一并断掉。"""
 
 PROFILE_API_PREFIX = "/api/v1/remote/"
-"""画像服务的 API 前缀。与 :mod:`customer_profile_production` 里同名常量一致。
+"""画像服务的 API 前缀。
 
-**为什么不 import 那一份**：两个工作流模块互不依赖是有意的——production 是基线臂、本模块
-是业务测试臂，两臂共用同一套取数子流程但各自独立演进。为一个字符串建依赖会造出反向耦合。
+原先与此常量同形的定义在生产臂 ``customer_profile_production`` 里，该臂已于
+2026-10-27 整臂退役删除；现在这里是唯一一处定义。
 """
 
 # ---------------------------------------------------------------- 节点 ID
@@ -131,9 +136,51 @@ L1_INJECT = "pipeline_l1_inject"
 L1_PERSONA_INPUT = "pipeline_l1_persona_input"
 L1_FIELDS_INPUT = "pipeline_l1_fields_input"
 L2_PROJECT = "pipeline_l2_project"
+L2_ENUM_MAP = "pipeline_l2_enum_map"
+"""枚举语义映射（1 次受约束 LLM，缺省关闭）。
+
+**为什么接在 ``L2_APPLY`` 之后而不是 ``L2_PROJECT`` 之后**：投影层归不了的取值它自己
+就会保留原值，而**大部分中文原值是 L2 兜底写进 Notes 的**——兜底在投影层之后跑，接在
+投影层的映射节点一次也看不到它们（2026-10-28 实测：六案投影层 0 条非法值，兜底并入后
+17 条）。接到 ``L2_APPLY`` 之后，``facts`` 取自投影层、``notes`` 取自并入后的终判，两侧
+的非法值才在同一处被看见。
+
+**为什么不放在回写出口**：``facts`` 被 gate 审查、商机定级、表达层与回写四处消费。只在
+回写出口映射只能救 Notes——``facts`` 里仍是中文原值，画像卡与定级会继续拿到错形态
+（``_label`` 查不到展示名就原样输出）。放在这里，「合法键一次性落定」对所有下游同时生效。
+
+输出与 ``L2_PROJECT`` 同形同名（``facts_json`` / ``notes_updates_json`` / ``basis_json``
+等），因此下游改指本节点即可，消费方代码一行不动。"""
 L2_FALLBACK = "pipeline_l2_fallback"
+"""L2 兜底裁决（1 次受约束 LLM，由 **code 节点**承载）。
+
+**为什么不是 ``llm`` 节点**（2026-10-28 改造）：两件事逼着它落到 code 里——
+
+1. **候选为空时不该发起调用**：归档 148 次兜底调用里，35 次的候选清单本来就是空的，
+   每次都稳定换来 ``{"verdicts": []}``（7 token）。llm 节点没有"输入为空就别调"的能力。
+2. **输出量下限必须按输入规模给**：候选为 0 时 7 token 是**正确**结果，候选为 30 时
+   7 token 是**截断**。静态的 ``config['min_completion_tokens']`` 表达不了这个区别，
+   一刀切会把正常的空裁决误判成异常、重试三次后抛错——而 llm 节点抛错会阻塞整棵下游
+   子树，把「兜底没干活」升级成「整案失败」。
+
+代码承载后失败不阻断（与 checker / 枚举映射同一套骨架），候选数与下限的关系写在
+:data:`L2_FALLBACK_MIN_TOKENS`。"""
+
+L2_FALLBACK_MIN_TOKENS = 40
+"""兜底裁决的**输出量下限**（completion_tokens），仅在候选非空时生效。
+
+取值依据（2026-10-28 归档 148 次兜底调用的实测分布）：
+
+- 候选为 0：全部 35 次都是 7 token 的 ``{"verdicts": []}``——**正确结果**，不设闸门；
+- 候选 > 0：正常输出最小 65 token（1 条裁决），中位数约 800；
+- 候选 > 0 却只回 7–8 token 的：31 次，全部是 ``{"verdicts": []}``，即静默不干活。
+
+40 落在 8 与 65 之间：能挡住全部 31 次异常，又不碰任何一次正常输出。**宁可漏判不可误杀**
+——误杀的代价是多烧两次调用并丢一次本就存在的裁决，漏判只是维持今天的现状。"""
 L2_APPLY = "pipeline_l2_apply"
 L2_REVIEW = "pipeline_l2_review"
+RULE_CHECK = "pipeline_rule_check"
+RULE_APPLY = "pipeline_rule_apply"
 
 # —— 商机等级定级（独立一次 LLM 调用，v3.6）
 LEVEL_INPUT = "pipeline_level_input"
@@ -862,7 +909,8 @@ def triage(records_json) -> dict:
     三档（``端到端方案.md`` §3.6）：
 
     - ``sufficient``：有一手交互（录音/聊天）且有实质内容 → 走事实流程；
-    - ``thin``：只有声明/社交/弱登记/预测 → 保守模板，只输出能坐实的字段；
+    - ``thin``：只有声明/社交/弱登记/预测 → 保守模板，保留登记档、第三方画像高置信
+      与无渠道高置信字段（判据见 :func:`_thin_keeps`）；
     - ``empty``：几乎无数据 → 输出「待补充」骨架，不产生任何具体断言。
 
     **为什么是纯代码而不是一次小调用**：判据是「有哪些渠道、各有多长」，
@@ -1237,47 +1285,6 @@ def enum_key_guide() -> str:
     return "\n".join(lines)
 
 
-FIELD_SOURCE_NOTES: dict[str, str] = {
-    "planned_purchase_time": "从沟通记录里的时间表述推断（「这个月想定」「过完年再看」），"
-    "**不得**用手机号归属地、社媒截图、企业信息去猜。",
-    "follow_up_frequency": "从沟通记录本身推断（客户回复的快慢、主动催问的频率、"
-    "约定下次联系的口径）。",
-    "communication_rhythm": "从多轮沟通的整体形态归纳（是否当场答复、是否反复改口、"
-    "是否拖延不回），原文里不会有对应句子。",
-    "personality_and_preferences": "从客户在沟通中关心什么、怎么问、怎么砍价归纳，"
-    "原文里不会有对应句子。",
-    "emotion": "从客户在沟通中的语气与反应归纳，原文里不会有对应句子。",
-    "annual_income": "第三方画像的收入标签进入 L1 时**已经是金额区间**（如「20-30万」），"
-    "把该区间当作标签原文**如实写入**即可，**不得**自行换算或推算金额。"
-    "没有该收入标签时，按职业、现有车辆、消费与居住描述**综合推断**，客户几乎不会直说。",
-    "age": "从工作年限、家庭阶段、说话内容推断区间；有明确年龄表述时优先用精确值。",
-    "knowledge_of_mengshi": "只看客户对我方品牌/车型的表述（提问深度、比价口径、"
-    "是否已了解配置），**不得**用其他品牌的信息判断。",
-    "electronic_ecosystem": "只看客户自述或截图中出现的手机品牌，"
-    "**不得**由职业、收入、年龄反推。",
-    # ---- v3.2 竞品类四字段：彼此**极易互串**，逐条指明边界（description 没写这层）。
-    "intended_model": "客户**自己在考虑购买**的车型，或主动向销售问起的那台。"
-    "**不得**把客户随口一提或拿来比较的品牌/车型写进这里——那些归 `competing_*`。",
-    "competing_brand": "客户**拿来与目标车比较**的其它车企品牌（含客户自有旧车品牌）。"
-    "「我也看了 XX」「比 XX 便宜」→ 此字段。与 `intended_model` 的区别是"
-    "「他在考虑买的」还是「他拿来比的」。",
-    "competing_model": "与 `competing_brand` 同口径，落到**具体车型**（如「豹8」「坦克700」）。"
-    "品牌与车型分不清时，两个字段可同时给值，不要硬拆。",
-    "test_driven_models": "客户明确说**已经试驾/开过**的车型（本方的或别家的都算），"
-    "可多个。只是「看过」「了解过」不算试驾。",
-    "brand_concerns": "客户对**本方品牌**（试驾的那台 / 顾问推销的那台）明确说出的担忧"
-    "——保值率、质量、售后、续航等。**不得**把对竞品的吐槽写进这里。",
-}
-"""契约描述里**没有写明**取证范围的字段，在此补一句来源方向。
-
-**这不是通道硬绑定矩阵。** 逐字段 × 逐通道的绑定矩阵方案经评估后搁置（设计文档
-「通道矩阵暂不落地、只作研究稿」）；这里只给**契约没给线索的字段**补一句该看哪里、
-不该看哪里，而不是替它决定看哪几路渠道。
-
-键必须是**取证字段**的字段名（契约字段或编外字段），由
-:func:`field_inference_guide` 与用例共同把关。"""
-
-
 def field_inference_guide() -> str:
     """渲染《目标字段清单》：全部字段的键、名称、类型与**契约原文口径**。
 
@@ -1290,6 +1297,10 @@ def field_inference_guide() -> str:
     与 :func:`enum_key_guide` 同法：**由契约快照生成，不手抄**。编外字段在此追加一节，
     口径同样逐字取自登记表（原先的契约原文），并在每行标出「不回传」。
     """
+    # 取证方向的正文已随 SPEC 规则迁入 ``rules/texts/spec.txt``。这里按字段取，
+    # 不再持有第二份：常量与正文各写一份，正是「改一处漏一处」的老问题。
+    notes = rules.render.field_notes(stage="extract")
+    extra_scopes = rules.render.field_note_extra_scopes(stage="extract")
     lines = ["## 目标字段清单（默认全部覆盖，确实无关的可留空）", ""]
     current: str | None = None
     for entry in nc.RAW_CONFIGS:
@@ -1302,9 +1313,13 @@ def field_inference_guide() -> str:
         field_type = entry.get("field_type") or "text"
         description = (entry.get("description") or "").strip()
         lines.append(f"- `{key}`（{name}，{field_type}）：{description}")
-        note = FIELD_SOURCE_NOTES.get(key)
+        note = notes.get(key)
         if note:
             lines.append(f"  - 取证范围：{note}")
+        extra = extra_scopes.get(key)
+        if extra:
+            names = "、".join(f"`{item}`" for item in extra)
+            lines.append(f"  - 本条口径同样适用于：{names}")
 
     # ---- 画像卡字段：不在 Notes 契约里，但产出回传体的分析区块
     lines.append("")
@@ -1314,9 +1329,13 @@ def field_inference_guide() -> str:
         field_type = inf.field_type_of(key)
         description = inf.description_of(key)
         lines.append(f"- `{key}`（{name}，{field_type}）：{description}")
-        note = FIELD_SOURCE_NOTES.get(key)
+        note = notes.get(key)
         if note:
             lines.append(f"  - 取证范围：{note}")
+        extra = extra_scopes.get(key)
+        if extra:
+            names = "、".join(f"`{item}`" for item in extra)
+            lines.append(f"  - 本条口径同样适用于：{names}")
 
     # ---- 编外字段：照样取证，但不回传（契约里已经没有它们，不列出来模型就不会去找）
     lines.append("")
@@ -1326,9 +1345,13 @@ def field_inference_guide() -> str:
         field_type = inf.field_type_of(key)
         description = inf.description_of(key)
         lines.append(f"- `{key}`（{name}，{field_type}）：{description}")
-        note = FIELD_SOURCE_NOTES.get(key)
+        note = notes.get(key)
         if note:
             lines.append(f"  - 取证范围：{note}")
+        extra = extra_scopes.get(key)
+        if extra:
+            names = "、".join(f"`{item}`" for item in extra)
+            lines.append(f"  - 本条口径同样适用于：{names}")
     return "\n".join(lines)
 
 
@@ -1720,6 +1743,8 @@ def _basis_of(raw: dict) -> str:
 
 def _projection_context(claims) -> dict:
     """从断言账本读投影所需的旁证（原文级事实，不从字段值反推）。"""
+    from customer_profile.rules.clusters import consistency as consistency_rules
+
     deregistered = False
     old_car = False
     for claim in claims:
@@ -1732,31 +1757,74 @@ def _projection_context(claims) -> dict:
             # **「无」不是旧车证据**：客户原话「目前无车」「没有旧车」时 L1 仍可能给出
             # ``old_car_model="无"``。只看「属性出现过」会把首购客户改写成换购，
             # 卡片上凭空多出一条「购车性质：换购」。占位取值一律不算凭据。
-            if not _is_placeholder_value(claim.value):
-                old_car = True
+            #
+            # **下单词也不是旧车证据**（CONSIST-04 同口径）：含小订/大定的拥车断言
+            # 在 a2 段被整条拒收，但它若先在这里立了「有旧车」，CONSIST-01 仍会把
+            # 购车性质改写成换购——旁证必须与断言过滤看同一件事。
+            if _is_placeholder_value(claim.value):
+                continue
+            if any(phrase in text for phrase in consistency_rules.DEPOSIT_PHRASES):
+                continue
+            old_car = True
         if claim.attribute == "trade_in_requirement" and ("有旧车" in text or "置换" in text):
             old_car = True
     return {"company_deregistered": deregistered, "has_old_car_evidence": old_car}
 
 
-def _registry_only_candidates(candidates: list[dict]) -> list[dict]:
-    """``thin`` 档的候选集收窄：只留**登记档能撑腰**的字段，与 :func:`_registry_only` 同口径。"""
-    label = proj.TIER_LABEL[proj.REGISTRY]
+def _thin_keeps(channels: list[str], basis: str) -> bool:
+    """``thin`` 档保留判据（P2 口径）：按**来源档位 + 字段置信档**判，不读证据文本。
+
+    保留三种字段：
+
+    1. **有登记档渠道支撑**——不论置信档。登记档是销售本人确认或系统留痕，取值可回溯；
+    2. **第三方画像数据高/事实档**——v3.2 起采购的商用画像在无一手记录时是唯一可靠
+       信源（见 :attr:`proj.PREDICTION`），该档本就不该被 thin 排除；
+    3. **无渠道但非低置信**——``record_channel`` 为空但 L1 自评 fact/inferred_high。
+
+    其余（仅社交自呈现、仅公开登记查询、低置信推断）一律不留：thin 案没有一手记录
+    可供核对，宁可少写。``inferred_low`` 是「已降级、待人工确认」的档，不满足上述任一
+    条时不留。
+
+    **旧实现的缺陷**（2026-10-28 修复）：原判据在 ``reasoning_detail.evidence`` 里找
+    「人工/系统登记」标签，但证据位自 2026-10-19 可读性整改起只写「渠道：原文」，
+    全量 87 案 1234 条 Notes 里命中数为 0——thin 档被整批清空，只剩单独追加的姓名。
+    """
+    if proj.REGISTRY in {proj.CHANNEL_TIER.get(ch) for ch in channels if ch}:
+        return True
+    if basis == proj.INFERRED_LOW:
+        return False
+    if not any(channels):
+        return True
+    return any(proj.CHANNEL_TIER.get(ch) == proj.PREDICTION for ch in channels if ch)
+
+
+def _thin_keep_candidates(candidates: list[dict]) -> list[dict]:
+    """``thin`` 档的候选集收窄：与 :func:`_thin_keeps` 同口径，按选项的来源档与置信档判。"""
     kept: list[dict] = []
     for entry in candidates:
         options = entry.get("options") or []
-        if any(label in str(option.get("tier") or "") for option in options):
+        if any(
+            _thin_keeps(
+                [str(option.get("channel") or "").strip()],
+                str(option.get("basis") or proj.FACT),
+            )
+            for option in options
+        ):
             kept.append(entry)
     return kept
 
 
-def _registry_only(updates: list[dict]) -> list[dict]:
-    """``thin`` 档的保守口径：只保留**登记档**坐实的字段。"""
-    label = proj.TIER_LABEL[proj.REGISTRY]
+def _thin_keep_updates(
+    updates: list[dict], channels_by_attr: dict[str, list[str]], basis_by_attr: dict[str, str]
+) -> list[dict]:
+    """``thin`` 档的 Notes 收窄：只留 :func:`_thin_keeps` 判为可留的字段。"""
     kept: list[dict] = []
     for entry in updates:
-        evidence = (entry.get("reasoning_detail") or {}).get("evidence") or []
-        if any(label in str(item) for item in evidence):
+        key = str(entry.get("attribute_key") or "")
+        if _thin_keeps(
+            channels_by_attr.get(key) or [],
+            basis_by_attr.get(key) or proj.FACT,
+        ):
             kept.append(entry)
     return kept
 
@@ -1779,10 +1847,26 @@ def _blank_value(value) -> bool:
     return False
 
 
+def _disabled_rule_ids() -> tuple[str, ...]:
+    """``RULES_DISABLED`` 的运行时取值（单条规则灰度 / 回滚）。
+
+    代码节点保持纯函数便于离线回放与单测，因此这里**惰性**读配置：测试与回放不构造
+    ``Settings`` 也不受影响。读取失败按「没有关闭任何规则」处理——灰度开关写错不该
+    让整条管线停摆。投影段与 gate 段共用这一处读取，两段才关得掉同一条规则。
+    """
+    try:
+        from ..settings import get_settings
+
+        return get_settings().disabled_rule_ids
+    except Exception:
+        return ()
+
+
 def project_claims(claims_json, tier: str = "sufficient") -> dict:
     """L2 投影层（纯代码，0 token）：断言账本 → 规范事实 + Notes 更新项。
 
-    ``tier`` 来自 L4 分诊：``sufficient`` 走事实流程；``thin`` 只输出登记档坐实的字段；
+    ``tier`` 来自 L4 分诊：``sufficient`` 走事实流程；``thin`` 只输出登记档 / 第三方
+    画像高置信 / 无渠道高置信三类字段（见 :func:`_thin_keeps`）；
     ``empty`` 不产出任何断言（保守模板，``端到端方案.md`` §3.6）。
     """
     claims, _ = _claims_payload(claims_json)
@@ -1846,7 +1930,11 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
                 confidence=_num(raw.get("confidence")),
             )
         )
-    result = proj.project(ledger, context=_projection_context(ledger))
+    result = proj.project(
+        ledger,
+        context=_projection_context(ledger),
+        disabled_rules=_disabled_rule_ids(),
+    )
 
     updates = result.notes_updates
     # 姓名条目在任何档位都保留：「未知」或白名单来源的真名都必须交代给销售，
@@ -1855,18 +1943,21 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
     if tier == "empty":
         updates = name_updates
     elif tier != "sufficient":
-        kept = _registry_only(updates)
+        channels_by_attr: dict[str, list[str]] = {}
+        for item in ledger:
+            channels_by_attr.setdefault(item.attribute, []).append(item.channel)
+        kept = _thin_keep_updates(updates, channels_by_attr, result.basis)
         updates = kept + [u for u in name_updates if u not in kept]
 
-    # 候选集必须与 updates **同口径**：``thin`` 档刻意只留登记档坐实的字段，
-    # 若兜底仍按全量候选裁决，它就能把该档排除掉的非登记字段重新写回去——
+    # 候选集必须与 updates **同口径**：``thin`` 档刻意收窄到登记档 / 第三方画像高置信 /
+    # 无渠道高置信三类，若兜底仍按全量候选裁决，它就能把该档排除掉的字段重新写回去——
     # 那等于让兜底绕过了分诊层的保守约束。因此候选集也跟着 tier 收窄。
     # ``covered`` 把「L1 已给结论的字段」排除在补全之外，其余契约字段成为缺字段候选（R2）。
     candidates = proj.build_l2_candidates(ledger, result, covered={c.attribute for c in ledger})
     if tier == "empty":
         candidates = []
     elif tier != "sufficient":
-        candidates = _registry_only_candidates(candidates)
+        candidates = _thin_keep_candidates(candidates)
 
     return {
         "facts_json": json.dumps(result.facts, ensure_ascii=False, default=str),
@@ -1888,7 +1979,272 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
         "empty_claims": len(empty_claim_names),
         "empty_claim_names": json.dumps(sorted(set(empty_claim_names)), ensure_ascii=False),
         "tier": tier,
+        # 规则留痕（追加输出，不改既有产物形状）。M2 起由投影层的 code 通道规则写入，
+        # checker 通道自 M5 起追加。下游按 ``rule_id / attribute / action`` 统计
+        # 命中与动作分布（设计 §8）。
+        "rule_trace_json": json.dumps(
+            result.rule_trace, ensure_ascii=False, default=str
+        ),
     }
+
+
+async def enum_map(
+    facts_json="{}",
+    notes_updates_json="[]",
+    to_confirm_json="[]",
+    candidates_json="[]",
+    basis_json="{}",
+    llm=None,
+    templates=None,
+    enabled=None,
+    template_name: str = "customer_profile_pipeline__pipeline_enum_map",
+    node_ref=None,
+) -> dict:
+    """L2 枚举语义映射节点：把「有信息但格式不对」的枚举取值换成合法键。
+
+    与 checker 节点（:func:`rule_check`）同形而方向相反：checker 只判不补，本节点只补
+    不判。**失败一律不抛**——调用异常、解析失败、模型返回空，都退回今天的「保留原值 +
+    转确认」，管线不因这一步中断（规则层不能成为新单点）。
+
+    关闭开关（``ENUM_MAPPING_ENABLED``，缺省 false）时在**发起调用之前**返回，产物逐
+    字节原样透传：开关的意义就是省钱，走到调用那一步再判断等于没关。
+    """
+    facts = _loads_object(facts_json)
+    notes = _loads_list(notes_updates_json)
+    to_confirm = _loads_list(to_confirm_json)
+    candidates = _loads_list(candidates_json)
+    basis = _loads_object(basis_json)
+
+    def _dump(value) -> str:
+        return json.dumps(value, ensure_ascii=False, default=str)
+
+    def _out(
+        status: str,
+        *,
+        applied: list | None = None,
+        new_facts=None,
+        new_notes=None,
+        new_confirm=None,
+        new_candidates=None,
+        new_traces: list | None = None,
+        calls: int = 0,
+        error: str = "",
+        unmapped: int = 0,
+    ) -> dict:
+        final_facts = facts if new_facts is None else new_facts
+        final_notes = notes if new_notes is None else new_notes
+        # **只交本节点自己的 trace**（ENUM-02）。上游 ``L2_PROJECT`` 的 trace 原样转发
+        # 会让 ``scripts/rules_report.py`` 在两个节点上各收一次，投影层规则被重复计数。
+        # 下游没有任何节点读本节点的 ``rule_trace_json``，因此这里不存在断链。
+        final_traces = list(new_traces or [])
+        return {
+            "facts_json": _dump(final_facts),
+            "facts_readable": rdb.readable_facts(final_facts),
+            "notes_updates_json": _dump(final_notes),
+            "notes_count": len(final_notes),
+            "to_confirm_json": _dump(to_confirm if new_confirm is None else new_confirm),
+            "candidates_json": _dump(candidates if new_candidates is None else new_candidates),
+            # 映射**不动置信档**：语义映射是一次有依据的猜测，不是客户原话。升档会把
+            # 「模型替你改的写法」伪装成已坐实的事实。
+            "basis_json": _dump(basis),
+            "rule_trace_json": _dump(final_traces),
+            "enum_map_status": status,
+            "enum_map_mapped": len(applied or ()),
+            "enum_map_unmapped": unmapped,
+            "enum_map_calls": calls,
+            "enum_map_error": error,
+        }
+
+    if not enum_mapping.enabled(enabled):
+        return _out("disabled")
+    groups = enum_mapping.collect(facts, notes)
+    if not groups:
+        return _out("no_candidate")
+    if llm is None:
+        return _out("failed", error="未注入 LLM 客户端")
+
+    # 1) 先吃缓存：同批里「已婚有子女」出现十几次，只该问一次；
+    #    跨案复用也靠它，缓存键带合法键集合摘要，契约一变自动失效。
+    accepted, remaining = enum_mapping.load_cached(groups)
+    calls = 0
+    error = ""
+    if remaining:
+        prompt = enum_mapping.build_prompt(template_name, remaining, templates)
+        try:
+            verdict = await llm.llm_call(
+                prompt, expect_json=True, max_attempts=1, node_ref=node_ref
+            )
+        except Exception as exc:  # noqa: BLE001 —— 失败不阻断是本通道的定义
+            verdict = None
+            error = str(exc)[:200]
+        calls = 1
+        reviewed, _dropped = enum_mapping.review(verdict, remaining)
+        # 「无法映射」的否定结论也写缓存：同一个值不该在下一案再烧一次调用。
+        enum_mapping.remember(remaining, reviewed)
+        accepted.update(reviewed)
+
+    result = enum_mapping.apply_mappings(
+        facts, notes, to_confirm, candidates, accepted
+    )
+
+    # 2) 映射之后仍有非法取值（含契约缺口「微信」）→ 必须出现在 to_confirm 里，
+    #    且理由写成真人可读的话：不得出现规则编号或内部键名（docs/README.md 硬约束）。
+    new_confirm = list(result["to_confirm"])
+    leftovers = _illegal_enum_values(result["facts"], result["notes"])
+    known = {
+        str(entry.get("attribute_key"))
+        for entry in new_confirm
+        if isinstance(entry, dict)
+    }
+    for attribute, values in leftovers.items():
+        entry = next(
+            (
+                item
+                for item in new_confirm
+                if isinstance(item, dict) and item.get("attribute_key") == attribute
+            ),
+            None,
+        )
+        if entry is None:
+            new_confirm.append(
+                {
+                    "attribute_key": attribute,
+                    "candidates": values,
+                    "reason": enum_mapping.UNMAPPED_REASON,
+                    "suggested_action": enum_mapping.UNMAPPED_ACTION,
+                }
+            )
+        else:
+            entry["reason"] = enum_mapping.UNMAPPED_REASON
+            entry["suggested_action"] = enum_mapping.UNMAPPED_ACTION
+            if not entry.get("candidates"):
+                entry["candidates"] = values
+
+    return _out(
+        # 调用失败时如实报 ``failed``：产物照常透传（失败不阻断），但状态必须让
+        # 跑批统计看得到这一步没干活——报 ``ok`` 会把「映射没跑成」伪装成「没有可映射项」。
+        "failed" if error else "ok",
+        applied=result["applied"],
+        new_facts=result["facts"],
+        new_notes=result["notes"],
+        new_confirm=new_confirm,
+        new_candidates=result["candidates"],
+        new_traces=[trace.asdict() for trace in result["traces"]],
+        calls=calls,
+        error=error,
+        unmapped=sum(len(items) for items in leftovers.values()),
+    )
+
+
+async def fallback_verdict(
+    candidates_json="[]",
+    facts_readable="",
+    llm=None,
+    templates=None,
+    template_name: str = "",
+    min_tokens: int | None = None,
+    node_ref=None,
+) -> dict:
+    """L2 兜底裁决的取数节点：候选非空时问一次模型，其余情况零成本返回。
+
+    三件事按顺序发生（每一件都是实测倒逼出来的，不是设计偏好）：
+
+    1. **候选为空 → 不发起调用**。归档 148 次兜底调用里 35 次的候选清单本来就是空的，
+       这些调用稳定换来 ``{"verdicts": []}``（7 token）。下发语料里这类空调用占了两成，
+       全是白烧的钱，而且它们让「空结论」这个信号失去意义。
+    2. **输出量下限只在候选非空时生效**（:data:`L2_FALLBACK_MIN_TOKENS`）。同样的 7 token，
+       候选为 0 时是正确答案、候选为 30 时是截断——同一个数字两种含义，静态阈值表达不了，
+       所以判据是「候选数 × 输出量」而非单纯的输出量。异常触发既有重试语义。
+    3. **失败一律不抛**（与 checker / 枚举映射同一骨架）。返回 ``{"verdicts": []}`` 让
+       ``L2_APPLY`` 原样并入（等于「兜底没意见」），状态如实记 ``failed``。做成 llm 节点
+       时失败会阻塞整棵下游子树，把「兜底没干活」升级成「整案失败」——这正是本次改造
+       要拆掉的那个单点。
+
+    **缺字段整批不补的老问题未解**（见 ``docs/遗留问题清单.md`` L-019）：一次调用里
+    既有可裁决条目又有 ``missing`` 条目时，模型常常只做前者，后者一条都不填。已试过
+    按批拆成两次调用与按 6/4/2 条切块两种做法，前者无效（补全仍为 0，输入 token 涨到
+    4 倍），后者有效但成本不可接受（每案 6–11 次调用），**均已回退**。当前保持单次调用。
+    """
+    candidates = _loads_list(candidates_json)
+
+    def _out(status: str, verdict="{}", *, calls: int = 0, error: str = "") -> dict:
+        return {
+            # 下游 ``L2_APPLY`` 读的就是这个键，且它必须是**字符串**（契约不变）。
+            "result": verdict if isinstance(verdict, str) else json.dumps(
+                verdict, ensure_ascii=False, default=str
+            ),
+            "fallback_status": status,
+            "fallback_calls": calls,
+            "fallback_error": error,
+            "candidate_count": len(candidates),
+        }
+
+    empty = json.dumps({"verdicts": []}, ensure_ascii=False)
+    if not candidates:
+        return _out("no_candidate", empty)
+    if llm is None:
+        return _out("failed", empty, error="未注入 LLM 客户端")
+
+    from ..templates import TemplateRepository
+
+    repository = templates or TemplateRepository()
+    prompt = repository.render(
+        template_name or L2_FALLBACK_TEMPLATE,
+        {"arg1": candidates_json, "arg2": facts_readable},
+    )
+    try:
+        verdict = await llm.llm_call(
+            prompt,
+            system=SYSTEM_TEXT,
+            expect_json=True,
+            min_completion_tokens=L2_FALLBACK_MIN_TOKENS if min_tokens is None else min_tokens,
+            # 没有它，本节点的每次尝试都不会进 ``request_attempts``——闸门触发过没有、
+            # 重试了几次、为什么失败，全都没处查（llm 节点原本天然有）。
+            node_ref=node_ref,
+        )
+    except Exception as exc:  # noqa: BLE001 —— 失败不阻断是本节点的定义
+        return _out("failed", empty, calls=1, error=str(exc)[:200])
+    return _out("ok", verdict, calls=1)
+
+
+def _illegal_enum_values(facts, notes) -> dict[str, list[str]]:
+    """映射之后**仍归不到合法键**的枚举取值，按字段聚合（占位串不计）。
+
+    判据必须与 :func:`customer_profile.enum_mapping._needs_mapping` **同口径**：本地就能
+    翻的取值（展示名 ``本科`` → ``bachelor``、旧键别名、跨字段路由）在回写出口会被修好，
+    把它们报成「无法归入可选范围」是**误报**——销售会照着这条提示去核对一个本就正确的
+    字段（2026-10-28 实测：``education=本科`` 被误报）。
+    """
+    out: dict[str, list[str]] = {}
+
+    def _scan(attribute: str, value) -> None:
+        attribute = str(attribute or "")
+        if not attribute or not inf.is_enum(attribute):
+            return
+        legal = inf.legal_keys(attribute)
+        for item in hard_rules.enum_values(value):
+            if not item or item in legal:
+                continue
+            if hard_rules.is_placeholder(item):
+                continue
+            # 与送检前的过滤**同判据**（`_needs_mapping`）：本地能翻的、占位串、
+            # 换字段能救的、废弃键形态都不该报「无法归入可选范围」——它们各自有归属，
+            # 报了只会让销售去核对一基本就正确的字段（2026-10-28 实测：`本科`、
+            # `首购`、`暂无置换需求` 都被误报）。契约缺口例外：本地也翻不了，且业务方
+            # 需要知道缺键，必须报。
+            if not enum_mapping._is_contract_gap(attribute, item):
+                if not enum_mapping._needs_mapping(attribute, item):
+                    continue
+            bucket = out.setdefault(attribute, [])
+            if item not in bucket:
+                bucket.append(item)
+
+    for attribute, value in (facts or {}).items():
+        _scan(attribute, value)
+    for entry in notes or ():
+        if isinstance(entry, dict):
+            _scan(entry.get("attribute_key"), entry.get("attribute_value"))
+    return out
 
 
 def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
@@ -1969,21 +2325,21 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
 
 
 def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
-    """L2 审查核验层（纯代码，0 token）：对 L1/L2 产出做合规性复核（v3 设计稿 §3、§7-5）。
+    """L2 审查核验层（纯代码，0 token）：对 L1/L2 产出做合规性复核，并**执行**判决。
 
-    原「汇聚层」的产出职责已上移到 L1，本层的职责改为**审查**。四条机器判据，逐条对应
-    一个真实错误类型：
+    原实现只记 ``issue``——判出违规照样进最终 Notes，蓝图 §2.2 称之为「能判但不拦」。
+    M3 起四条判据由 :mod:`customer_profile.rules.clusters` 产出动作，本函数交给
+    统一执行器落地：
 
-    1. **无效占位清除**：`attribute_value` 是「未提供 / 无 / 暂无」这类占位串的 Notes 直接
-       去除。v2.1 的坏味道是「看着有值、点进去是『未提供』」——那等于没填，还占一个字段位。
-    2. **枚举合法性**：枚举字段的取值须是契约合法键。归不到且**未降级**的记 issue（该
-       取值既不能用、也没标低置信，属漏网的硬伤）。
-    3. **无锚点 fact**：`basis=fact` 的 Notes 其证据须能指向原文（`quote`）或来源是登记档。
-       指不出来的 `fact` 是「编造的确定性」。
-    4. **证据位自指**：`evidence` 里出现「推断为…」这类结论型措辞即记 issue（v3 接口一）。
+    1. **无效占位清除**（HARD-01）：整条删除。占位串看着有值、点进去没内容，等于没填。
+    2. **枚举合法性**（HARD-02）：非法且未降级的，把该条目的置信度降为 0.5。
+       保留取值而不是删除——归不到键的往往就是客户原话（P3 规则 d 的口径）。
+    3. **无锚点 fact**（HARD-03）：``fact`` 却指不出原文、也不是登记档的，同样降置信。
+       这是「编造的确定性」的出口闸门。
+    4. **证据位自指**（EXPR-02）：把「推断为…」这类结论从证据位里摘掉，条目本身保留。
 
-    **只做能代码判定的部分**，语义类问题留痕交人工复核——不新起一次 LLM（设计稿 §7-5
-    「能写成代码的不交给提示词」）。
+    **判据与 ``validate_l3`` 共用一份实现**（``rules.clusters.hard.is_unbacked_fact``
+    与同一张登记档渠道表）：此前两处各写一份，改一处漏一处。
     """
     try:
         updates = json.loads(notes_updates_json) if isinstance(notes_updates_json, str) else list(
@@ -1993,109 +2349,237 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
         updates = []
     if not isinstance(updates, list):
         updates = []
+    updates = [entry for entry in updates if isinstance(entry, dict)]
+
     facts = _loads_object(facts_json)
     basis = _loads_object(basis_json)
+    table = rules.default()
+    disabled = _disabled_rule_ids()
+    if disabled:
+        table = table.without(disabled)
+    state = rules.NotesState(
+        notes=[dict(entry) for entry in updates],
+        facts=facts,
+        basis=dict(basis),
+    )
+
+    gate_actions = hard_rules.check_notes(
+        state.notes,
+        basis=state.basis,
+        is_conclusion=proj._is_conclusion,
+        enum_known=inf.is_enum,
+        legal_keys=inf.legal_keys,
+        display_to_key=inf.display_to_key,
+        is_enum_key=inf.looks_like_enum_key,
+    ) + expression_rules.check_evidence(
+        state.notes, is_conclusion=proj._is_conclusion
+    ) + expression_rules.check_prose_keys(
+        state.notes, is_placeholder=inf.is_english_placeholder
+    ) + expression_rules.check_placeholders(
+        state.notes, is_placeholder=inf.is_english_placeholder
+    )
+    gate_actions = [item for item in gate_actions if item.rule in table]
+    applied = rules.apply(state, gate_actions, max_rounds=1, registry=table)
+
+    # ---- 留痕：仍按旧口径出四条 issue 明细（跨批次对账要靠它），
+    #      另把逐条动作写进 rule_trace（带规则编号与版本）。
+    by_rule: dict[str, list[dict]] = {}
+    for trace in applied.traces:
+        if not trace.reason.startswith("[unstable]"):
+            by_rule.setdefault(trace.rule_id, []).append(trace.asdict())
+
+    def _detail(rule_id: str) -> list[dict]:
+        return (by_rule.get(rule_id) or [])[:10]
 
     issues: list[dict] = []
-    kept: list[dict] = []
-    placeholder_removed: list[str] = []
-    enum_illegal: list[dict] = []
-    unbacked: list[dict] = []
-    self_ref: list[dict] = []
-
-    for entry in updates:
-        if not isinstance(entry, dict):
-            continue
-        key = str(entry.get("attribute_key") or "")
-        value = entry.get("attribute_value")
-        # ---- 1 无效占位清除
-        # 「未知」对姓名字段是**明确的业务结论**（查遍记录也没有可靠姓名），不是占位串，
-        # 不得按占位删掉——用户口径：查不到姓名时固定输出「未知」。
-        if (
-            key != "customer_name"
-            and (key in PLACEHOLDER_VALUES or _is_placeholder_value(value))
-        ):
-            placeholder_removed.append(key)
-            continue
-        detail = entry.get("reasoning_detail") or {}
-
-        # ---- 2 枚举合法性（未降级的非法取值）
-        if inf.is_enum(key) and str(basis.get(key) or "") != proj.INFERRED_LOW:
-            for item in _enum_values(value):
-                if inf.legal_keys(key) and item not in inf.legal_keys(key):
-                    if not inf.display_to_key(key, item):
-                        enum_illegal.append({"attribute": key, "value": item})
-
-        # ---- 3 无锚点 fact
-        if str(basis.get(key) or "") == proj.FACT:
-            evidence = [str(x) for x in (detail.get("evidence") or [])]
-            has_quote = any("：" in e or e for e in evidence)
-            channel = str(entry.get("record_channel") or "").strip()
-            if not evidence and not channel:
-                unbacked.append({"attribute": key, "value": value})
-
-        # ---- 4 证据位自指
-        for snippet in detail.get("evidence") or []:
-            if proj._is_conclusion(str(snippet)) or "推断为" in str(snippet):
-                self_ref.append({"attribute": key, "evidence": snippet})
-
-        kept.append(entry)
-
-    if placeholder_removed:
-        issues.append({"rule": "placeholder_removed", "count": len(placeholder_removed),
-                       "detail": placeholder_removed[:10]})
-    if enum_illegal:
-        issues.append({"rule": "enum_illegal", "count": len(enum_illegal),
-                       "detail": enum_illegal[:10]})
-    if unbacked:
-        issues.append({"rule": "unbacked_fact", "count": len(unbacked), "detail": unbacked[:10]})
-    if self_ref:
-        issues.append({"rule": "evidence_self_reference", "count": len(self_ref),
-                       "detail": self_ref[:10]})
+    if by_rule.get("HARD-01"):
+        issues.append(
+            {
+                "rule": "placeholder_removed",
+                "count": len(by_rule["HARD-01"]),
+                "detail": [item["attribute"] for item in _detail("HARD-01")],
+            }
+        )
+    if by_rule.get("HARD-02"):
+        issues.append(
+            {
+                "rule": "enum_illegal",
+                "count": len(by_rule["HARD-02"]),
+                "detail": _detail("HARD-02"),
+            }
+        )
+    if by_rule.get("HARD-03"):
+        issues.append(
+            {
+                "rule": "unbacked_fact",
+                "count": len(by_rule["HARD-03"]),
+                "detail": _detail("HARD-03"),
+            }
+        )
+    if by_rule.get("ENUM-01"):
+        issues.append(
+            {
+                "rule": "enum_illegal_after_downgrade",
+                "count": len(by_rule["ENUM-01"]),
+                "detail": [item["attribute"] for item in _detail("ENUM-01")],
+            }
+        )
+    if by_rule.get("EXPR-02"):
+        issues.append(
+            {
+                "rule": "evidence_self_reference",
+                "count": len(by_rule["EXPR-02"]),
+                "detail": _detail("EXPR-02"),
+            }
+        )
+    # ---- 英文残留治理：旧口径出裸串（跨批次对账沿用），编号与新 trace 一一对应。
+    if by_rule.get("EXPR-01"):
+        issues.append(
+            {
+                "rule": "english_in_prose",
+                "count": len(by_rule["EXPR-01"]),
+                "detail": [item["attribute"] for item in _detail("EXPR-01")],
+            }
+        )
+    if by_rule.get("EXPR-03"):
+        issues.append(
+            {
+                "rule": "english_placeholder_removed",
+                "count": len(by_rule["EXPR-03"]),
+                "detail": [item["attribute"] for item in _detail("EXPR-03")],
+            }
+        )
 
     return {
-        "notes_updates_json": json.dumps(kept, ensure_ascii=False, default=str),
-        "notes_count": len(kept),
+        "notes_updates_json": json.dumps(state.notes, ensure_ascii=False, default=str),
+        "notes_count": len(state.notes),
         "issue_json": json.dumps(issues, ensure_ascii=False, default=str),
-        "issue_count": sum(i["count"] for i in issues),
-        "placeholder_removed": len(placeholder_removed),
-        "enum_illegal": len(enum_illegal),
-        "unbacked_fact": len(unbacked),
+        "issue_count": sum(int(item["count"]) for item in issues),
+        "placeholder_removed": len(by_rule.get("HARD-01") or ()),
+        "enum_illegal": len(by_rule.get("HARD-02") or ()),
+        # 降级后仍非法、整条剔除的条数（ENUM-01）。与 ``enum_illegal`` 分开计数：
+        # 前者是「拦下了、取值还在」，后者是「取值已删」，对账时含义不同。
+        "enum_illegal_after_downgrade": len(by_rule.get("ENUM-01") or ()),
+        "unbacked_fact": len(by_rule.get("HARD-03") or ()),
+        # 英文残留治理的两条规则合并计数：对下游与报告而言它们是一件事
+        # （「这一条 Notes 曾带英文形态、已处置」），分开数会让规则报表出现两条永远同涨的线。
+        "english_rule_hits": len(by_rule.get("EXPR-01") or ())
+        + len(by_rule.get("EXPR-03") or ()),
+        # 降级后的字段置信档：L3 据此区分「已明确降级的软值」与「写成确定值却没依据」。
+        # 不往外传的话，本层的降级对表达层不可见，等于只改了一半。
+        "basis_json": json.dumps(state.basis, ensure_ascii=False, default=str),
+        "rule_trace_json": json.dumps(
+            [trace.asdict() for trace in applied.traces], ensure_ascii=False, default=str
+        ),
     }
 
 
-PLACEHOLDER_VALUES: frozenset[str] = frozenset(
-    {
-        "未提供", "未提供。", "无", "暂无", "未知", "不详", "不明", "不清楚",
-        "无数据", "未获取", "未获取到", "没有", "无信息", "未说明", "无内容",
-        "-", "--", "——", "N/A", "n/a", "null", "None", "未知渠道",
+async def rule_check(
+    facts_json="{}",
+    notes_updates_json="[]",
+    basis_json="{}",
+    llm=None,
+    templates=None,
+) -> dict:
+    """checker 通道的取数节点：把可读化事实与本簇规则说明交给模型问一次。
+
+    **它本身不做判断**，判断在模型；这里的职责是「在正确的时候不发起调用」
+    （开关关闭 / 没有可比对的字段 / 预算耗尽），以及把失败压成状态而不是异常。
+    真正的落地在 :func:`rule_apply`——两段分开是为了让「问了什么」与「改了什么」
+    在留痕里能分开查。
+
+    ``llm`` 与 ``templates`` 由运行时注入（``rt.extra['code_functions']``）。不注入时
+    按「未启用」处理：单测与离线回放可以直接调这个函数而不碰网络。
+    """
+    return await rule_checker.run_check(
+        facts_json=facts_json,
+        notes_updates_json=notes_updates_json,
+        basis_json=basis_json,
+        llm=llm,
+        templates=templates,
+        disabled=_disabled_rule_ids(),
+    )
+
+
+def rule_apply(verdict_json="{}", brief_json="[]", notes_updates_json="[]", basis_json="{}") -> dict:
+    """checker 通道的落地节点：复核模型裁决，通过的那部分交给统一执行器。
+
+    ``rule_check`` 与 ``rule_apply`` 之间**只传裁决与送检清单**，不传事实：复核需要
+    的全部信息都在清单里（字段必须属于该规则作用域）。这样即使两步之间隔了一次
+    重试，也不会出现「按旧清单复核新裁决」的错配。
+
+    模型给的动作**只有降级与转确认**，复核见
+    :func:`customer_profile.rules.checker.recheck`。丢弃的条目逐条留痕——被丢的原因
+    本身是「模型这条规则理解得不对」的证据，统计时能看出该不该继续挂它。
+    """
+    briefs = rule_checker._payload(brief_json)
+    if not isinstance(briefs, list):
+        briefs = []
+    gate_actions, dropped = rule_checker.recheck(verdict_json, briefs, stage="project")
+
+    table = rules.default()
+    disabled = _disabled_rule_ids()
+    if disabled:
+        table = table.without(disabled)
+    gate_actions = [item for item in gate_actions if item.rule in table]
+
+    state = rules.NotesState(
+        notes=_loads_list(notes_updates_json),
+        basis=_loads_object(basis_json),
+    )
+    applied = rules.apply(state, gate_actions, max_rounds=1, registry=table)
+    return {
+        "notes_updates_json": json.dumps(state.notes, ensure_ascii=False, default=str),
+        "notes_count": len(state.notes),
+        # 降级会改置信档，必须往外传：下游读的是这一份 basis，不是审查层那份。
+        "basis_json": json.dumps(state.basis, ensure_ascii=False, default=str),
+        "checker_applied": len(applied.traces),
+        "checker_dropped_json": json.dumps(dropped, ensure_ascii=False, default=str),
+        "rule_trace_json": json.dumps(
+            [trace.asdict() for trace in applied.traces], ensure_ascii=False, default=str
+        ),
     }
-)
-"""**占位串**：看着像有值、实际什么都没说的 `attribute_value`（v2.1 实测：「点进去
-发现内容是『未提供』」）。这些字段应整条去除，而不是留在 Notes 里占位。"""
+
+
+def _loads_list(value) -> list:
+    """把 JSON 串/序列归一成 list；解析不动一律空列表。"""
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return []
+        return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+    return []
+
+
+QUOTE_MARKERS: tuple[str, ...] = hard_rules.QUOTE_MARKERS
+"""证据串里「这是原文」的标记。**正身在** :mod:`customer_profile.rules.clusters.hard`
+（HARD-03 的数据表），此处保留别名供既有调用点沿用。"""
+
+
+def _has_quote_marker(text: str) -> bool:
+    """实现见 :func:`customer_profile.rules.clusters.hard.has_quote_marker`。"""
+    return hard_rules.has_quote_marker(text)
+
+
+PLACEHOLDER_VALUES: frozenset[str] = hard_rules.PLACEHOLDER_VALUES
+"""**占位串**：看着像有值、实际什么都没说的 ``attribute_value``。
+
+正身已随 HARD-01 迁到 :mod:`customer_profile.rules.clusters.hard`；此处保留别名，
+因为 ``_projection_context`` 判「旧车『无』不是证据」时也用它。
+"""
 
 
 def _is_placeholder_value(value) -> bool:
-    """取值本身是占位串（含空白归零后）时返回真。"""
-    if isinstance(value, str):
-        return value.strip() in PLACEHOLDER_VALUES
-    return False
+    """实现见 :func:`customer_profile.rules.clusters.hard.is_placeholder`。"""
+    return hard_rules.is_placeholder(value)
 
 
 def _enum_values(value) -> list[str]:
-    """把枚举字段的取值拆成待校验的字符串列表（多选用 ``||``，结构化取 ``key``）。"""
-    if isinstance(value, (list, tuple)):
-        out: list[str] = []
-        for item in value:
-            out.extend(_enum_values(item))
-        return out
-    if isinstance(value, str):
-        if "||" in value:
-            return [p.strip() for p in value.split("||") if p.strip()]
-        return [value.strip()] if value.strip() else []
-    if isinstance(value, dict):
-        return [str(value.get("key"))] if value.get("key") else []
-    return [str(value)] if value not in (None, "") else []
+    """实现见 :func:`customer_profile.rules.clusters.hard.enum_values`。"""
+    return hard_rules.enum_values(value)
 
 
 def _loads_object(value) -> dict:
@@ -2115,6 +2599,7 @@ def _loads_object(value) -> dict:
 # 商机等级定级（独立 LLM 环节，业务专家《客户商机等级定级规范》）
 # ====================================================================
 
+# rule: LEVEL-04 信息不足是「待识别」，不是 C
 LEVEL_UNKNOWN = "待识别"
 """规范里的「信息不足」结论。**不是 C 级**（R08）——不能因为缺证据就认定客户不想买。"""
 
@@ -2279,6 +2764,7 @@ def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
             "parse_ok": True,
         }
 
+    # rule: LEVEL-02 线索邀约阶段最高 A
     # ---- 2 阶段上限
     if stage_code == LEVEL_STAGE_LEAD and level == "H":
         level = "A"
@@ -2310,6 +2796,7 @@ def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
     homework = _clean(assess.get("homework_evidence"))
     steps = [str(s).strip() for s in _as_list(assess.get("steps")) if str(s).strip()]
 
+    # rule: LEVEL-03 H/A 须同时具备需求、时间、行动三类证据
     # ---- 3 证据门槛（R05）：H/A 必须同时具备需求、时间、行动三类证据
     if level in ("H", "A"):
         has_demand = bool(dim_evidence.get("want_to_buy"))
@@ -2771,6 +3258,7 @@ WORKFLOW = WorkflowDef(
                 "basis_json",
                 "notes_count",
                 "tier",
+                "rule_trace_json",
             ),
             function=f"customer_profile.workflows.{SLUG}:project_claims",
         ),
@@ -2780,27 +3268,32 @@ WORKFLOW = WorkflowDef(
         make_node(
             L2_FALLBACK,
             "L2 兜底裁决",
-            "llm",
+            "code",
             after=(L2_PROJECT,),
             inputs={
-                "arg1": (L2_PROJECT, "candidates_json"),
+                "candidates_json": (L2_PROJECT, "candidates_json"),
                 # 缺字段补全必须**看着事实表**做（v2.1 R2）：缺字段条目没有候选值，
                 # 不给事实表就是让它凭空编——那正是「受约束的裁决者」要避免的。
                 # 只读可读化事实：原样 ``facts_json`` 里的英文键（``annual_income``）
                 # 与英文枚举键会被抄进 ``reason``，而 ``reason`` 是给销售看的。
-                "arg2": (L2_PROJECT, "facts_readable"),
+                "facts_readable": (L2_PROJECT, "facts_readable"),
             },
-            outputs=("result",),
-            template=L2_FALLBACK_TEMPLATE,
-            output="result",
-            expect_json=True,
-            system_text=SYSTEM_TEXT,
+            outputs=(
+                # ``result`` 仍是「裁决的 JSON 串」：下游 ``L2_APPLY`` 的绑定与
+                # ``apply_l2_verdict`` 的入参形态一行不动，改造只发生在节点内部。
+                "result",
+                "fallback_status",
+                "fallback_calls",
+                "fallback_error",
+                "candidate_count",
+            ),
+            function=f"customer_profile.workflows.{SLUG}:fallback_verdict",
         ),
         make_node(
             L2_APPLY,
             "L2 终判并入",
             "code",
-            after=(L2_FALLBACK, L2_PROJECT),
+            after=(L2_FALLBACK,),
             inputs={
                 "candidates_json": (L2_PROJECT, "candidates_json"),
                 "verdict_json": (L2_FALLBACK, "result"),
@@ -2815,6 +3308,41 @@ WORKFLOW = WorkflowDef(
             ),
             function=f"customer_profile.workflows.{SLUG}:merge_l2_verdict",
         ),
+        # ---------------------------------------------------------- 枚举语义映射（1 次受约束 LLM，缺省关闭）
+        # L1 稳定给出契约外的中文自由文本（「已婚有子女」「分期」），投影层归不了就保留
+        # 原值、回写出口再整条剔除——静默掉字段。本节点把「有信息但格式不对」的取值
+        # 一次性映射成合法键，**在 gate 与回写之前**落定，因此 facts 与 Notes 同时受益。
+        # 必须接在 ``L2_APPLY`` 之后：兜底写进 Notes 的中文原值在投影层还不存在。
+        # 关闭开关（ENUM_MAPPING_ENABLED，缺省 false）时在发起调用前即返回，零 token。
+        make_node(
+            L2_ENUM_MAP,
+            "枚举语义映射",
+            "code",
+            after=(L2_APPLY,),
+            inputs={
+                "facts_json": (L2_PROJECT, "facts_json"),
+                "notes_updates_json": (L2_APPLY, "notes_updates_json"),
+                "to_confirm_json": (L2_PROJECT, "to_confirm_json"),
+                "candidates_json": (L2_PROJECT, "candidates_json"),
+                "basis_json": (L2_PROJECT, "basis_json"),
+            },
+            outputs=(
+                "facts_json",
+                "facts_readable",
+                "notes_updates_json",
+                "notes_count",
+                "to_confirm_json",
+                "candidates_json",
+                "basis_json",
+                "rule_trace_json",
+                "enum_map_status",
+                "enum_map_mapped",
+                "enum_map_unmapped",
+                "enum_map_calls",
+                "enum_map_error",
+            ),
+            function=f"customer_profile.workflows.{SLUG}:enum_map",
+        ),
         # ---------------------------------------------------------- L2 审查核验层（纯代码审核，0 token）
         # 承接 v3 设计稿 §3：对 L1/L2 产出做合规性复核——枚举合法、无效占位清除、
         # Notes 与 facts 同源、fact 必有锚点、证据位不自指。**能代码判定的先由代码修**。
@@ -2822,11 +3350,13 @@ WORKFLOW = WorkflowDef(
             L2_REVIEW,
             "L2 审查核验层",
             "code",
-            after=(L2_APPLY,),
+            after=(L2_ENUM_MAP,),
             inputs={
-                "notes_updates_json": (L2_APPLY, "notes_updates_json"),
-                "facts_json": (L2_PROJECT, "facts_json"),
-                "basis_json": (L2_PROJECT, "basis_json"),
+                # 三类输入同源：映射节点同时改写了 facts 与 notes，gate 必须在**映射之后**
+                # 的那一版上判，否则会拿映射前的中文原值判合法/降级，等于白改。
+                "notes_updates_json": (L2_ENUM_MAP, "notes_updates_json"),
+                "facts_json": (L2_ENUM_MAP, "facts_json"),
+                "basis_json": (L2_ENUM_MAP, "basis_json"),
             },
             outputs=(
                 "notes_updates_json",
@@ -2836,8 +3366,62 @@ WORKFLOW = WorkflowDef(
                 "placeholder_removed",
                 "enum_illegal",
                 "unbacked_fact",
+                # 本层执行判决后可能改变字段置信档（HARD-02/03 降级），必须往外传：
+                # 不传的话表达层看到的仍是降级前的档位，等于只改了一半。
+                "basis_json",
+                "rule_trace_json",
             ),
             function=f"customer_profile.workflows.{SLUG}:review_notes",
+        ),
+        # ---------------------------------------------------------- 商机等级定级（独立 1 次 LLM）
+        # 业务专家的《客户商机等级定级规范》要求「尽可能详细分析全部客户数据」并给出可追溯
+        # 的推理链。这条字段对销售的重要程度断档领先，因此**不随 L1 的字段清单一起产出**，
+        # 而是单开一次调用、独占全量原始记录与足量输出篇幅，再由代码做规则收口。
+        # ---------------------------------------------------------- checker 通道（1 次受约束 LLM）
+        # 语义判断写成规则表太硬、放进提示词又没人执行，交模型做一次「有没有违反」的
+        # 问答。**用 code 节点承载而不是 llm 节点**：调度器对失败节点会阻塞整棵下游子树，
+        # 做成 llm 节点的话一次调用失败就会挡掉定级、表达与回传——规则层成了新单点。
+        # 关闭开关（RULE_CHECKER_ENABLED，缺省 false）时在发起调用前即返回，零 token。
+        make_node(
+            RULE_CHECK,
+            "规则复核（checker）",
+            "code",
+            after=(L2_REVIEW,),
+            inputs={
+                "facts_json": (L2_ENUM_MAP, "facts_json"),
+                "notes_updates_json": (L2_REVIEW, "notes_updates_json"),
+                "basis_json": (L2_REVIEW, "basis_json"),
+            },
+            outputs=(
+                "verdict_json",
+                "brief_json",
+                "checker_status",
+                "checker_calls",
+                "checker_error",
+                "notes_updates_json",
+            ),
+            function=f"customer_profile.workflows.{SLUG}:rule_check",
+        ),
+        make_node(
+            RULE_APPLY,
+            "规则裁决并入",
+            "code",
+            after=(RULE_CHECK,),
+            inputs={
+                "verdict_json": (RULE_CHECK, "verdict_json"),
+                "brief_json": (RULE_CHECK, "brief_json"),
+                "notes_updates_json": (RULE_CHECK, "notes_updates_json"),
+                "basis_json": (L2_REVIEW, "basis_json"),
+            },
+            outputs=(
+                "notes_updates_json",
+                "notes_count",
+                "basis_json",
+                "checker_applied",
+                "checker_dropped_json",
+                "rule_trace_json",
+            ),
+            function=f"customer_profile.workflows.{SLUG}:rule_apply",
         ),
         # ---------------------------------------------------------- 商机等级定级（独立 1 次 LLM）
         # 业务专家的《客户商机等级定级规范》要求「尽可能详细分析全部客户数据」并给出可追溯
@@ -2847,10 +3431,10 @@ WORKFLOW = WorkflowDef(
             LEVEL_INPUT,
             "商机定级输入装配",
             "code",
-            after=(L2_REVIEW,),
+            after=(RULE_APPLY,),
             inputs={
                 "records_json": (L0_RECORDS, "records_json"),
-                "facts_json": (L2_PROJECT, "facts_json"),
+                "facts_json": (L2_ENUM_MAP, "facts_json"),
             },
             outputs=("output", "stage", "stage_label", "section_count", "chars"),
             function=f"customer_profile.workflows.{SLUG}:build_level_input",
@@ -2874,7 +3458,7 @@ WORKFLOW = WorkflowDef(
             after=(LEVEL_ASSESS, LEVEL_INPUT),
             inputs={
                 "records_json": (L0_RECORDS, "records_json"),
-                "facts_json": (L2_PROJECT, "facts_json"),
+                "facts_json": (L2_ENUM_MAP, "facts_json"),
                 "assess_json": (LEVEL_ASSESS, "result"),
                 "stage": (LEVEL_INPUT, "stage"),
             },
@@ -2904,8 +3488,11 @@ WORKFLOW = WorkflowDef(
                 "phone": (START, "phone_number"),
                 "batch_id": (START, "batch_id"),
                 "facts_json": (LEVEL_APPLY, "facts_json"),
-                "basis_json": (L2_PROJECT, "basis_json"),
-                "notes_updates_json": (L2_REVIEW, "notes_updates_json"),
+                # 取**审查层**的 basis 而不是投影层的：审查层会把非法枚举与无锚点
+                # fact 降为 inferred_low，L3 校验据此区分「已降级的软值」与「写成确定值
+                # 却没依据」——取投影层那份的话，审查层的降级对表达层不可见。
+                "basis_json": (RULE_APPLY, "basis_json"),
+                "notes_updates_json": (RULE_APPLY, "notes_updates_json"),
                 "claims_json": (L1_INJECT, "claims_json"),
             },
             outputs=("result1", "section_count", "sections_missing",
@@ -2932,7 +3519,7 @@ WORKFLOW = WorkflowDef(
                 "phone": (START, "phone_number"),
                 "batch_id": (START, "batch_id"),
                 "facts_json": (LEVEL_APPLY, "facts_json"),
-                "notes_updates_json": (L2_REVIEW, "notes_updates_json"),
+                "notes_updates_json": (RULE_APPLY, "notes_updates_json"),
                 # 表达层的 section 产物（resistances / emotion_state / overall_tag 从这里取）。
                 # ``result1`` 是**字符串**：由 callback_build 内部二次解析。
                 "express_json": (PRODUCTION, "result1"),
@@ -3005,8 +3592,12 @@ CODE_SPECS: dict[str, dict] = {
     L1_LOCALIZE: {"main": "localize_claims", "renames": {}},
     L1_INJECT: {"main": "inject_deterministic", "renames": {}},
     L2_PROJECT: {"main": "project_claims", "renames": {}},
+    L2_ENUM_MAP: {"main": "enum_map", "renames": {}},
+    L2_FALLBACK: {"main": "fallback_verdict", "renames": {}},
     L2_APPLY: {"main": "merge_l2_verdict", "renames": {}},
     L2_REVIEW: {"main": "review_notes", "renames": {}},
+    RULE_CHECK: {"main": "rule_check", "renames": {}},
+    RULE_APPLY: {"main": "rule_apply", "renames": {}},
     LEVEL_INPUT: {"main": "build_level_input", "renames": {}},
     LEVEL_APPLY: {"main": "apply_level", "renames": {}},
 }

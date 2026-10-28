@@ -29,7 +29,7 @@
 
 ```
 python scripts/run_baseline.py \
-  --out-dir experiments/abexperiments \
+  --out-dir experiments \
   --batch-id A-pipeline-<日期> \
   --workflow-id customer_profile_pipeline \
   --transcript-cache-dir experiments/transcript_cache
@@ -44,9 +44,10 @@ python scripts/run_baseline.py \
 `customer_profile.workflows.customer_profile_entry` 加回 `workflows/__init__.py`
 的 `WORKFLOW_MODULES`，再分两种场合：
 
-- **阶段一/二期间不必重跑。** 用已冻结的历史批次
-  `experiments/batches/baseline-39-dsv41-noThink/` 作为对照物即可——那时两臂共用的
-  `customer_profile_production` 还没被改。该批次自带 `trace.db`，**不依赖留痕库**，
+- **阶段一/二期间不必重跑。** 原则上用已冻结的历史批次
+  `batches/baseline-39-dsv41-noThink/` 作为对照物即可——那时两臂共用的
+  `customer_profile_production` 还没被改。**该批次已于 2026-10-27 清理（另行手工归档）**，
+  需要时先从归档恢复。它自带 `trace.db`，**不依赖留痕库**，
   因此入口臂历史运行被清除后它仍完整可读。
 - **阶段三落地后必须重跑一次。** 阶段三要改 production，一改基线臂也跟着变。此时在
   **分支点 commit** 的 worktree 里跑，保证基线臂拿到的是改动前的 production：
@@ -62,8 +63,9 @@ git worktree add ../cp-baseline <dev-business-opt01 的 HEAD>
 --transcript-cache-dir experiments/transcript_cache
 ```
 
-不给会默认推导成 `<out-dir>/transcript_cache`，即
-`experiments/abexperiments/transcript_cache`——一个空目录，会让 39 段录音**全部重新识别**
+不给会默认推导成 `<out-dir>/transcript_cache`。`--out-dir` 用缺省或 `experiments` 时
+推导结果正好是共享的 `experiments/transcript_cache`；若把 `--out-dir` 指到别处而没有
+显式给这个参数，就会推到那个目录下的空缓存，让 39 段录音**全部重新识别**
 （单条 20–30 分钟）。共享缓存与批次同级、两臂共用：AUC 识别与被优化的工作流逻辑无关，
 同一段录音结果必然相同，不共用只是白花几小时并引入无意义的差异。
 
@@ -116,12 +118,12 @@ git worktree add ../cp-baseline <dev-business-opt01 的 HEAD>
 ## 5. 产物与目录
 
 ```
-experiments/abexperiments/
-├─ batches/
-│  ├─ B-baseline-<日期>/  基线臂（结构与 experiments/batches/ 完全一致）
-│  └─ A-pipeline-<日期>/  业务测试臂
-└─ compare/               逐案比对表与指标汇总
+experiments/batches/
+├─ B-baseline-<日期>/  基线臂（与其它批次结构完全一致）
+└─ A-pipeline-<日期>/  业务测试臂
 ```
+
+逐案比对表与指标汇总由 `scripts/compare_batches.py` 直接产出到指定路径，不另建目录。
 
 单批次的内部结构（`manifest.json` / `summary.md` / `trace.db` / `runs/<号码>/…`）与
 `../../docs/runbooks/基线实验.md` §4 逐字相同——两臂跑的是同一个脚本，没有第二套归档格式。

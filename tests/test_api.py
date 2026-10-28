@@ -98,6 +98,83 @@ async def test_workflow_list_has_counts(client):
     assert by_id[hci.WORKFLOW_ID]["node_count"] == 4
 
 
+async def test_rule_catalog_lists_every_registered_rule(client):
+    """规则清单页的数据源：登记表里每一条都要出现，且带上展示所需的派生值。
+
+    断言不写死条数——规则会随时增删，写死只会让这条测试在正常改动时报红。
+    真正要钉住的是三件事：
+    ``rules`` 与登记表逐条对应、编号不重复、prompt 通道的规则必须带着正文
+    （页面的核心诉求就是「每条规则的内容是什么」，正文缺失等于页面白给）。
+    """
+    from customer_profile.rules import default as default_rules
+
+    body = (await client.get("/rules")).json()
+    rules = body["rules"]
+    registry = default_rules()
+
+    assert body["total"] == len(rules) == len(registry.all())
+    assert body["active"] == len(registry.active())
+    assert [row["id"] for row in rules] == [rule.id for rule in registry.all()], (
+        "接口返回的规则与登记表顺序或内容不一致"
+    )
+    assert len({row["id"] for row in rules}) == len(rules)
+
+    for row in rules:
+        assert row["title"] and row["cluster_title"]
+        if "prompt" in row["channels"]:
+            assert row["text"].strip(), f"{row['id']} 是 prompt 通道却没有正文"
+
+
+async def test_rule_catalog_reports_code_landings(client):
+    """登记了却没有落点是配置错误；接口必须如实返回空列表，而不是编一个。"""
+    rules = (await client.get("/rules")).json()["rules"]
+    by_id = {row["id"]: row for row in rules}
+    # checker 通道的规则至少有一处代码落点（checker.py 里的标记注释）
+    assert by_id["INCOME-01"]["landings"]
+    assert all(item["path"] and item["line"] > 0 for item in by_id["INCOME-01"]["landings"])
+
+
+async def test_standards_endpoint_serves_field_rows(client):
+    """参考标准表页的数据源：只读、逐字段、派生列现算。
+
+    与 ``/rules`` 一样不依赖服务实例，因此服务未就绪也要答得出来——它是排查时
+    「这个字段该填成什么样」的第一入口。
+    """
+    body = (await client.get("/standards")).json()
+
+    assert body["total"] == len(body["rows"])
+    assert body["contract_signature"]
+    # 两类准入模式的计数之和必须等于总行数：漏一类会静默让页面统计对不上
+    assert sum(body["by_admission"].values()) == body["total"]
+
+    keys = [row["attribute_key"] for row in body["rows"]]
+    assert len(set(keys)) == len(keys)
+    assert "deal_level" not in keys  # 画像卡字段按约定不纳入
+
+    row = next(item for item in body["rows"] if item["attribute_key"] == "customer_name")
+    assert row["code"] == "F01"
+    assert row["name"] == "客户姓名"
+    assert row["admission_label"] == "事实提取"
+    assert row["category"] == "基础身份"
+
+
+async def test_rules_mark_field_bound_rows_without_dropping_them(client):
+    """单字段规则已收进参考标准表，但 ``/rules`` 仍返回全量。
+
+    接口若在这里删行，``total`` 就与登记表对不上，而规则本身并没退役——
+    页面过滤是视图层的事，数据层不该假装那些规则不存在。
+    """
+    from customer_profile.rules import default as default_rules
+
+    body = (await client.get("/rules")).json()
+    assert body["total"] == len(default_rules().all())
+
+    by_id = {row["id"]: row for row in body["rules"]}
+    assert by_id["SPEC-02"]["in_reference_standards"] is True
+    assert by_id["SPEC-17"]["in_reference_standards"] is False
+    assert by_id["HARD-01"]["in_reference_standards"] is False
+
+
 # ---------------------------------------------------------------- 提交与查询
 
 

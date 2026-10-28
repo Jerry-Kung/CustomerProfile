@@ -1,0 +1,387 @@
+"""金标准与取证方向簇（prompt 通道）。
+
+这簇的规则**不以判据形式存在**，而是以提示词正文形式递给 L1：它回答「这个字段该看哪里、
+不该拿什么去猜」。原先这 14 句散在一个字典常量里（``pipeline.FIELD_SOURCE_NOTES``），
+既不能单独关闭，也无法在留痕里指出「这条口径来自哪条规则」。
+
+``scope`` 允许挂**多个字段**（2026-10-28 起，SPEC-17/18）：同一条口径要同时约束
+拥车、置换与现车信息几个字段时，逐字段登记会把同一段正文抄六遍，改一处漏五处。
+多字段规则在《目标字段清单》里贴着它声明的每个字段各渲染一次。
+
+正文在 ``rules/texts/spec.txt``，本模块只声明身份。渲染入口是
+:func:`customer_profile.rules.render.field_notes`——按字段取正文，供《目标字段清单》
+逐行贴着字段渲染。
+
+**``SPEC-01`` 空着**：那是 M5 的 checker 通道（收入与职业口径的语义复核），
+不走提示词。编号不因空缺而顺移，退役与占位都不复用编号。
+"""
+
+from __future__ import annotations
+
+from ..registry import Rule
+
+CLUSTER = "spec"
+
+RULES: tuple[Rule, ...] = (
+    Rule(
+        id="SPEC-02",
+        version=1,
+        title="计划时间的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("planned_purchase_time",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="从沟通记录里的时间表述推断（「这个月想定」「过完年再看」），**不得**用手机号归属地、社媒截图、企业信息去猜。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-03",
+        version=1,
+        title="跟进时段的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("follow_up_frequency",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="从沟通记录本身推断（客户回复的快慢、主动催问的频率、约定下次联系的口径）。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-04",
+        version=1,
+        title="沟通节奏的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("communication_rhythm",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="从多轮沟通的整体形态归纳（是否当场答复、是否反复改口、是否拖延不回），原文里不会有对应句子。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-05",
+        version=1,
+        title="性格偏好的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("personality_and_preferences",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="从客户在沟通中关心什么、怎么问、怎么砍价归纳，原文里不会有对应句子。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-06",
+        version=1,
+        title="沟通风格的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("emotion",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="从客户在沟通中的语气与反应归纳，原文里不会有对应句子。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-07",
+        version=1,
+        title="年收入的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("annual_income",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="第三方画像的收入标签进入 L1 时**已经是金额区间**（如「20-30万」），把该区间当作标签原文**如实写入**即可，**不得**自行换算或推算金额。没有该收入标签时，按职业、现有车辆、消费与居住描述**综合推断**，客户几乎不会直说。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-08",
+        version=1,
+        title="年龄的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("age",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="从工作年限、家庭阶段、说话内容推断区间；有明确年龄表述时优先用精确值。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-09",
+        version=1,
+        title="了解猛士的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("knowledge_of_mengshi",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="只看客户对我方品牌/车型的表述（提问深度、比价口径、是否已了解配置），**不得**用其他品牌的信息判断。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-10",
+        version=1,
+        title="常用电子设备的生态的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("electronic_ecosystem",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="只看客户自述或截图中出现的手机品牌，**不得**由职业、收入、年龄反推。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-11",
+        version=1,
+        title="意向车型的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("intended_model",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="客户**自己在考虑购买**的车型，或主动向销售问起的那台。客户已对某台车「小订」的，也算这一台——小订是购车动作，说明客户在考虑买它。**不得**把客户随口一提或拿来比较的品牌/车型写进这里——那些归 `competing_*`。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-12",
+        version=1,
+        title="对比品牌的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("competing_brand",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="客户**拿来与目标车比较**的其它车企品牌（含客户自有旧车品牌）。「我也看了 XX」「比 XX 便宜」→ 此字段。与 `intended_model` 的区别是「他在考虑买的」还是「他拿来比的」。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-13",
+        version=1,
+        title="对比车型的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("competing_model",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="与 `competing_brand` 同口径，落到**具体车型**（如「豹8」「坦克700」）。品牌与车型分不清时，两个字段可同时给值，不要硬拆。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-14",
+        version=1,
+        title="试驾过的车型的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("test_driven_models",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="客户明确说**已经试驾/开过**的车型（本方的或别家的都算），可多个。只是「看过」「了解过」不算试驾。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-15",
+        version=1,
+        title="本品牌顾虑的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("brand_concerns",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="客户对**本方品牌**（试驾的那台 / 顾问推销的那台）明确说出的担忧——保值率、质量、售后、续航等。**不得**把对竞品的吐槽写进这里。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_note_isolated_per_field",
+        ),
+    ),
+    Rule(
+        id="SPEC-16",
+        version=1,
+        title="消费等级的档位方向",
+        content_kind="spec",
+        channels=("prompt", "code"),
+        scope=("consumption_level",),
+        stages=("extract", "project"),
+        severity="warn",
+        default_action="annotate",
+        message_internal="消费等级按 1-6 档取值，**数字越大代表消费水平越高**（1 档最低、6 档最高）。第三方标签给出的「N档消费」直接取该档位，**不得**把方向读反。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/test_callback_build.py::test_consumption_level_summary_carries_band_note",
+            "tests/test_callback_build.py::test_other_fields_summary_has_no_band_note",
+        ),
+    ),
+    Rule(
+        id="SPEC-17",
+        version=1,
+        title="小订/大定不是拥车",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=(
+            "old_car_model",
+            "owned_brand_model",
+            "owned_car_age",
+            "trade_in_model",
+            "current_vehicle_info",
+        ),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="「小订（小定）」指客户已付一笔小额定金占名额、可退；「大定（大订）」指客户已付正式定金、锁定排产。**两者都是购车阶段的下单动作，不是拥车**：小订/大定对应的车型**不得**写进本字段，**不得**据此写 `trade_in_model`，也**不得**据此判断客户「有车」或「要置换」。只有客户明确说自己在开、持有或准备卖掉的车辆，才是自用车。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_deposit_phrases_never_land_in_ownership_fields",
+        ),
+    ),
+    Rule(
+        id="SPEC-18",
+        version=1,
+        title="小订/大定对应的看车进度",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("viewing_progress",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="客户已对某车型付了「小订」的，记「深度考虑」；已付「大定」的，记「已经下定」。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_rules_cover_exactly_the_migrated_fields",
+        ),
+    ),
+)
+
+CONSUMPTION_LEVEL_NOTE = "（消费等级分{bands}档，数字越大代表消费水平越高）"
+"""回写时拼在「AI 分析总结」末尾的固定注释（``SPEC-16`` 的 code 通道）。
+
+档位数**从契约推导**（``legal_keys('consumption_level')``），不写死：契约增删档位时
+回写给销售的说明随之变化，不会出现「注释说 6 档、枚举却有 7 个键」这种自相矛盾。
+拼接处见 :func:`customer_profile.callback_build.build_basic_notes_updates`。
+"""
+
+FIELD_OF: dict[str, str] = {rule.scope[0]: rule.id for rule in RULES}
+"""``{字段: 规则编号}`` 反向索引：排查「这句取证口径来自哪条规则」时用它。
+
+多字段规则（SPEC-17/18）只以**第一个字段**建索引——排查时先定位到规则编号，
+再看 :attr:`Rule.scope` 的全部字段。
+"""
