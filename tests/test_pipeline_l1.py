@@ -485,15 +485,63 @@ def test_project_claims_notes_shape_matches_baseline():
     assert set(notes[0]["reasoning_detail"]) == {"summary", "steps", "evidence", "confidence"}
 
 
-def test_project_claims_thin_tier_keeps_registry_only():
-    """thin 档只输出登记档坐实的字段；姓名的「未知」交代不受档位影响。"""
+def test_thin_keep_predicate_covers_six_arms():
+    """thin 保留判据按「来源档位 + 字段置信档」判（P2 口径），六条分支逐条钉住。
+
+    旧判据在 ``reasoning_detail.evidence`` 里找「人工/系统登记」标签，而证据位只写
+    「渠道：原文」，全量 87 案 1234 条 Notes 命中 0——thin 档被整批清空。
+    """
+    keep = pipe._thin_keeps
+    # 1 登记档：不论置信档都留（销售本人确认或系统留痕，取值可回溯）
+    assert keep(["客户留存在我方销售数据系统中的信息记录"], "inferred_low")
+    # 2 第三方画像 + 非低置信：v3.2 起商用画像在无一手记录时是唯一可靠信源
+    assert keep(["第三方画像数据"], "inferred_high")
+    # 3 第三方画像 + 低置信：不留
+    assert not keep(["第三方画像数据"], "inferred_low")
+    # 4 无渠道 + 非低置信：留
+    assert keep([""], "inferred_high")
+    # 5 无渠道 + 低置信：不留
+    assert not keep([""], "inferred_low")
+    # 6 仅社交自呈现：不留（thin 案无一手记录可核对，宁可少写）
+    assert not keep(["小红书主页截图信息"], "inferred_high")
+
+
+def test_project_claims_thin_tier_keeps_registry_and_trusted_prediction():
+    """thin 档输出：登记档（含低置信）+ 第三方画像高置信；姓名恒留。"""
     result = pipe.project_claims(
-        claims_json(claim(attribute="occupation", value="教师", record_channel="小红书主页截图信息")),
+        claims_json(
+            claim(attribute="occupation", value="教师", claim_id="c_001",
+                  record_channel="客户留存在我方销售数据系统中的信息记录", basis="inferred_low"),
+            claim(attribute="industry", value="充电桩", claim_id="c_002",
+                  record_channel="第三方画像数据", basis="inferred_high"),
+            claim(attribute="residence_address", value="广州", claim_id="c_003",
+                  record_channel="第三方画像数据", basis="inferred_low"),
+            claim(attribute="license_plate_address", value="深圳", claim_id="c_004",
+                  record_channel="小红书主页截图信息", basis="inferred_high"),
+        ),
         tier="thin",
     )
-    assert result["notes_count"] == 1
-    notes = json.loads(result["notes_updates_json"])
-    assert [n["attribute_key"] for n in notes] == ["customer_name"]
+    keys = [n["attribute_key"] for n in json.loads(result["notes_updates_json"])]
+    assert "customer_name" in keys
+    assert "occupation" in keys, "登记档字段应保留（哪怕置信档低）"
+    assert "industry" in keys, "第三方画像高置信应保留"
+    assert "residence_address" not in keys, "第三方画像低置信不留"
+    assert "license_plate_address" not in keys, "仅社交自呈现不留"
+
+
+def test_thin_tier_empty_channel_claim_goes_to_confirm_not_notes():
+    """空渠道断言在投影层即被判为社交档转 ``to_confirm``，够不着 thin 过滤器的保留臂。"""
+    result = pipe.project_claims(
+        claims_json(
+            claim(attribute="current_vehicle_info", value="无车", claim_id="c_005",
+                  record_channel="", basis="inferred_high"),
+        ),
+        tier="thin",
+    )
+    keys = [n["attribute_key"] for n in json.loads(result["notes_updates_json"])]
+    to_confirm = [e["attribute_key"] for e in json.loads(result["to_confirm_json"])]
+    assert "current_vehicle_info" not in keys
+    assert "current_vehicle_info" in to_confirm
 
 
 def test_project_claims_empty_tier_outputs_only_name():

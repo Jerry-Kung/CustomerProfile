@@ -2,6 +2,29 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-10-28 — thin 档 Notes 整批清空的修复与口径放宽（P2）
+
+UAT 两批次 87 案中 35 案（37%）的 `basic_notes_updates` 只剩 `customer_name` 一条。
+核查确认**不是信息缺失门禁所致**：这 35 案在 `pipeline_l2_review` 的
+`placeholder_removed` / `enum_illegal` / `issue_count` 全为 0，门禁前后条数一致。
+
+**根因**：`_registry_only` 的判据是在 `reasoning_detail.evidence` 字符串里找档位标签
+「人工/系统登记」，而证据位自 2026-10-19 可读性整改起只写「渠道：原文」。全量 1234 条
+Notes 命中数为 0，thin 档被整批清空；`_registry_only_candidates` 同源失效，使 thin 案
+`candidates_json` 全为 `[]`，L2 兜底无从裁决。
+
+**修复与口径**（`customer_profile_pipeline.py`）：
+- 判据改为按渠道档位（`proj.CHANNEL_TIER`）与字段置信档（`result.basis`）判定，不再读证据文本。
+- thin 档保留三类字段（P2 口径）：有登记档渠道支撑（不论置信档）、第三方画像数据的高/事实档、
+  无渠道但非低置信；其余不留。候选集同步收窄。
+- 35 案离线回放（归档 claims 直喂 `project_claims(tier="thin")`）：每案 Notes 由 1.0 条
+  升至 10.1 条，仅 3 案仍只剩姓名（其中 2 案 L1 本就未提取到任何字段）。
+- 测试：`test_project_claims_thin_tier_keeps_registry_only` 重写为 P2 口径；
+  新增 `test_thin_keep_predicate_covers_six_arms` 与空渠道转 `to_confirm` 的用例。
+
+**已知边界**：空渠道断言在投影层即被判社交档转 `to_confirm`，实际够不着 thin 过滤器的
+「无渠道高置信」保留臂；该路径的产出能否到销售侧取决于回传契约，已登记为 L-017。
+
 ## 2026-10-27 — experiments 定位改为功能验证与问题回归
 
 `experiments/` 从「AB 实验专属目录」改为**功能验证与问题回归**场地：存放从 UAT 同步回

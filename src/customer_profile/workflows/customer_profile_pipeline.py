@@ -868,7 +868,8 @@ def triage(records_json) -> dict:
     三档（``端到端方案.md`` §3.6）：
 
     - ``sufficient``：有一手交互（录音/聊天）且有实质内容 → 走事实流程；
-    - ``thin``：只有声明/社交/弱登记/预测 → 保守模板，只输出能坐实的字段；
+    - ``thin``：只有声明/社交/弱登记/预测 → 保守模板，保留登记档、第三方画像高置信
+      与无渠道高置信字段（判据见 :func:`_thin_keeps`）；
     - ``empty``：几乎无数据 → 输出「待补充」骨架，不产生任何具体断言。
 
     **为什么是纯代码而不是一次小调用**：判据是「有哪些渠道、各有多长」，
@@ -1707,24 +1708,60 @@ def _projection_context(claims) -> dict:
     return {"company_deregistered": deregistered, "has_old_car_evidence": old_car}
 
 
-def _registry_only_candidates(candidates: list[dict]) -> list[dict]:
-    """``thin`` 档的候选集收窄：只留**登记档能撑腰**的字段，与 :func:`_registry_only` 同口径。"""
-    label = proj.TIER_LABEL[proj.REGISTRY]
+def _thin_keeps(channels: list[str], basis: str) -> bool:
+    """``thin`` 档保留判据（P2 口径）：按**来源档位 + 字段置信档**判，不读证据文本。
+
+    保留三种字段：
+
+    1. **有登记档渠道支撑**——不论置信档。登记档是销售本人确认或系统留痕，取值可回溯；
+    2. **第三方画像数据高/事实档**——v3.2 起采购的商用画像在无一手记录时是唯一可靠
+       信源（见 :attr:`proj.PREDICTION`），该档本就不该被 thin 排除；
+    3. **无渠道但非低置信**——``record_channel`` 为空但 L1 自评 fact/inferred_high。
+
+    其余（仅社交自呈现、仅公开登记查询、低置信推断）一律不留：thin 案没有一手记录
+    可供核对，宁可少写。``inferred_low`` 是「已降级、待人工确认」的档，不满足上述任一
+    条时不留。
+
+    **旧实现的缺陷**（2026-10-28 修复）：原判据在 ``reasoning_detail.evidence`` 里找
+    「人工/系统登记」标签，但证据位自 2026-10-19 可读性整改起只写「渠道：原文」，
+    全量 87 案 1234 条 Notes 里命中数为 0——thin 档被整批清空，只剩单独追加的姓名。
+    """
+    if proj.REGISTRY in {proj.CHANNEL_TIER.get(ch) for ch in channels if ch}:
+        return True
+    if basis == proj.INFERRED_LOW:
+        return False
+    if not any(channels):
+        return True
+    return any(proj.CHANNEL_TIER.get(ch) == proj.PREDICTION for ch in channels if ch)
+
+
+def _thin_keep_candidates(candidates: list[dict]) -> list[dict]:
+    """``thin`` 档的候选集收窄：与 :func:`_thin_keeps` 同口径，按选项的来源档与置信档判。"""
     kept: list[dict] = []
     for entry in candidates:
         options = entry.get("options") or []
-        if any(label in str(option.get("tier") or "") for option in options):
+        if any(
+            _thin_keeps(
+                [str(option.get("channel") or "").strip()],
+                str(option.get("basis") or proj.FACT),
+            )
+            for option in options
+        ):
             kept.append(entry)
     return kept
 
 
-def _registry_only(updates: list[dict]) -> list[dict]:
-    """``thin`` 档的保守口径：只保留**登记档**坐实的字段。"""
-    label = proj.TIER_LABEL[proj.REGISTRY]
+def _thin_keep_updates(
+    updates: list[dict], channels_by_attr: dict[str, list[str]], basis_by_attr: dict[str, str]
+) -> list[dict]:
+    """``thin`` 档的 Notes 收窄：只留 :func:`_thin_keeps` 判为可留的字段。"""
     kept: list[dict] = []
     for entry in updates:
-        evidence = (entry.get("reasoning_detail") or {}).get("evidence") or []
-        if any(label in str(item) for item in evidence):
+        key = str(entry.get("attribute_key") or "")
+        if _thin_keeps(
+            channels_by_attr.get(key) or [],
+            basis_by_attr.get(key) or proj.FACT,
+        ):
             kept.append(entry)
     return kept
 
@@ -1765,7 +1802,8 @@ def _disabled_rule_ids() -> tuple[str, ...]:
 def project_claims(claims_json, tier: str = "sufficient") -> dict:
     """L2 投影层（纯代码，0 token）：断言账本 → 规范事实 + Notes 更新项。
 
-    ``tier`` 来自 L4 分诊：``sufficient`` 走事实流程；``thin`` 只输出登记档坐实的字段；
+    ``tier`` 来自 L4 分诊：``sufficient`` 走事实流程；``thin`` 只输出登记档 / 第三方
+    画像高置信 / 无渠道高置信三类字段（见 :func:`_thin_keeps`）；
     ``empty`` 不产出任何断言（保守模板，``端到端方案.md`` §3.6）。
     """
     claims, _ = _claims_payload(claims_json)
@@ -1842,18 +1880,21 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
     if tier == "empty":
         updates = name_updates
     elif tier != "sufficient":
-        kept = _registry_only(updates)
+        channels_by_attr: dict[str, list[str]] = {}
+        for item in ledger:
+            channels_by_attr.setdefault(item.attribute, []).append(item.channel)
+        kept = _thin_keep_updates(updates, channels_by_attr, result.basis)
         updates = kept + [u for u in name_updates if u not in kept]
 
-    # 候选集必须与 updates **同口径**：``thin`` 档刻意只留登记档坐实的字段，
-    # 若兜底仍按全量候选裁决，它就能把该档排除掉的非登记字段重新写回去——
+    # 候选集必须与 updates **同口径**：``thin`` 档刻意收窄到登记档 / 第三方画像高置信 /
+    # 无渠道高置信三类，若兜底仍按全量候选裁决，它就能把该档排除掉的字段重新写回去——
     # 那等于让兜底绕过了分诊层的保守约束。因此候选集也跟着 tier 收窄。
     # ``covered`` 把「L1 已给结论的字段」排除在补全之外，其余契约字段成为缺字段候选（R2）。
     candidates = proj.build_l2_candidates(ledger, result, covered={c.attribute for c in ledger})
     if tier == "empty":
         candidates = []
     elif tier != "sufficient":
-        candidates = _registry_only_candidates(candidates)
+        candidates = _thin_keep_candidates(candidates)
 
     return {
         "facts_json": json.dumps(result.facts, ensure_ascii=False, default=str),
