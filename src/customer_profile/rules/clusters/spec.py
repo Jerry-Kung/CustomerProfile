@@ -4,6 +4,10 @@
 不该拿什么去猜」。原先这 14 句散在一个字典常量里（``pipeline.FIELD_SOURCE_NOTES``），
 既不能单独关闭，也无法在留痕里指出「这条口径来自哪条规则」。
 
+``scope`` 允许挂**多个字段**（2026-10-28 起，SPEC-17/18）：同一条口径要同时约束
+拥车、置换与现车信息几个字段时，逐字段登记会把同一段正文抄六遍，改一处漏五处。
+多字段规则在《目标字段清单》里贴着它声明的每个字段各渲染一次。
+
 正文在 ``rules/texts/spec.txt``，本模块只声明身份。渲染入口是
 :func:`customer_profile.rules.render.field_notes`——按字段取正文，供《目标字段清单》
 逐行贴着字段渲染。
@@ -319,6 +323,52 @@ RULES: tuple[Rule, ...] = (
             "tests/test_callback_build.py::test_other_fields_summary_has_no_band_note",
         ),
     ),
+    Rule(
+        id="SPEC-17",
+        version=1,
+        title="小订/大定不是拥车",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=(
+            "old_car_model",
+            "owned_brand_model",
+            "owned_car_age",
+            "trade_in_model",
+            "current_vehicle_info",
+        ),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="「小订（小定）」指客户已付一笔小额定金占名额、可退；「大定（大订）」指客户已付正式定金、锁定排产。**两者都是购车阶段的下单动作，不是拥车**：小订/大定对应的车型**不得**写进本字段，**不得**据此写 `trade_in_model`，也**不得**据此判断客户「有车」或「要置换」。只有客户明确说自己在开、持有或准备卖掉的车辆，才是自用车。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_deposit_phrases_never_land_in_ownership_fields",
+        ),
+    ),
+    Rule(
+        id="SPEC-18",
+        version=1,
+        title="小订/大定的车型归意向与进度",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("intended_model", "viewing_progress"),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal="客户已对某车型「小订」时，该车型写 `intended_model`（客户在考虑买的那台），`viewing_progress` 记「深度考虑」；已下「大定」的记「已经下定」。",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_spec_note_rendered_inline",
+            "tests/rules/test_spec.py::test_spec_rules_cover_exactly_the_migrated_fields",
+        ),
+    ),
 )
 
 CONSUMPTION_LEVEL_NOTE = "（消费等级分{bands}档，数字越大代表消费水平越高）"
@@ -330,4 +380,8 @@ CONSUMPTION_LEVEL_NOTE = "（消费等级分{bands}档，数字越大代表消�
 """
 
 FIELD_OF: dict[str, str] = {rule.scope[0]: rule.id for rule in RULES}
-"""``{字段: 规则编号}`` 反向索引：排查「这句取证口径来自哪条规则」时用它。"""
+"""``{字段: 规则编号}`` 反向索引：排查「这句取证口径来自哪条规则」时用它。
+
+多字段规则（SPEC-17/18）只以**第一个字段**建索引——排查时先定位到规则编号，
+再看 :attr:`Rule.scope` 的全部字段。
+"""

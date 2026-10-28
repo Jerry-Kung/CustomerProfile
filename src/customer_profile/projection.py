@@ -711,6 +711,14 @@ def project(
     )
     _run_rule_actions(result, gate_actions, table)
 
+    # rule: CONSIST-04 小订/大定不是拥车
+    # ---- a2 下单动作过滤：小订/大定的车型不得当作拥车或置换证据
+    #      与 a 段同形——拦的是「这条断言怎么被读的」，不是某个字段的值，因此同样
+    #      在进入分组裁决之前整条拒收。放进来之前拦，CONSIST-01 才不会被它带偏
+    #      （有旧车 ⇒ 换购），否则一条「x700小订客户」会被拦出一条「换购」。
+    kept, deposit_actions = consistency_rules.check_deposit_claims(kept)
+    _run_rule_actions(result, deposit_actions, table)
+
     # ---- b 来源分级：身份字段的弱来源处置
     #      社交自呈现仍降级并转人工确认；**第三方画像标签单独支撑改记 inferred_high**
     #      （v3.2，用户口径：采购的画像数据在无一手记录时是唯一可靠画像信源）。

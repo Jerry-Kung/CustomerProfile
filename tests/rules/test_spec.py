@@ -44,22 +44,31 @@ def test_spec_note_rendered_inline(notes):
 
 
 def test_spec_note_isolated_per_field(notes):
-    """一条规则只作用于自己声明的字段：别的字段不得出现它的正文。"""
+    """一条规则只作用于自己声明的字段：别的字段不得出现它的正文。
+
+    2026-10-28 起 ``scope`` 允许挂多个字段（SPEC-17/18）：断言由「作用域恰好是这一个
+    字段」放宽为「该字段在作用域内」。正文仍只在声明过的字段下渲染。
+    """
     by_id = {rule.id: rule for rule in spec_rules.RULES}
     for field, text in notes.items():
         owners = [rule for rule in by_id.values() if text in rule.message_internal]
         assert len(owners) == 1, f"{text[:12]}… 同时被 {len(owners)} 条规则声明"
-        assert owners[0].scope == (field,)
+        assert field in owners[0].scope
 
 
 # ---------------------------------------------------------------- 迁移一致性
 
 def test_spec_rules_cover_exactly_the_migrated_fields(notes, registry):
-    """迁入字段与登记表里的 SPEC 规则一一对应，不多不少。"""
+    """迁入字段与登记表里的 SPEC 规则一一对应，不多不少。
+
+    多字段规则（SPEC-17/18）按**全部作用域字段**参与比对：只取 ``scope[0]`` 会让
+    它另外声明的字段既不进比对、也不被任何断言覆盖。
+    """
     registered = {
-        rule.scope[0]
+        field
         for rule in registry.active()
         if rule.cluster == "spec" and rule.enables_channel("prompt")
+        for field in rule.scope
     }
     assert registered == set(notes)
 
@@ -69,6 +78,21 @@ def test_spec_fields_are_extraction_fields(notes):
     from customer_profile import internal_fields as inf
 
     assert set(notes) <= set(inf.EXTRACTION_KEYS)
+
+
+def test_deposit_phrases_never_land_in_ownership_fields():
+    """SPEC-17/18 与 CONSIST-04 的同一口径：小订/大定是下单动作，不是拥车。
+
+    代码通道（CONSIST-04）在投影层拒收这类断言，提示词通道（SPEC-17）告诉 L1 别
+    这么读。两通道的对接口径在这里钉一次，任一侧改了词表或字段集合就红。
+    """
+    from customer_profile.rules.clusters import consistency as consistency_rules
+
+    assert {"小订", "小定", "大订", "大定"} <= set(consistency_rules.DEPOSIT_PHRASES)
+    spec17 = next(rule for rule in spec_rules.RULES if rule.id == "SPEC-17")
+    assert set(spec17.scope) - {"intended_model"} <= set(
+        consistency_rules.OWNERSHIP_ATTRIBUTES
+    ) | {"current_vehicle_info"}
 
 
 def test_spec_texts_are_unique_cluster_registered(registry):
@@ -85,9 +109,11 @@ def test_l1_guide_is_unchanged_by_the_migration():
     字符数与哈希都钉住。改这条断言等于改了提示词，必须走业务确认。
 
     2026-10-27 经业务确认追加一条：``SPEC-16`` 消费等级档位方向（8240 → 8327 字符）。
+    2026-10-28 经业务确认追加两条：``SPEC-17`` 小订/大定不是拥车、``SPEC-18`` 小订/
+    大定的车型归意向与进度（8327 → 9345 字符）。
     """
     guide = pipe.l1_guide()
-    assert len(guide) == 8327
+    assert len(guide) == 9345
     assert "取证范围：从沟通记录里的时间表述推断" in guide
     assert "数字越大代表消费水平越高" in guide
     # 标记不得漏进提示词：它们是落点凭据，不是给模型看的内容

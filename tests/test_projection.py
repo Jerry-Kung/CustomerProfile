@@ -385,6 +385,42 @@ def test_replacement_without_evidence_is_withdrawn():
     )
 
 
+def test_deposit_claim_rejected_from_ownership_fields():
+    """小订/大定的车型不是拥车证据（基线 19247201510 的缺陷）。
+
+    原文只有「x700小订客户，今天试驾817做对比」，L1 却给出 ``old_car_model=x700``，
+    L1-1c 又据此推出「有车」「要置换」。这里同时钉两件事：含下单词的断言不得落进
+    拥车/置换字段，且它不能反过来把购车性质带成换购（CONSIST-01 的下游连带）。
+    """
+    result = proj.project(
+        [
+            claim(
+                "old_car_model",
+                "x700",
+                quote="x700小订客户",
+                confidence=0.85,
+            ),
+            claim(
+                "current_vehicle_info",
+                "有车（x700，车龄未知）",
+                basis="inferred_high",
+                basis_of_inference=("客户为x700小订客户",),
+            ),
+            claim(
+                "trade_in_model",
+                "x700",
+                basis="inferred_high",
+                basis_of_inference=("客户为x700小订客户",),
+            ),
+        ],
+        context={},
+    )
+    for attribute in ("old_car_model", "current_vehicle_info", "trade_in_model"):
+        assert attribute not in result.facts
+    assert result.facts.get("purchase_nature") != "replacement"
+    assert sum(r.get("rule") == "f_deposit" for r in result.rejected) == 3
+
+
 def test_deregistered_company_is_not_filled():
     """已注销主体不得当作在职企业（基线 13926073386 的缺陷）。"""
     result = proj.project(

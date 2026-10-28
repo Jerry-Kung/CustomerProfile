@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..actions import Action
 from ..registry import Rule
@@ -54,6 +54,26 @@ RULES: tuple[Rule, ...] = (
         ),
         legacy_codes=("f_deregistered",),
     ),
+    Rule(
+        id="CONSIST-04",
+        version=1,
+        title="小订/大定不是拥车",
+        content_kind="consistency",
+        channels=("code",),
+        scope=("ownership_cluster",),
+        stages=("project",),
+        severity="block",
+        default_action="reject",
+        message_internal="断言原文或推断依据含小订/大定一类下单动作表述，却落到拥车/置换类字段：断言整条拒收",
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster="consistency",
+        tests=(
+            "tests/test_projection.py::test_deposit_claim_rejected_from_ownership_fields",
+            "tests/rules/test_landings.py::test_owned_car_claim_kept_when_not_a_deposit",
+        ),
+    ),
 )
 
 
@@ -63,6 +83,95 @@ RULES: tuple[Rule, ...] = (
 
 NO_OLD_CAR_VALUES: frozenset[str] = frozenset({"无", "没有", "无旧车"})
 """旧车字段里表示「没有旧车」的写法。它们出现时**不构成**换购凭据。"""
+
+DEPOSIT_PHRASES: tuple[str, ...] = (
+    "小订",
+    "小定",
+    "大订",
+    "大定",
+    "下订",
+    "下定",
+    "定金",
+    "意向金",
+    "锁单",
+)
+"""下单动作词：出现即说明说的是「在购车阶段交钱了」，不是「在开 / 持有这台车」。
+
+词表是**封闭**的（业务方 2026-10-28 定稿：先用这一版，后续遇到新说法再加）。它只用于
+「拥车与置换类字段」的断言，不看别的字段——``intended_model`` 里出现小订是正确形态。
+"""
+
+OWNERSHIP_ATTRIBUTES: frozenset[str] = frozenset(
+    {
+        "old_car_model",
+        "owned_brand_model",
+        "owned_car_age",
+        "current_vehicle_info",
+        "trade_in_model",
+        "trade_in_requirement",
+        "purchase_nature",
+    }
+)
+"""「客户本来就有这台车」的语义字段。小订/大定对应的车型不得落到这里。
+
+``purchase_nature`` 在内：模型会由「小订车」推出「要置换」（实测 19247201510 即如此），
+它是同一句误读的下游，必须一并拦。
+"""
+
+
+def check_deposit_claims(
+    claims: Sequence[Any],
+    *,
+    ownership_keys: frozenset[str] = OWNERSHIP_ATTRIBUTES,
+    deposit_phrases: tuple[str, ...] = DEPOSIT_PHRASES,
+) -> tuple[list[Any], list[Action]]:
+    """a 段（CONSIST-04）：小订/大定的车型不得当作拥车或置换证据。
+
+    与 :func:`check_cross_field` 的分工：那条看的是**已落定的 facts**，这条看的是
+    **断言本身**——错在「这句话被读成了什么」，把它放进 facts 再拦已经晚了三步。
+    实测 ``19247201510``：原文只有「x700小订客户」，L1 给出 ``old_car_model=x700``
+    （锚点「x700小订客户」），L1-1c 又据此推出「有车」「要置换」；落进 facts 之后
+    CONSIST-01 会顺势把购车性质改成换购，越拦越实。
+
+    判据看三处：取值、引文（锚点 / 当归原文）、推断依据。第三处不能省——
+    ``19247201510`` 的 ``current_vehicle_info`` 没有锚点，唯一露出「小订」的地方
+    就是它的推断依据「客户为x700小订客户」。
+
+    返回 ``(通过的断言, 动作)``，与 :func:`identity_rules.check_attribution` 同形。
+    """
+    kept: list[Any] = []
+    actions: list[Action] = []
+    for claim in claims:
+        if claim.attribute not in ownership_keys or not _deposit_marked(
+            claim, deposit_phrases
+        ):
+            kept.append(claim)
+            continue
+        actions.append(
+            Action(
+                rule="CONSIST-04",
+                attribute=claim.attribute,
+                action="reject",
+                severity="block",
+                reason="小订/大定是下单动作，不是拥车或置换证据",
+                remove=False,
+                payload={
+                    "attribute": claim.attribute,
+                    "value": claim.value,
+                    "rule": "f_deposit",
+                    "reason": "小订/大定是下单动作，不是拥车或置换证据",
+                },
+            )
+        )
+    return kept, actions
+
+
+def _deposit_marked(claim: Any, phrases: tuple[str, ...]) -> bool:
+    """取值、引文或推断依据里出现下单动作词。"""
+    parts: list[str] = [_text(claim.value), claim.quote or "", claim.source_quote or ""]
+    parts.extend(str(item) for item in (claim.basis_of_inference or ()))
+    text = " ".join(parts)
+    return any(phrase in text for phrase in phrases)
 
 
 def _text(value: Any) -> str:

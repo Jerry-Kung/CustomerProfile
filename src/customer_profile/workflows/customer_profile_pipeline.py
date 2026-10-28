@@ -1689,6 +1689,8 @@ def _basis_of(raw: dict) -> str:
 
 def _projection_context(claims) -> dict:
     """从断言账本读投影所需的旁证（原文级事实，不从字段值反推）。"""
+    from customer_profile.rules.clusters import consistency as consistency_rules
+
     deregistered = False
     old_car = False
     for claim in claims:
@@ -1701,8 +1703,15 @@ def _projection_context(claims) -> dict:
             # **「无」不是旧车证据**：客户原话「目前无车」「没有旧车」时 L1 仍可能给出
             # ``old_car_model="无"``。只看「属性出现过」会把首购客户改写成换购，
             # 卡片上凭空多出一条「购车性质：换购」。占位取值一律不算凭据。
-            if not _is_placeholder_value(claim.value):
-                old_car = True
+            #
+            # **下单词也不是旧车证据**（CONSIST-04 同口径）：含小订/大定的拥车断言
+            # 在 a2 段被整条拒收，但它若先在这里立了「有旧车」，CONSIST-01 仍会把
+            # 购车性质改写成换购——旁证必须与断言过滤看同一件事。
+            if _is_placeholder_value(claim.value):
+                continue
+            if any(phrase in text for phrase in consistency_rules.DEPOSIT_PHRASES):
+                continue
+            old_car = True
         if claim.attribute == "trade_in_requirement" and ("有旧车" in text or "置换" in text):
             old_car = True
     return {"company_deregistered": deregistered, "has_old_car_evidence": old_car}
