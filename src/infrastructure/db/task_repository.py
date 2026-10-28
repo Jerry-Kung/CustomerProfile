@@ -28,7 +28,7 @@ class MySQLTaskRepository:
         db_client: MySQLClient,
         *,
         queue_max_waiting: int = 500,
-        default_retry_policy_version: str = "throughput_first_v1",
+        default_retry_policy_version: str = "single_target_v1",
         logger: logging.Logger | None = None,
     ):
         self._db_client = db_client
@@ -891,12 +891,14 @@ class MySQLTaskRepository:
             workflow_target_clause = (
                 "workflow_target_id = workflow_target_id"
                 if retain_workflow_run
-                else "workflow_target_id = NULL"
+                else "workflow_target_id = CASE WHEN retry_policy_version = 'single_target_v1' "
+                     "THEN workflow_target_id ELSE NULL END"
             )
             workflow_target_revision_clause = (
                 "workflow_target_revision = workflow_target_revision"
                 if retain_workflow_run
-                else "workflow_target_revision = NULL"
+                else "workflow_target_revision = CASE WHEN retry_policy_version = 'single_target_v1' "
+                     "THEN workflow_target_revision ELSE NULL END"
             )
             if not retain_workflow_run:
                 poll_recovery_clause = "poll_recovery_count = 0"
@@ -1161,8 +1163,14 @@ class MySQLTaskRepository:
                             WHEN retry_policy_version = 'throughput_first_v1' THEN 'any'
                             ELSE execution_pool
                         END,
-                        workflow_target_id = NULL,
-                        workflow_target_revision = NULL,
+                        workflow_target_id = CASE
+                            WHEN retry_policy_version = 'single_target_v1' THEN workflow_target_id
+                            ELSE NULL
+                        END,
+                        workflow_target_revision = CASE
+                            WHEN retry_policy_version = 'single_target_v1' THEN workflow_target_revision
+                            ELSE NULL
+                        END,
                         next_retry_at = CURRENT_TIMESTAMP,
                         error_message = 'WORKER_LEASE_EXPIRED: retrying before workflow submission was reserved',
                         last_error_code = 'WORKER_LEASE_EXPIRED',
@@ -1616,7 +1624,11 @@ class MySQLTaskRepository:
             conn.close()
 
     def get_queue_stats(self, *, task_types: tuple[str, ...] | None = None,
-                        work_envs: tuple[str, ...] | None = None) -> dict[str, object]:
+                        work_envs: tuple[str, ...] | None = None,
+                        workflow_target_id: str | None = None,
+                        workflow_target_revision: str | None = None) -> dict[str, object]:
+        if (workflow_target_id is None) != (workflow_target_revision is None):
+            raise ValueError("queue statistics require both target id and revision")
         start = time.perf_counter()
         conn = self._db_client.connect()
         try:
@@ -1626,6 +1638,14 @@ class MySQLTaskRepository:
                 if values is not None:
                     filters.append(f"{column} IN ({', '.join('%s' for _ in values)})" if values else "1 = 0")
                     filter_params.extend(values)
+            if workflow_target_id is not None:
+                # Admission scope applies only to unbound backlog. Keep all owned
+                # work visible while draining, even after narrowing that scope.
+                admission_scope = " AND ".join(filters) if filters else "1 = 1"
+                filters = [f"((status IN ('queued', 'retry_wait') AND workflow_target_id IS NULL "
+                           f"AND {admission_scope}) OR (workflow_target_id = %s AND "
+                           "(workflow_target_revision IS NULL OR workflow_target_revision = %s)))"]
+                filter_params.extend((workflow_target_id, workflow_target_revision))
             scope = " WHERE " + " AND ".join(filters) if filters else ""
             cursor.execute(
                 f"""
@@ -1635,18 +1655,20 @@ class MySQLTaskRepository:
                     SUM(status = 'retry_wait') AS retry_wait_count,
                     SUM(status = 'succeeded') AS succeeded_count,
                     SUM(status = 'failed') AS failed_count,
+                    SUM(status = 'retry_wait' AND retry_policy_version = 'single_target_v1'
+                        AND workflow_target_id IS NULL AND attempt_count > 0) AS unbound_single_target_retry_count,
                     SUM(
                         status = 'processing'
-                        AND updated_at < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 40 MINUTE)
+                        AND COALESCE(workflow_run_started_at, started_at, updated_at) < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 40 MINUTE)
                     ) AS processing_over_40m_count,
                     TIMESTAMPDIFF(
                         SECOND,
-                        MIN(CASE WHEN status = 'queued' THEN updated_at END),
+                        MIN(CASE WHEN status = 'queued' THEN COALESCE(queued_at, updated_at) END),
                         CURRENT_TIMESTAMP
                     ) AS oldest_queued_age_seconds,
                     TIMESTAMPDIFF(
                         SECOND,
-                        MIN(CASE WHEN status = 'processing' THEN updated_at END),
+                        MIN(CASE WHEN status = 'processing' THEN COALESCE(workflow_run_started_at, started_at, updated_at) END),
                         CURRENT_TIMESTAMP
                     ) AS oldest_processing_age_seconds
                 FROM customer_profile_tasks {scope}
@@ -1659,6 +1681,7 @@ class MySQLTaskRepository:
                 "retry_wait_count": int(row.get("retry_wait_count") or 0),
                 "succeeded_count": int(row.get("succeeded_count") or 0),
                 "failed_count": int(row.get("failed_count") or 0),
+                "unbound_single_target_retry_count": int(row.get("unbound_single_target_retry_count") or 0),
                 "processing_over_40m_count": int(row.get("processing_over_40m_count") or 0),
                 "oldest_queued_age_seconds": (
                     int(row["oldest_queued_age_seconds"])
@@ -1967,6 +1990,10 @@ def _select_next_eligible_sql(
                                 AND task.next_retry_at <= CURRENT_TIMESTAMP
                                 AND task.workflow_target_id IS NULL
                                 AND task.workflow_run_id IS NULL
+                                AND (
+                                    task.retry_policy_version <> 'single_target_v1'
+                                    OR task.attempt_count = 0
+                                )
                                 AND %s = 1
                                 AND (
                                     task.execution_pool = %s

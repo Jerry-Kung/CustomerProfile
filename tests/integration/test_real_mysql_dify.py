@@ -137,9 +137,7 @@ def test_dify_mysql_end_to_end_with_real_images(integration_context):
     service: TaskService = integration_context["service"]
     dify_client: DifyClient = integration_context["dify_client"]
     logger: logging.Logger = integration_context["logger"]
-    parser = WorkflowOutputParser(
-        schema_path=ROOT / "contracts" / "customer-profile-output.schema.json"
-    )
+    parser = WorkflowOutputParser()
 
     phone_base, wechat_img, moment_img = _load_test_data()
     assert Path(wechat_img).exists()

@@ -11,10 +11,6 @@ class _DBOK:
         return True
 
 
-class _UploadStore:
-    pass
-
-
 class _TaskService:
     def __init__(self):
         self.calls: list[dict] = []
@@ -53,7 +49,7 @@ class _TaskService:
 
 
 def _client(service: _TaskService) -> TestClient:
-    app = create_api_app(db_client=_DBOK(), task_service=service, upload_store=_UploadStore())
+    app = create_api_app(db_client=_DBOK(), task_service=service)
     return TestClient(app)
 
 

@@ -21,7 +21,7 @@ class TaskRecord:
     execution_pool: str = "local"
     workflow_target_id: str | None = None
     workflow_target_revision: str | None = None
-    retry_policy_version: str = "throughput_first_v1"
+    retry_policy_version: str = "single_target_v1"
     workflow_run_id: str | None = None
     attempt_count: int = 0
     local_attempt_count: int = 0

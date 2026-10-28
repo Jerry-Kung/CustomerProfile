@@ -1,5 +1,6 @@
-# CLAUDE.md
+# Repository guidance
 
-Read [AGENTS.md](AGENTS.md) before changing this repository. It is the shared source for project architecture, commands, layering, and contribution rules.
-
-Current project documentation starts at [docs/README.md](docs/README.md). Historical design and early overview notes are retained under [docs/archive/](docs/archive/README.md); use the current code and documentation for implementation and deployment.
+Use [AGENTS.md](AGENTS.md) for current commands, architecture, configuration and queue invariants.
+See [docs/README.md](docs/README.md) for the documentation index and
+[docs/worker-configuration.md](docs/worker-configuration.md) for the uniform Worker contract.
+Historical notes in docs/archive/ are not current implementation instructions.

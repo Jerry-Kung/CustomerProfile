@@ -48,6 +48,10 @@ def validate_contract_baseline(paths: ContractPaths) -> None:
     if "/v1/customer-profile/tasks" not in openapi.get("paths", {}):
         raise ValueError("missing submit/list path in OpenAPI contract")
 
+    request_content = openapi["paths"]["/v1/customer-profile/tasks"]["post"]["requestBody"]["content"]
+    if "application/x-www-form-urlencoded" not in request_content:
+        raise ValueError("submit contract must describe form input, not a JSON request body")
+
     schema = load_output_schema(paths)
     properties = schema.get("properties", {})
     if "card_id" not in properties or "nickname" not in properties:

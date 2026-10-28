@@ -9,6 +9,7 @@ from src.config.settings import load_config
 
 
 REQUIRED_ENV = {
+    "WORKFLOW_PLATFORM": "dify",
     "DIFY_BASE_URL": "http://118.145.238.55",
     "DIFY_RUN_URL": "http://118.145.238.55/v1/workflows/run",
     "DIFY_API_KEY": "app-BARxxxxxxxx",
@@ -63,7 +64,7 @@ def test_runner_configuration_requires_only_selected_environment(monkeypatch):
     assert config.runner.request_timeout_ms == 15000
     assert config.runner.poll_interval_ms == 2000
     assert config.runner.poll_timeout_ms == 2400000
-    assert config.retry.policy_version == "throughput_first_v1"
+    assert config.retry.policy_version == "single_target_v1"
 
 
 @pytest.mark.parametrize("extra", [
@@ -91,7 +92,6 @@ def test_runner_default_environment_is_test_and_never_falls_back_to_production(m
     ({"WORKFLOW_TARGET_ID": "local-default"}, "independent WORKFLOW_TARGET_ID"),
     ({"WORKFLOW_TARGET_ID": "commercial-default"}, "independent WORKFLOW_TARGET_ID"),
     ({"WORKER_TASK_TYPES": "customer_profile,invitation_strategy"}, "invitation_strategy"),
-    ({"WORKER_ROLE": "commercial"}, "WORKER_ROLE"),
     ({"PROFILE_RUNNER_BASE_URL_PRODUCTION": "http://user:password@runner"}, "base URL"),
     ({"PROFILE_RUNNER_BASE_URL_PRODUCTION": "http://runner/?key=value"}, "base URL"),
     ({"PROFILE_RUNNER_REQUEST_TIMEOUT_MS": "0"}, "PROFILE_RUNNER_REQUEST_TIMEOUT_MS"),
@@ -121,20 +121,17 @@ def test_load_config_success_defaults(monkeypatch: pytest.MonkeyPatch):
     # poll_timeout_ms may be overridden by a present .env; only verify it is a positive int
     assert isinstance(config.dify.poll_timeout_ms, int) and config.dify.poll_timeout_ms > 0
     assert config.mysql.port == 3306
-    assert config.worker.concurrency >= 1
+    assert config.worker.concurrency == 1
     assert config.worker.role == "local"
     assert config.worker.target_id == "local-default"
     assert config.worker.target_revision == "v1"
     assert config.worker.target_mode == "active"
     assert config.worker.target_failure_threshold == 3
     assert config.worker.target_cooldown_seconds == 60
-    assert config.commercial_queue.routing_mode == "parallel"
-    assert config.commercial_queue.spillover_delay_seconds == 0
-    assert config.commercial_queue.threshold == 5
     assert config.retry.max_poll_recoveries == 3
     assert config.retry.max_run_lifetime_seconds == 7200
     assert config.retry.max_workflow_attempts == 3
-    assert config.retry.policy_version == "throughput_first_v1"
+    assert config.retry.policy_version == "single_target_v1"
     assert config.retry.backoff_seconds == (30, 120, 600)
     assert config.dify.invitation_strategy_api_key == "app-INV-xxxx"
 
@@ -173,7 +170,7 @@ def test_load_config_overrides(monkeypatch: pytest.MonkeyPatch):
     )
     assert config.app_env == "test"
     assert config.log_level == "DEBUG"
-    assert config.dify.image_mode == "multipart"
+    assert config.dify.image_mode == "file_id"
     assert config.dify.stream_init_timeout_ms == 45000
     assert config.dify.poll_interval_ms == 3000
     assert config.dify.poll_timeout_ms == 600000
@@ -186,9 +183,6 @@ def test_load_config_overrides(monkeypatch: pytest.MonkeyPatch):
     assert config.worker.work_envs == ("production",)
     assert config.worker.target_failure_threshold == 5
     assert config.worker.target_cooldown_seconds == 90
-    assert config.commercial_queue.threshold == 20
-    assert config.commercial_queue.routing_mode == "local_preferred"
-    assert config.commercial_queue.spillover_delay_seconds == 45
     assert config.retry.max_poll_recoveries == 4
     assert config.retry.max_run_lifetime_seconds == 9000
     assert config.retry.max_workflow_attempts == 4
@@ -206,11 +200,13 @@ def test_load_config_rejects_invalid_worker_role(monkeypatch: pytest.MonkeyPatch
         _load_with_env(monkeypatch, {"WORKER_ROLE": "random"})
 
 
-def test_load_config_rejects_non_positive_commercial_queue_threshold(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    with pytest.raises(ValueError, match="COMMERCIAL_QUEUE_THRESHOLD"):
-        _load_with_env(monkeypatch, {"COMMERCIAL_QUEUE_THRESHOLD": "0"})
+def test_retired_commercial_gate_settings_are_ignored(monkeypatch):
+    baseline = _load_with_env(monkeypatch)
+    configured = _load_with_env(monkeypatch, {
+        "COMMERCIAL_QUEUE_THRESHOLD": "0", "WORKER_ROUTING_MODE": "invalid",
+        "COMMERCIAL_SPILLOVER_DELAY_SECONDS": "invalid",
+    })
+    assert configured == baseline
 
 
 def test_load_config_missing_required(monkeypatch: pytest.MonkeyPatch):
@@ -250,8 +246,6 @@ def test_load_config_rejects_invalid_target_and_routing_policy(
 ):
     with pytest.raises(ValueError, match="WORKFLOW_TARGET_ID"):
         _load_with_env(monkeypatch, {"WORKFLOW_TARGET_ID": "bad target"})
-    with pytest.raises(ValueError, match="WORKER_ROUTING_MODE"):
-        _load_with_env(monkeypatch, {"WORKER_ROUTING_MODE": "random"})
     with pytest.raises(ValueError, match="RETRY_POLICY_VERSION"):
         _load_with_env(monkeypatch, {"RETRY_POLICY_VERSION": "random"})
 
@@ -279,3 +273,42 @@ def test_load_config_rejects_invalid_target_circuit_bounds(
             monkeypatch,
             {"WORKER_TARGET_COOLDOWN_SECONDS": "0"},
         )
+
+
+def test_invitation_only_qingtian_requires_only_its_own_key(monkeypatch):
+    config = _load_with_env(monkeypatch, {
+        "WORKFLOW_PLATFORM": "qingtian", "WORKER_TASK_TYPES": "invitation_strategy",
+        "WORKER_WORK_ENVS": "production", "QINGTIAN_BASE_URL": "https://qt.example",
+        "QINGTIAN_USER_ID": "worker", "QINGTIAN_INVITATION_STRATEGY_API_KEY": "invitation-test-key",
+    })
+    assert config.qingtian.api_key_test == config.qingtian.api_key_production == ""
+    assert config.qingtian.invitation_strategy_api_key == "invitation-test-key"
+
+
+def test_production_only_qingtian_does_not_require_test_or_invitation_keys(monkeypatch):
+    config = _load_with_env(monkeypatch, {
+        "WORKFLOW_PLATFORM": "qingtian", "WORKER_TASK_TYPES": "customer_profile",
+        "WORKER_WORK_ENVS": "production", "QINGTIAN_BASE_URL": "https://qt.example",
+        "QINGTIAN_USER_ID": "worker", "QINGTIAN_API_KEY_PRODUCTION": "production-test-key",
+    })
+    assert config.qingtian.api_key_test == config.qingtian.invitation_strategy_api_key == ""
+
+
+@pytest.mark.parametrize("component", ["api", "migration"])
+def test_non_worker_startup_ignores_workflow_and_worker_configuration(monkeypatch, component):
+    _load_with_env(monkeypatch)
+    for key in list(os.environ):
+        if key.startswith(("DIFY_", "QINGTIAN_", "PROFILE_")):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("WORKFLOW_PLATFORM", "retired-platform")
+    monkeypatch.setenv("WORKER_TASK_TYPES", "unknown-task")
+    monkeypatch.setenv("WORKER_CONCURRENCY", "invalid")
+    monkeypatch.setenv("PROFILE_FAILURE_CALLBACK_ENABLED", "true")
+    config = load_config(component=component)
+    assert config.mysql.database == "customer_profile"
+    assert config.runner.base_url_production == config.qingtian.api_key_test == ""
+
+
+def test_runner_can_use_legacy_pool_metadata_without_commercial_gate(monkeypatch):
+    config = _load_with_env(monkeypatch, _runner_env(WORKER_ROLE="commercial"))
+    assert config.worker.role == "commercial"

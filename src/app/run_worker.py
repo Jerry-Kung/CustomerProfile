@@ -26,7 +26,7 @@ def _install_shutdown_signal_handlers(runner: WorkerRunner) -> None:
 
 
 def main() -> int:
-    config, db_client, _, executor, _ = bootstrap("worker")
+    config, db_client, _, executor = bootstrap("worker")
     dispatcher = None
     if config.failure_callback.enabled:
         dispatcher = FailureCallbackDispatcher(

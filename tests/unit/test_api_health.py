@@ -13,10 +13,6 @@ class _TaskService:
         return None
 
 
-class _UploadStore:
-    pass
-
-
 class _DBOK:
     def ping(self) -> bool:
         return True
@@ -28,7 +24,7 @@ class _DBDown:
 
 
 def test_health_check_up():
-    app = create_api_app(db_client=_DBOK(), task_service=_TaskService(), upload_store=_UploadStore())
+    app = create_api_app(db_client=_DBOK(), task_service=_TaskService())
     client = TestClient(app)
     response = client.get("/health")
     assert response.status_code == 200
@@ -37,10 +33,22 @@ def test_health_check_up():
 
 
 def test_health_check_down():
-    app = create_api_app(db_client=_DBDown(), task_service=_TaskService(), upload_store=_UploadStore())
+    app = create_api_app(db_client=_DBDown(), task_service=_TaskService())
     client = TestClient(app)
     response = client.get("/health")
     assert response.status_code == 200
     assert response.headers.get("x-request-id")
     assert response.json() == {"status": "ok", "db_status": "down"}
 
+
+
+def test_readiness_reports_database_failure_with_http_503():
+    app = create_api_app(db_client=_DBDown(), task_service=_TaskService())
+    response = TestClient(app).get("/ready")
+    assert response.status_code == 503
+    assert response.json() == {"status": "not_ready", "db_status": "down"}
+
+
+def test_readiness_up():
+    app = create_api_app(db_client=_DBOK(), task_service=_TaskService())
+    assert TestClient(app).get("/ready").status_code == 200

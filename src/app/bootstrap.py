@@ -11,22 +11,19 @@ from src.config.logging_utils import (
 )
 from src.config.settings import AppConfig, load_config
 from src.domain.task.service import TaskService
-from src.contracts.registry import default_contract_paths
 from src.infrastructure.db.client import MySQLClient
 from src.infrastructure.db.task_repository import MySQLTaskRepository
 from src.infrastructure.dify.client import DifyClient
 from src.infrastructure.qingtian.client import QingTianClient
 from src.infrastructure.runner.client import RunnerClient
-from src.infrastructure.storage.task_upload_store import TaskUploadStore
 from src.infrastructure.workflow.output_parser import WorkflowOutputParser
 from src.infrastructure.workflow.protocol import WorkflowClient
 from src.infrastructure.workflow.invitation_writeback import InvitationWritebackVerifier
 from src.worker.executor import WorkerExecutor
-from src.worker.routing import CommercialQueueGate, CommercialQueueThreshold
 
 
-def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskService, WorkerExecutor, TaskUploadStore]:
-    config = load_config()
+def _task_services(component: str) -> tuple[AppConfig, MySQLClient, TaskService]:
+    config = load_config(component=component)
     # Configure root logging FIRST so any logging.getLogger(__name__) call in dify/tos/output_parser
     # modules emits to stderr instead of being swallowed by a handler-less root logger.
     configure_root_logging(component)
@@ -44,14 +41,20 @@ def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskServi
         repository=repository,
         logger=get_logger("task_service"),
     )
-    upload_store = TaskUploadStore(config.upload)
-    contracts = default_contract_paths()
+    return config, db_client, task_service
+
+
+def bootstrap(component: str = "worker") -> tuple[AppConfig, MySQLClient, TaskService, WorkerExecutor]:
+    """Build execution dependencies only for a Worker process."""
+    if component != "worker":
+        raise ValueError("bootstrap builds workers; use create_application for the API")
+    config, db_client, task_service = _task_services(component)
+    logger = get_logger("bootstrap")
     workflow_client = _build_workflow_client(config, logger)
-    commercial_queue = config.commercial_queue
     executor = WorkerExecutor(
         task_service=task_service,
         workflow_client=workflow_client,
-        output_parser=WorkflowOutputParser(schema_path=contracts.output_schema_path),
+        output_parser=WorkflowOutputParser(),
         logger=get_logger("worker_executor"),
         platform_name=config.workflow_platform,
         worker_role=config.worker.role,
@@ -62,13 +65,6 @@ def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskServi
         worker_work_envs=config.worker.work_envs,
         worker_target_failure_threshold=config.worker.target_failure_threshold,
         worker_target_cooldown_seconds=config.worker.target_cooldown_seconds,
-        commercial_queue_gate=CommercialQueueGate(
-            CommercialQueueThreshold(
-                queue_depth=commercial_queue.threshold,
-                routing_mode=commercial_queue.routing_mode,
-                spillover_delay_seconds=commercial_queue.spillover_delay_seconds,
-            )
-        ),
         retry_config=config.retry,
         invitation_writeback=InvitationWritebackVerifier(config.failure_callback),
         # Old pre-005 claims have no lease. Recover them only after the
@@ -79,7 +75,7 @@ def bootstrap(component: str = "app") -> tuple[AppConfig, MySQLClient, TaskServi
             + config.retry.recovery_interval_seconds,
         ),
     )
-    return config, db_client, task_service, executor, upload_store
+    return config, db_client, task_service, executor
 
 
 def _build_workflow_client(config: AppConfig, logger: logging.Logger) -> WorkflowClient:
@@ -124,7 +120,7 @@ def _warn_if_task_type_column_missing(logger, db_client, repository) -> None:
 
 
 def create_application():
-    config, db_client, task_service, _, upload_store = bootstrap("api")
-    app = create_api_app(db_client=db_client, task_service=task_service, upload_store=upload_store)
+    config, db_client, task_service = _task_services("api")
+    app = create_api_app(db_client=db_client, task_service=task_service, api_config=config.api)
     log_runtime_identity(get_logger("api"), component="api", app_env=config.app_env)
     return app

@@ -1,4 +1,6 @@
-# Helm 部署与升级
+# Helm 部署与升级（历史参考）
+
+> 当前生产入口为 Docker Compose，见[统一 Worker 配置](worker-configuration.md)。本文及 Chart 保留历史拓扑参考，未纳入本次部署验证；下文的“当前/最终拓扑”均指历史方案。旧商用门槛变量已不生效，新增 Runner 目标需显式传入平台、URL 和消费范围，不能直接照搬旧 values 上线。
 
 本文说明如何在 `aizt01-pro` 部署可扩展的擎天 Worker。当前目标拓扑是 1 条本地工作流
 + 3 条商用工作流；以后增减工作流只修改 Helm values，不需要再增加固定模板。

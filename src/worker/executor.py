@@ -31,7 +31,6 @@ from src.infrastructure.workflow.invitation_writeback import (
     InvitationWritebackMissing, InvitationWritebackSuperseded, InvitationWritebackUnconfirmed,
 )
 from src.infrastructure.workflow.protocol import InvitationWriteback, WorkflowClient
-from src.worker.routing import CommercialQueueGate, QueuePressure
 from src.worker.target_health import TargetCircuitBreaker
 
 
@@ -64,15 +63,12 @@ class WorkerExecutor:
         worker_work_envs: tuple[str, ...] = ("test", "production"),
         worker_target_failure_threshold: int = 3,
         worker_target_cooldown_seconds: int = 60,
-        commercial_queue_gate: CommercialQueueGate | None = None,
         retry_config: RetryConfig | None = None,
         legacy_processing_timeout_seconds: int = 2400,
         invitation_writeback: InvitationWriteback | None = None,
     ):
         if worker_role not in {"local", "commercial"}:
             raise ValueError("worker_role must be local or commercial")
-        if worker_role == "commercial" and commercial_queue_gate is None:
-            raise ValueError("commercial worker requires a commercial_queue_gate")
         if worker_target_mode not in {"active", "draining", "recovery_only"}:
             raise ValueError("worker_target_mode must be active, draining, or recovery_only")
         if legacy_processing_timeout_seconds < 1:
@@ -92,7 +88,6 @@ class WorkerExecutor:
             failure_threshold=worker_target_failure_threshold,
             cooldown_seconds=worker_target_cooldown_seconds,
         )
-        self._commercial_queue_gate = commercial_queue_gate
         self._retry_config = retry_config or RetryConfig()
         self._legacy_processing_timeout_seconds = legacy_processing_timeout_seconds
         self._invitation_writeback = invitation_writeback
@@ -102,8 +97,13 @@ class WorkerExecutor:
 
     def operational_snapshot(self) -> dict[str, object]:
         snapshot_fn = getattr(self._task_service.repository, "get_queue_stats", None)
-        snapshot = dict(snapshot_fn(task_types=self._worker_task_types, work_envs=self._worker_work_envs)) if callable(snapshot_fn) else {}
+        snapshot = dict(snapshot_fn(task_types=self._worker_task_types, work_envs=self._worker_work_envs,
+                                       workflow_target_id=self._workflow_target_id,
+                                       workflow_target_revision=self._workflow_target_revision)) if callable(snapshot_fn) else {}
         snapshot.update(self._target_circuit.snapshot())
+        snapshot.update(workflow_target_id=self._workflow_target_id,
+                        workflow_target_revision=self._workflow_target_revision,
+                        workflow_platform=self._platform_name)
         return snapshot
 
     def request_shutdown(self) -> None:
@@ -115,12 +115,12 @@ class WorkerExecutor:
             return "idle"
         execute_start = time.perf_counter()
         retry_enabled = self._supports_resumable_workflow()
-        self._maybe_recover_expired_retry_leases(enabled=retry_enabled)
+        self.recover_once()
         allow_unbound_work = (
             self._worker_target_mode == "active"
             and self._target_circuit.allow_unbound_work()
         )
-        allow_new_tasks = allow_unbound_work and self._route_allows_new_tasks()
+        allow_new_tasks = allow_unbound_work
         allow_unbound_retries = allow_unbound_work
         if not retry_enabled and not allow_new_tasks:
             return "idle"
@@ -300,6 +300,10 @@ class WorkerExecutor:
             )
         return self._workflow_client.poll_workflow(**kwargs)
 
+    def recover_once(self) -> None:
+        """Maintenance also runs independently of occupied execution slots."""
+        self._maybe_recover_expired_retry_leases(enabled=self._supports_resumable_workflow())
+
     def _maybe_recover_expired_retry_leases(self, *, enabled: bool) -> None:
         if not enabled:
             return
@@ -309,13 +313,11 @@ class WorkerExecutor:
                 return
             self._last_retry_recovery_monotonic = now
         try:
-            if self._platform_name == "runner":
-                self._task_service.recover_expired_retry_leases(
-                    limit=100, workflow_target_id=self._workflow_target_id,
-                    workflow_target_revision=self._workflow_target_revision,
-                )
-            else:
-                self._task_service.recover_expired_retry_leases(limit=100)
+            self._task_service.recover_expired_retry_leases(
+                limit=100, workflow_target_id=self._workflow_target_id,
+                workflow_target_revision=self._workflow_target_revision,
+            )
+            if self._platform_name != "runner":
                 self._task_service.requeue_stale_processing(
                     timeout_seconds=self._legacy_processing_timeout_seconds,
                     limit=100,
@@ -934,35 +936,6 @@ class WorkerExecutor:
         if claimed.execution_pool == "commercial":
             return "commercial_fallback" if claimed.local_attempt_count else "burst"
         return "local_retry" if claimed.local_attempt_count else "normal"
-
-    def _route_allows_new_tasks(self) -> bool:
-        if self._worker_role == "local":
-            return True
-        assert self._commercial_queue_gate is not None
-        static_decision = self._commercial_queue_gate.static_decision()
-        if static_decision is not None:
-            return static_decision
-        try:
-            snapshot = self.operational_snapshot()
-            pressure = QueuePressure(
-                queue_depth=int(snapshot.get("queue_depth") or 0),
-                oldest_queued_age_seconds=(
-                    int(snapshot["oldest_queued_age_seconds"])
-                    if snapshot.get("oldest_queued_age_seconds") is not None
-                    else None
-                ),
-            )
-            allowed = self._commercial_queue_gate.allow_new(pressure)
-            self._logger.debug(
-                "commercial_queue_gate allowed=%s queue_depth=%s oldest_queued_age_seconds=%s",
-                allowed,
-                pressure.queue_depth,
-                pressure.oldest_queued_age_seconds,
-            )
-            return allowed
-        except Exception:
-            self._logger.exception("commercial_queue_gate_check_failed")
-            return False
 
     def _record_target_failure(self, exc: Exception) -> None:
         opened = self._target_circuit.record_failure()

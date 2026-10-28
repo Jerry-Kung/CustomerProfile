@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-import os
-
 import uvicorn
 
 from src.app.asgi import app
 
 
 def main() -> int:
-    host = os.getenv("API_HOST", "0.0.0.0").strip() or "0.0.0.0"
-    port = int(os.getenv("API_PORT", "8000").strip() or "8000")
     # The application configures Uvicorn's standard loggers to flow into Loguru.
-    uvicorn.run(app, host=host, port=port, log_config=None)
+    config = app.state.api_config
+    uvicorn.run(app, host=config.host, port=config.port, log_config=None)
     return 0
 
 

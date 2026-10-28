@@ -44,6 +44,8 @@ paths:
           $ref: '#/components/responses/UnprocessableEntity'
         '429':
           $ref: '#/components/responses/TooManyRequests'
+        '503':
+          description: Per-task-type waiting queue capacity exceeded
         '500':
           $ref: '#/components/responses/InternalServerError'
     get:
@@ -157,21 +159,12 @@ components:
           type: string
           nullable: true
           maxLength: 64
+          description: Runner requires a non-empty batch of at most 50 characters.
         execution_id:
           type: string
           nullable: true
           pattern: '^[A-Za-z0-9_-]{1,64}$'
           description: Invitation only; requires batch_id. Unique for each analysis, even when the business batch is reused.
-        wechat_homepage_image:
-          type: string
-          format: binary
-          nullable: true
-          description: Optional uploaded image file.
-        wechat_moments_image:
-          type: string
-          format: binary
-          nullable: true
-          description: Optional uploaded image file.
     TaskAcceptedResponse:
       type: object
       required:

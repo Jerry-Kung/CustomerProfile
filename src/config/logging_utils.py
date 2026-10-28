@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import inspect
 import logging
-import os
 import platform
 import sys
 from importlib.metadata import PackageNotFoundError, version
@@ -12,7 +11,7 @@ from typing import Any
 
 from loguru import logger as loguru_logger
 
-from src.config.settings import AppConfig
+from src.config.settings import AppConfig, env_value
 from src.config.observability import current_log_context
 
 
@@ -63,10 +62,6 @@ def redact_config(config: AppConfig) -> dict[str, Any]:
             "password": _mask_secret(config.mysql.password),
             "database": config.mysql.database,
         },
-        "upload": {
-            "base_dir": str(config.upload.base_dir),
-            "max_bytes_per_file": config.upload.max_bytes_per_file,
-        },
         "worker": {
             "concurrency": config.worker.concurrency,
             "poll_interval_seconds": config.worker.poll_interval_seconds,
@@ -78,11 +73,6 @@ def redact_config(config: AppConfig) -> dict[str, Any]:
             "work_envs": list(config.worker.work_envs),
             "target_failure_threshold": config.worker.target_failure_threshold,
             "target_cooldown_seconds": config.worker.target_cooldown_seconds,
-        },
-        "commercial_queue": {
-            "threshold": config.commercial_queue.threshold,
-            "routing_mode": config.commercial_queue.routing_mode,
-            "spillover_delay_seconds": config.commercial_queue.spillover_delay_seconds,
         },
         "retry": {
             "policy_version": config.retry.policy_version,
@@ -109,7 +99,7 @@ def get_logger(name: str = "customer_profile") -> logging.Logger:
     just stays quiet unless they configure logging themselves.
     """
     logger = logging.getLogger(name)
-    level_name = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+    level_name = env_value("LOG_LEVEL", "INFO").strip().upper() or "INFO"
     logger.setLevel(getattr(logging, level_name, logging.INFO))
     return logger
 
@@ -161,6 +151,11 @@ def _patch_loguru_record(record: dict[str, Any]) -> None:
     record["extra"].update(current_log_context())
 
 
+def _instance_name() -> str:
+    # Compose replicas share the log volume, but must rotate separate files.
+    return env_value("POD_NAME") or env_value("HOSTNAME") or platform.node() or "local"
+
+
 def configure_root_logging(component: str = "app") -> None:
     """Configure Loguru sinks and route all standard logging through them.
 
@@ -176,11 +171,11 @@ def configure_root_logging(component: str = "app") -> None:
     global _configured_component
 
     root = logging.getLogger()
-    level_name = _level_name(os.getenv("LOG_LEVEL", "INFO"), "INFO")
+    level_name = _level_name(env_value("LOG_LEVEL", "INFO"), "INFO")
     root.setLevel(getattr(logging, level_name, logging.INFO))
     # Cap httpx/httpcore — they emit one INFO per request, which floods the log when the
     # Worker polls QingTian/Dify every 2s. Override with HTTP_LOG_LEVEL=DEBUG when needed.
-    http_level_name = _level_name(os.getenv("HTTP_LOG_LEVEL", "WARNING"), "WARNING")
+    http_level_name = _level_name(env_value("HTTP_LOG_LEVEL", "WARNING"), "WARNING")
     http_level = getattr(logging, http_level_name, logging.WARNING)
     for noisy in _NOISY_LIBRARY_LOGGERS:
         logging.getLogger(noisy).setLevel(http_level)
@@ -188,9 +183,9 @@ def configure_root_logging(component: str = "app") -> None:
     if _configured_component == component:
         return
 
-    log_dir = Path(os.getenv("LOG_DIR", "logs").strip() or "logs").resolve()
+    log_dir = Path(env_value("LOG_DIR", "logs").strip() or "logs").resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
-    pod_name = os.getenv("POD_NAME", "").strip() or "local"
+    pod_name = _instance_name()
     file_pattern = log_dir / f"customer-profile-{component}_{pod_name}_{{time:YYYY-MM-DD}}.log"
 
     loguru_logger.remove()
@@ -208,8 +203,8 @@ def configure_root_logging(component: str = "app") -> None:
         str(file_pattern),
         level=level_name,
         format=_LOG_FORMAT,
-        rotation=os.getenv("LOG_ROTATION", "00:00"),
-        retention=os.getenv("LOG_RETENTION", "30 days"),
+        rotation=env_value("LOG_ROTATION", "00:00"),
+        retention=env_value("LOG_RETENTION", "30 days"),
         encoding="utf-8",
         enqueue=True,
         diagnose=False,
@@ -236,10 +231,10 @@ def log_runtime_identity(logger: logging.Logger, *, component: str, app_env: str
         "component_ready component=%s version=%s git_commit=%s app_env=%s pod_name=%s namespace=%s node_name=%s python_version=%s",
         component,
         package_version,
-        os.getenv("GIT_COMMIT", os.getenv("IMAGE_TAG", "unknown")),
+        env_value("GIT_COMMIT", env_value("IMAGE_TAG", "unknown")),
         app_env,
-        os.getenv("HOSTNAME", "unknown"),
-        os.getenv("POD_NAMESPACE", "unknown"),
-        os.getenv("NODE_NAME", "unknown"),
+        _instance_name(),
+        env_value("POD_NAMESPACE", "unknown"),
+        env_value("NODE_NAME", "unknown"),
         platform.python_version(),
     )

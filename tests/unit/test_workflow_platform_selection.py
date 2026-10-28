@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from src.app.bootstrap import _build_workflow_client, _workflow_poll_timeout_ms
-from src.config.settings import AppConfig, DifyConfig, MigrationConfig, MySQLConfig, QingTianConfig, TosConfig, UploadConfig, WorkerConfig
+from src.config.settings import AppConfig, DifyConfig, MigrationConfig, MySQLConfig, QingTianConfig, WorkerConfig
 from src.infrastructure.dify.client import DifyClient
 from src.infrastructure.qingtian.client import QingTianClient
 from src.infrastructure.runner.client import RunnerClient
@@ -11,7 +11,6 @@ from src.config.settings import ProfileRunnerConfig
 from src.config.logging_utils import redact_config
 
 import logging
-from pathlib import Path
 
 
 def _config(platform: str) -> AppConfig:
@@ -41,16 +40,7 @@ def _config(platform: str) -> AppConfig:
             poll_timeout_ms=2400000,
         ),
         mysql=MySQLConfig(host="h", port=3306, user="u", password="p", database="d"),
-        upload=UploadConfig(base_dir=Path("."), max_bytes_per_file=1024),
         worker=WorkerConfig(concurrency=1, poll_interval_seconds=1.0),
-        tos=TosConfig(
-            access_key_id="",
-            access_key_secret="",
-            region="",
-            endpoint="",
-            bucket="",
-            presigned_url_expires_seconds=3600,
-        ),
         migration=MigrationConfig(db_wait_max_tries=1, db_wait_interval_seconds=0.1),
     )
 

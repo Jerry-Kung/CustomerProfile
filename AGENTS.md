@@ -1,85 +1,70 @@
-# AGENTS.md
+# Repository Agent Instructions
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+## Current service
 
-## Project
-
-Current documentation starts at `docs/README.md`; historical notes live under `docs/archive/` and are not implementation instructions. Operational tools are documented in `scripts/README.md`.
-
-MVP backend for "customer profile" tasks: a FastAPI HTTP API accepts task submissions (phone number + optional WeChat images), persists them to MySQL, and a separate Worker process polls the queue, invokes the selected Dify, QingTian, or Runner workflow, validates its output, and writes results back. Recoverable adapters persist remote run IDs and use fenced leases. API and Worker remain separate process types. One Docker Compose file starts migration, API, local Worker, commercial Worker, and Runner Worker together.
-
-The repo language is Python 3.11+. Documentation under `docs/` is in Chinese; code/comments are English.
+Customer-profile task API plus configurable asynchronous Workers sharing a MySQL queue.
+Current production adapters are `qingtian` and `runner`; `dify` is legacy compatibility.
+Start documentation at `docs/README.md`; `docs/worker-configuration.md` is authoritative for
+worker scopes, replicas, credentials, configuration precedence and upgrade/rollback.
+Historical documents under `docs/archive/` are reference material, not current instructions.
 
 ## Commands
 
-Install (editable, with dev extras):
+- Install: `pip install -e '.[dev]'` (Python 3.11+).
+- Unit tests: `pytest tests/unit -q`.
+- Isolated MySQL tests: `RUN_WORKER_MYSQL_INTEGRATION=1 WORKER_TEST_MYSQL_PORT=3307 pytest -m worker_mysql_integration`.
+  They accept only loopback and create/drop their own random test database; never use business data.
+- Entry points: customer-profile-api, customer-profile-worker, customer-profile-migrate,
+  customer-profile-check-contracts (see pyproject.toml).
+- Compose: `scripts/compose.sh [--env-file /absolute/path/env] ...` keeps interpolation and
+  env_file injection aligned. Use `config -q`; do not print expanded production credentials.
+- There is no lint/format configuration; don't introduce one without asking.
 
-```bash
-pip install -e ".[dev]"
-```
+## Boundaries
 
-Entry points (defined in `pyproject.toml [project.scripts]`):
+- `src/api`: HTTP validation and error mapping; synchronous database endpoints use FastAPI's thread pool.
+- `src/domain/task`: records, protocols, retry policy and domain errors. No HTTP exceptions or platform I/O.
+- `src/infrastructure`: MySQL transactions, platform adapters and business callbacks.
+- `src/worker`: shared executor, independent maintenance and thread capacity; no provider-specific admission policy.
+- `src/app`: component wiring. API and migrations must not require workflow credentials or initialize an executor.
+- `src/config/settings.py`: all environment reads, component-scoped validation and dotenv precedence.
+  Logging uses its `env_value` helper so dotenv loads before sinks are configured.
 
-| Command | What it runs |
-|---|---|
-| `customer-profile-api` | HTTP API (uvicorn, reads `API_HOST`/`API_PORT`) — `src.app.run_api:main` |
-| `customer-profile-worker` | Queue consumer loop — `src.app.run_worker:main` |
-| `customer-profile-migrate` | Scans `db/migrations/*.sql` and applies every file in filename order (each is idempotent — `CREATE TABLE IF NOT EXISTS` / `information_schema` checks) — `src.app.run_migration:main` |
-| `customer-profile-check-contracts` | Validates OpenAPI + JSON Schema in `contracts/` — `src.contracts.validate_contracts:main` |
+The API does not currently accept image fields. Upload/TOS helpers are historical standalone adapters,
+not initialized application dependencies. Output parsing requires an extensible JSON object and extracts
+optional display metadata; provider-specific identity/envelope validation lives in the adapter. Keep
+contracts and tests consistent rather than claiming strict validation of arbitrary model fields.
 
-ASGI entry for container/uvicorn parity: `uvicorn src.app.asgi:app --host 0.0.0.0 --port 8000`.
+## Queue and worker invariants
 
-Tests (pytest configured in `pyproject.toml`, `pythonpath=["."]`):
+- A Worker group declares platform, task types, work environments, concurrency, target ID/revision and mode.
+- Same-target replicas share identical platform/endpoint/credentials/revision; different targets use different IDs.
+- `local/commercial` pool metadata is retained for old tasks and old retry budgets, not new-task admission.
+- All compatible active targets compete with `FOR UPDATE SKIP LOCKED`; no weights or commercial queue gate.
+- New/unbound tasks must match the configured capability scope. Owned runs may drain after scope changes;
+  retain their original URL, credentials, target identity and revision until finished.
+- New submissions default to `single_target_v1`. New-run retries keep target ID/revision while clearing
+  only the previous run ID. Preserve old tasks' persisted retry policy.
+- Claimed updates must match task ID + generation + claim token + processing status. Retain these atomic
+  database guards when refactoring; the readable state-machine map does not replace transaction guards.
+- Submission identity is (phone, task_type), with generation/optional execution_id protecting resubmission.
+  Invitation delivery additionally confirms business batch/execution identity before marking success.
+- Once a remote run ID is durable, resume that run. Unknown submissions/uncertain side effects must not
+  be blindly retried on another target.
+- Never reset elapsed-time metrics with lease heartbeats. Use queued_at / run start / started_at for ages.
+- Worker idle logs stay DEBUG. Recovery maintenance must work while all execution slots are occupied.
 
-```bash
-pytest tests/unit -v                    # unit tests
-pytest tests/unit/test_task_service.py::TestName -v   # single test
-pytest -m mysql_integration             # real MySQL
-pytest -m dify_integration              # real Dify
-pytest -m api_http_e2e                  # against a running API (see below)
-```
+## Configuration and migrations
 
-Custom markers: `integration`, `mysql_integration`, `dify_integration`, `api_http_e2e`. Integration tests are opt-in via env (e.g. `RUN_API_HTTP_E2E=1`, `API_E2E_BASE_URL=http://127.0.0.1:8000`). There is no lint/format config — don't add one without asking.
+Root .env loads without overriding OS env. .env.example contains placeholders only. Compose service fields
+are explicitly mapped to the uniform runtime contract; per-process concurrency multiplied by replicas
+is total configured capacity. Config changes require container recreation, not just restart.
 
-Docker:
+Migrations scan all db/migrations/*.sql in order, executing statements on one connection. Every migration
+must be replay-safe; keep the splitter's session-variable semantics. Current migrations are 001–009.
+009 restores lost single-target retry bindings from the same generation's latest attempt. A previously
+attempted single-target retry without provable lineage must stay blocked and observable, not be guessed
+from its local/commercial pool. Update deployment docs whenever adding migrations.
 
-```bash
-docker compose up -d --build            # builds and starts API and all three Workers
-HOST_API_PORT=8080 docker compose up -d # override host port mapping
-```
-
-`.env` at repo root is auto-loaded by `src/config/settings.py` via `python-dotenv` (does not override OS env). Required keys: `MYSQL_*` and the credentials/URLs for the selected workflow platform. The read-only database inspection tool uses `load_mysql_config()` without workflow credentials. Normal application and migration startup use `load_config()`. Compose additionally requires `PROFILE_RUNNER_BASE_URL_PRODUCTION`; it overrides the Runner container to `WORKFLOW_PLATFORM=runner`. See `docs/deploy-and-run.md` for the full list.
-
-## Architecture
-
-**Two-process split, single codebase.** Both processes share `bootstrap()` in `src/app/bootstrap.py`, which wires config → MySQL client → repository → `TaskService` → (for the worker) the selected workflow client + `WorkflowOutputParser` + `WorkerExecutor`. The API process only uses the `TaskService` write/read paths; the Worker process drives `WorkerExecutor`. The DB is the queue — there is no broker.
-
-Layering (strict, follow when adding code):
-
-- `src/api/` — FastAPI app, routes (`routes_tasks.py`), Pydantic schemas, error mapping, middleware. Knows nothing about MySQL/Dify directly.
-- `src/domain/task/` — `TaskService`, `TaskRepository` protocol, `TaskRecord` model, `state_machine.py`, domain errors. Pure Python; no I/O.
-- `src/infrastructure/` — concrete adapters: `db/` (MySQL client + `MySQLTaskRepository` implementing the domain protocol), `dify/`, `qingtian/`, and `runner/` (platform HTTP adapters), `workflow/` (shared protocol + output parser against `contracts/customer-profile-output.schema.json`), `storage/` (local upload dir), `tos/` (Volcano Engine object storage).
-- `src/worker/` — `WorkerExecutor.execute_once()` claims one task and runs the selected workflow call; `WorkerRunner` drives it on threads with configured `concurrency`.
-- `src/config/` — `load_config()` returns a frozen `AppConfig` of frozen sub-configs. All env access goes through here; do not read `os.getenv` elsewhere.
-- `src/contracts/` — loads/validates the OpenAPI spec (`customer-profile-api.openapi.yaml`) and the Dify output JSON Schema; the parser uses the schema at runtime.
-
-**Task state machine** (`src/domain/task/state_machine.py`): `queued → processing → {retry_wait, succeeded, failed}` and `retry_wait → {processing, failed}`. Terminal states are sinks within an execution generation; resubmission is handled by the queue upsert. Transitions are enforced by `can_transition`. New states require updating this map and the repository's claim/update SQL together.
-
-**Queue mechanics.** `MySQLTaskRepository.claim_next_queued` uses `SELECT ... FOR UPDATE SKIP LOCKED` so multiple Worker threads/processes can run concurrently with `WORKER_CONCURRENCY > 1`. `TASK_QUEUE_MAX_WAITING` caps queued depth separately for each task type on submit; over-cap submissions raise `TaskQueueFullError`, mapped to an API error by `src/api/errors.py`.
-
-**Upsert-on-submit.** Submitting a task for the same (`customer_phonenumber`, `task_type`) re-queues the existing row rather than inserting a new one — see `repository.upsert_queued`. There is no separate "retry" endpoint; resubmission is the retry.
-
-**Image handling.** Submissions can be multipart with `wechat_*_image` files. `TaskUploadStore` writes them under `TASK_UPLOAD_DIR` (defaults to `<repo>/data/task-uploads`). When `DIFY_IMAGE_MODE=file_id` (default), the Worker must be able to read the same paths — in Docker that means api+worker share the same volume.
-
-**Runner queue consumption.** Default Compose sends all new production profiles to Runner: the local Worker claims new invitations only, and the commercial Worker is fixed to `recovery_only`. The API persists `single_target_v1` for new tasks so profile retries stay on Runner. Existing bound remote runs still resume on their original target/revision and retry policy; finish in-flight legacy Dify runs before recreating Workers. Test profiles require a separately configured test Runner. Claims continue to use `FOR UPDATE SKIP LOCKED` with per-Worker concurrency. Retired `PROFILE_ROUTING_*` and `PROFILE_RUNNER_TRAFFIC_PERCENT` settings are ignored. Runner submits `customer_profile_pipeline` and leaves invitations to the existing workflow. Preserve this routing when merging server-local Compose changes. See `docs/profile-runner-integration.md`.
-
-**Dify integration.** `DifyClient` calls the configured `DIFY_RUN_URL` (streaming or blocking depending on the workflow), with separate API keys per `work_env` (`test` vs `production` — chosen per submission). `WorkflowOutputParser` validates the workflow output against `contracts/customer-profile-output.schema.json`; schema changes must be made there, not in code.
-
-**Migrations.** SQL files in `db/migrations/`, applied in numeric order by `customer-profile-migrate` (scans `*.sql`, splits each file on `;` — respecting `--` line comments and single-quoted strings — and runs the statements on one shared connection so `SET @var ... PREPARE ... EXECUTE` patterns in 002/003 keep their session-level variables). `multi=True` is not used: `mysql-connector-python` 9.x removed it. All files are idempotent, so the runner is safe to re-run. In `docker compose`, a dedicated `migrate` service runs once at startup; `api` and `worker` wait on its successful exit. When adding a migration, also update `docs/deploy-and-run.md` §5.
-
-## Conventions worth knowing
-
-- All env reads go through `src/config/settings.py`; raise `ValueError` for missing required vars there, not at call sites.
-- Repository methods return `TaskRecord` dataclasses, never raw dicts/rows.
-- Logging uses `src/config/logging_utils.get_logger(name)`. Worker `idle` ticks log at DEBUG (not INFO) to avoid log spam — keep it that way.
-- Domain errors live in `src/domain/task/errors.py` and are translated to HTTP at the API boundary in `src/api/errors.py`. Don't raise HTTPException from the domain layer.
+Never modify/push production configuration, run real workflows, or migrate a business database just to
+validate code. Prefer isolated tests. Keep passwords, API keys and tokens out of source and tool output.

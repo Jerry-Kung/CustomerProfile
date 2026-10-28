@@ -18,11 +18,17 @@ from src.config.settings import (
     MigrationConfig,
     MySQLConfig,
     QingTianConfig,
-    TosConfig,
-    UploadConfig,
     WorkerConfig,
 )
-from pathlib import Path
+
+
+def test_compose_replica_log_identity_uses_container_hostname(monkeypatch):
+    from src.config.logging_utils import _instance_name
+    monkeypatch.setenv("POD_NAME", "")
+    monkeypatch.setenv("HOSTNAME", "worker-replica-a")
+    assert _instance_name() == "worker-replica-a"
+    monkeypatch.setenv("HOSTNAME", "worker-replica-b")
+    assert _instance_name() == "worker-replica-b"
 
 
 def _sample_config() -> AppConfig:
@@ -58,19 +64,7 @@ def _sample_config() -> AppConfig:
             password="123456xxxx",
             database="customer_profile",
         ),
-        upload=UploadConfig(
-            base_dir=Path("/tmp/uploads"),
-            max_bytes_per_file=10 * 1024 * 1024,
-        ),
         worker=WorkerConfig(concurrency=8, poll_interval_seconds=2.0),
-        tos=TosConfig(
-            access_key_id="",
-            access_key_secret="",
-            region="",
-            endpoint="",
-            bucket="",
-            presigned_url_expires_seconds=3600,
-        ),
         migration=MigrationConfig(db_wait_max_tries=30, db_wait_interval_seconds=2.0),
     )
 
@@ -103,7 +97,7 @@ def test_log_config_summary_does_not_leak_secret(caplog):
     data = json.loads(payload)
     assert data["dify"]["api_key_test"].endswith(")")
     assert data["worker"]["role"] == "local"
-    assert data["commercial_queue"]["threshold"] == 5
+    assert "commercial_queue" not in data
     assert data["dify"]["invitation_strategy_api_key"].endswith(")")
 
 
@@ -112,19 +106,27 @@ def test_standard_logging_is_formatted_and_written_by_loguru(tmp_path, monkeypat
     monkeypatch.setenv("LOG_LEVEL", "INFO")
     monkeypatch.setenv("POD_NAME", "pod-a")
 
-    configure_root_logging("unit-test")
-    with log_context(request_id="req-1", task_id=42, workflow_platform="qingtian"):
-        get_logger("test.bridge").info("bridge_message value=%s", "ok")
-    loguru_logger.complete()
+    original_handlers = list(logging.getLogger().handlers)
+    try:
+        configure_root_logging("unit-test")
+        with log_context(request_id="req-1", task_id=42, workflow_platform="qingtian"):
+            get_logger("test.bridge").info("bridge_message value=%s", "ok")
+        loguru_logger.complete()
 
-    stderr = capsys.readouterr().err
-    assert "| INFO" in stderr
-    assert "component=unit-test" in stderr
-    assert "request_id=req-1 task_id=42" in stderr
-    assert "bridge_message value=ok" in stderr
+        stderr = capsys.readouterr().err
+        assert "| INFO" in stderr
+        assert "component=unit-test" in stderr
+        assert "request_id=req-1 task_id=42" in stderr
+        assert "bridge_message value=ok" in stderr
 
-    matches = list(tmp_path.glob("customer-profile-unit-test_pod-a_*.log"))
-    assert len(matches) == 1
-    content = matches[0].read_text(encoding="utf-8")
-    assert "request_id=req-1 task_id=42" in content
-    assert "bridge_message value=ok" in content
+        matches = list(tmp_path.glob("customer-profile-unit-test_pod-a_*.log"))
+        assert len(matches) == 1
+        content = matches[0].read_text(encoding="utf-8")
+        assert "request_id=req-1 task_id=42" in content
+        assert "bridge_message value=ok" in content
+    finally:
+        loguru_logger.complete()
+        loguru_logger.remove()
+        logging.getLogger().handlers = original_handlers
+        import src.config.logging_utils as logging_utils
+        logging_utils._configured_component = None

@@ -99,8 +99,16 @@ class WorkerRunner:
                 snapshot = snapshot_fn()
             except Exception:
                 self._logger.exception("worker_operational_snapshot_failed")
+        if snapshot.get("unbound_single_target_retry_count"):
+            self._logger.warning(
+                "worker_retry_lineage_missing tasks=%s action=apply_migration_009_and_reconcile_attempt_history",
+                snapshot["unbound_single_target_retry_count"],
+            )
         self._logger.info(
-            "worker_runtime_summary 说明=Worker队列运行概览 interval_seconds=%s inflight_threads=%s idle_polls=%s cycle_succeeded=%s cycle_retrying=%s cycle_failed=%s cycle_errors=%s average_execute_elapsed_ms=%s queued_count=%s retry_wait_count=%s processing_count=%s total_succeeded=%s total_failed=%s oldest_queued_age_seconds=%s oldest_processing_age_seconds=%s processing_over_40m_count=%s target_circuit_state=%s target_consecutive_failures=%s target_circuit_remaining_seconds=%s",
+            "worker_runtime_summary 说明=Worker队列运行概览 workflow_target_id=%s workflow_target_revision=%s workflow_platform=%s interval_seconds=%s inflight_threads=%s idle_polls=%s cycle_succeeded=%s cycle_retrying=%s cycle_failed=%s cycle_errors=%s average_execute_elapsed_ms=%s queued_count=%s retry_wait_count=%s processing_count=%s total_succeeded=%s total_failed=%s oldest_queued_age_seconds=%s oldest_processing_age_seconds=%s processing_over_40m_count=%s target_circuit_state=%s target_consecutive_failures=%s target_circuit_remaining_seconds=%s",
+            snapshot.get("workflow_target_id"),
+            snapshot.get("workflow_target_revision"),
+            snapshot.get("workflow_platform"),
             interval_seconds,
             inflight,
             stats.get("idle", 0),
@@ -149,12 +157,19 @@ class WorkerRunner:
         return t
 
     def _supervisor_loop(self) -> None:
+        last_thread_check = time.monotonic()
         while True:
             # wait() returns True iff stop_event was set; that is our exit signal.
-            if self._stop_event.wait(self._supervisor_interval_seconds):
+            if self._stop_event.wait(min(5.0, self._supervisor_interval_seconds)):
                 return
             try:
-                self._check_and_respawn()
+                recover = getattr(self._executor, "recover_once", None)
+                if callable(recover):
+                    recover()
+                now = time.monotonic()
+                if now - last_thread_check >= self._supervisor_interval_seconds:
+                    self._check_and_respawn()
+                    last_thread_check = now
                 self._maybe_log_summary()
             except Exception:
                 self._logger.exception("worker_supervisor_check_failed")

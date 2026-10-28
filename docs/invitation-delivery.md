@@ -13,6 +13,9 @@
 
 现有 `PROFILE_FAILURE_CALLBACK_ENABLED`、`PROFILE_API_BASE_URL[_TEST/_PRODUCTION]` 和 `PROFILE_API_KEY[_TEST/_PRODUCTION]` 同时用于画像失败通知、邀约失败通知和邀约回写核对；启用 API 执行标识前必须配置成功。Key 与 API `M2M_API_KEY` 一致。
 
-Compose 本地邀约 Worker 用 `INVITATION_WORKER_CONCURRENCY=4`，不再受通用 `WORKER_CONCURRENCY` 覆盖。Runner 的 `PROFILE_RUNNER_CONCURRENCY=1` 及“新画像只进 Runner”路由保持原配置。
+Compose 普通擎天组默认消费画像和邀约，可通过 `QINGTIAN_WORKER_TASK_TYPES=invitation_strategy`
+只消费邀约，再用 `QINGTIAN_WORKER_CONCURRENCY` 单独设置并发。旧
+`INVITATION_WORKER_CONCURRENCY` 不再生效；画像由具备相应能力的擎天、商用及 Runner
+共同领取。完整配置与迁移见[统一 Worker 配置](worker-configuration.md)。
 
 完整发布顺序、青天修改、API 开关及历史修复命令见 **customer-profile-api 的 `docs/invitation-delivery.md`**：先 API 迁移并保持 `INVITATION_EXECUTION_ID_ENABLED=false` → backend 迁移升级 → 青天新增可选输入并在成功回调原样回传 → API 开启开关 → 验证新任务 → 预览并审计修复旧失败状态。未更新青天前不要开启该开关。

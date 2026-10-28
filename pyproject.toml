@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "customer-profile-backend"
 version = "0.1.0"
-description = "Phase-00 config and contract baseline for customer_profile backend"
+description = "Asynchronous customer-profile tasks with configurable workflow workers"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",
@@ -41,4 +41,5 @@ markers = [
   "mysql_integration: real MySQL connectivity tests",
   "dify_integration: real Dify connectivity tests",
   "api_http_e2e: HTTP API tests against a running server (curl)",
+  "worker_mysql_integration: isolated local MySQL concurrency and target ownership",
 ]

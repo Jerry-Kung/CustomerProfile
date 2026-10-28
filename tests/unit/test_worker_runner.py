@@ -87,3 +87,28 @@ def test_free_worker_slots_claim_independently_up_to_configured_concurrency():
     assert not thread.is_alive()
     assert active == 0
     assert calls == concurrency
+
+
+def test_maintenance_continues_while_all_execution_slots_are_busy():
+    entered, maintenance, release = threading.Event(), threading.Event(), threading.Event()
+
+    class BusyExecutor:
+        def execute_once(self):
+            entered.set()
+            release.wait(timeout=3)
+            return "succeeded"
+
+        def recover_once(self):
+            maintenance.set()
+
+    runner = WorkerRunner(BusyExecutor(), concurrency=1, supervisor_interval_seconds=0.01)
+    thread = threading.Thread(target=runner.run_forever, daemon=True)
+    thread.start()
+    try:
+        assert entered.wait(timeout=1)
+        assert maintenance.wait(timeout=1)
+    finally:
+        runner.stop()
+        release.set()
+        thread.join(timeout=3)
+    assert not thread.is_alive()

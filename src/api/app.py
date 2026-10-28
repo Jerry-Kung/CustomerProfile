@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import json
 
 from fastapi.exceptions import RequestValidationError
@@ -14,9 +13,9 @@ from src.api.errors import AppError
 from src.api.middlewares import request_log_middleware
 from src.api.routes_tasks import router as task_router
 from src.config.logging_utils import get_logger
+from src.config.settings import ApiConfig
 from src.domain.task.service import TaskService
 from src.infrastructure.db.client import MySQLClient
-from src.infrastructure.storage.task_upload_store import TaskUploadStore
 
 
 def _safe_validation_errors(exc) -> list[dict[str, object]]:
@@ -33,17 +32,14 @@ def _safe_validation_errors(exc) -> list[dict[str, object]]:
 def create_api_app(
     db_client: MySQLClient,
     task_service: TaskService,
-    upload_store: TaskUploadStore,
+    api_config: ApiConfig | None = None,
 ) -> FastAPI:
     app = FastAPI(title="customer_profile backend", version="0.1.0")
     app.state.db_client = db_client
     app.state.task_service = task_service
-    app.state.upload_store = upload_store
+    app.state.api_config = api_config or ApiConfig()
     app.state.logger = get_logger("api")
-    raw_origins = os.getenv("CORS_ALLOW_ORIGINS", "*")
-    allow_origins = [s.strip() for s in raw_origins.split(",") if s.strip()]
-    if not allow_origins:
-        allow_origins = ["*"]
+    allow_origins = list(app.state.api_config.cors_allow_origins)
     allow_all = "*" in allow_origins
     app.add_middleware(
         CORSMiddleware,
@@ -129,6 +125,13 @@ def create_api_app(
     def health_check() -> dict[str, str]:
         db_ok = app.state.db_client.ping()
         return {"status": "ok", "db_status": "up" if db_ok else "down"}
+
+    @app.get("/ready")
+    def readiness_check():
+        db_ok = app.state.db_client.ping()
+        return JSONResponse(status_code=200 if db_ok else 503,
+                            content={"status": "ok" if db_ok else "not_ready",
+                                     "db_status": "up" if db_ok else "down"})
 
     app.include_router(task_router)
 

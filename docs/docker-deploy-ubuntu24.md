@@ -1,5 +1,7 @@
 # Ubuntu 24.04 上使用 Docker 部署本服务（详细指南）
 
+> Docker 系统准备步骤仍适用。当前平台、任务范围和配置迁移以 [统一 Worker 配置](worker-configuration.md) 为准；不要沿用历史固定 Worker 分工或商用门槛。
+
 本文面向**首次**在 Linux 上用 Docker 部署 Python 微服务的同学，环境以 **Ubuntu 24.04 LTS** 为例，覆盖：安装 Docker、配置环境、改端口、防火墙放通、以及**前端如何填写后端 Base URL**。
 
 > 通用说明仍见：[deploy-and-run.md](deploy-and-run.md)  
@@ -79,35 +81,31 @@ cp .env.example .env
 nano .env   # 或用 vim
 ```
 
-**必填**：`MYSQL_*`，以及 `WORKFLOW_PLATFORM` 所选平台对应的 Dify 或擎天变量。当前
-Compose 在擎天模式下还需要一套独立的 `QINGTIAN_COMMERCIAL_API_KEY_*`，并必须填写
-画像生成服务地址 `PROFILE_RUNNER_BASE_URL_PRODUCTION`。完整清单见
-[部署快速上手](deploy-quickstart.md) §4。
+**必填**：`MYSQL_*`，各 Worker 声明范围内的擎天密钥、商用目标的
+`QINGTIAN_COMMERCIAL_API_KEY_*`、Runner 地址 `PROFILE_RUNNER_BASE_URL_PRODUCTION`，
+以及启用失败通知/邀约核验时所需的业务 M2M 地址与 Key。默认 Compose 已分别指定平台，
+完整字段见[统一 Worker 配置](worker-configuration.md)。
 
 **Docker 下建议同时检查**：
 
 - `LOG_LEVEL=INFO`（默认即可）
-- 若 MySQL 跑在**同一台 Ubuntu 宿主机**上、且监听 `127.0.0.1`：
+- 若 MySQL 跑在**同一台 Ubuntu 宿主机**上：
   - 容器里 **不能** 用 `MYSQL_HOST=127.0.0.1`（那会指向容器自己）。
   - 应使用 **宿主机在 Docker 网桥上的地址**，常用写法：
     - `MYSQL_HOST=host.docker.internal`（需较新 Docker 且已启用，见下）
     - 或 `MYSQL_HOST=172.17.0.1`（默认 `docker0` 网关，部分环境适用）
     - 或把 MySQL 绑定到 `0.0.0.0` 并使用**宿主机局域网 IP**
-  - 在 `docker-compose.yml` 的 `api` / `worker` 下可增加（按需）：
-
-```yaml
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-```
-
-  然后在 `.env` 里设 `MYSQL_HOST=host.docker.internal`。
+  - Compose 已为 API、迁移和 Worker 配置 `host.docker.internal:host-gateway`。
+    MySQL 也须监听容器可达的网桥/局域网接口，不能仅监听宿主机 loopback。
+    在 `.env` 中设 `MYSQL_HOST=host.docker.internal`，并为应用账户授权容器来源。
 
 ---
 
 ## 4. 数据库迁移
 
 无需手工逐个执行 SQL。Compose 的 `migrate` 一次性服务会按文件名顺序执行全部幂等
-迁移（包括 005 重试状态和 006 目标路由），成功后 API 和三个 Worker 才会启动。
+迁移（当前 001–009，包括重试状态、目标绑定和旧单目标重试修复），成功后 API 和三个
+Worker 才会启动。已有环境按[升级顺序](worker-configuration.md#重试与升级顺序)统一替换消费者。
 
 ---
 
@@ -173,7 +171,7 @@ docker compose up -d
 | 变量 | 含义 |
 |------|------|
 | `HOST_API_PORT` | **宿主机**上对外监听的端口（给浏览器 / 前端 / 公网访问） |
-| `API_PORT`（容器内） | 进程在**容器内**监听端口；`docker-compose.yml` 已固定为 `18008`，一般**不要改** compose 里的映射右侧 |
+| `API_PORT`（容器内） | 进程在**容器内**监听端口，默认 `18008`；Compose 会同步修改映射右侧及 readiness 检查端口 |
 
 ---
 
@@ -256,16 +254,13 @@ VITE_API_BASE_URL=http://203.0.113.50:18080
 
 ### 8.3 跨域（CORS）说明
 
-当前后端**未内置 CORS 中间件**。若前端页面域名是 `https://app.example.com`，接口是 `http://IP:端口`，浏览器可能拦截跨域请求。
-
-常见处理方式（二选一）：
-
-- **推荐**：前端与 API 同域（反向代理把 `/api` 转到后端），或给后端增加 CORS（后续迭代）。
-- 演示期：用浏览器插件临时关闭 CORS（**仅限本机调试，勿用于生产**）。
+后端内置 CORS 中间件，`CORS_ALLOW_ORIGINS` 默认 `*`，也可用逗号分隔的业务域名列表。
+HTTPS 页面调用 HTTP 接口还会受到浏览器混合内容限制，应保持前后端 HTTPS 配置一致。
 
 ### 8.4 图片字段与 Docker
 
-若前端传 `wechat_homepage_image` / `wechat_moments_image` 为**服务器本地路径**，该路径必须对 **Worker 容器**可见（一般要挂载卷或改用 **URL**）。演示联调建议传 **可公网或可内网访问的图片 URL**，与 [frontend-api-guide.md](frontend-api-guide.md) 一致。
+当前提交接口不接收图片字段，上传/TOS 链路未启用，Compose 不再挂载上传卷。
+实际表单字段以[前端指南](frontend-api-guide.md)和 OpenAPI 契约为准。
 
 ---
 
@@ -288,10 +283,10 @@ docker stats
 ## 10. 快速检查清单
 
 - [ ] Docker 与 `docker compose` 可用  
-- [ ] `.env` 中 Dify、MySQL 对 **容器内** 可达（注意 `127.0.0.1` 陷阱）  
-- [ ] 已执行 `001` / `002` 迁移  
+- [ ] `.env` 中 MySQL、擎天、Runner 及业务 M2M 地址对容器可达（注意 `127.0.0.1` 陷阱）
+- [ ] `migrate` 已成功执行全部 `001`–`009` 迁移
 - [ ] `HOST_API_PORT` 无冲突，且 **UFW + 云安全组** 已放通  
-- [ ] `curl http://127.0.0.1:<HOST_API_PORT>/health` 返回 `ok`  
+- [ ] `curl http://127.0.0.1:<HOST_API_PORT>/ready` 返回 HTTP 200、数据库 `up`
 - [ ] 前端 Base URL = `http(s)://<主机>:<HOST_API_PORT>`（或反代后的域名）
 
 按上述配置后，前端即可用该 Base URL 调用 [frontend-api-guide.md](frontend-api-guide.md) 中的三个业务接口。

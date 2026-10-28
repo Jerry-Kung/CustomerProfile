@@ -42,3 +42,7 @@ API_E2E_BASE_URL=http://127.0.0.1:18008 bash scripts/api_e2e_curl.sh
 此脚本会向已运行的 backend 提交测试任务。数据库迁移统一使用 `customer-profile-migrate` 或 `docker compose run --rm migrate`；旧的 003 专项迁移脚本已移至[历史归档](../docs/archive/tools/apply_migration_003.py.txt)。
 
 上述 Python 工具均可先通过 `--help` 查看参数。
+
+## 统一 Compose 环境入口
+
+`./scripts/compose.sh [--env-file /absolute/path/env] <compose arguments>` 同时设置插值文件和容器 env_file，默认读取根目录 .env。先运行 `config -q` 校验；不要将包含展开凭据的 config 输出写入日志。多目标配置见 [Worker 配置指南](../docs/worker-configuration.md)。

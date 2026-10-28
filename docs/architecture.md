@@ -1,67 +1,41 @@
 # 当前架构
 
-本说明对应当前工作区的实现。完整配置与发布步骤见[部署运行指南](deploy-and-run.md)，接口字段见[前端接口指南](frontend-api-guide.md)。
+API 接收任务并持久化 MySQL；若干 Worker 通过同一 TaskService/Repository 原子领取，
+按 WORKFLOW_PLATFORM 选择 qingtian 或 runner 适配器。API 与 Worker 是独立进程，同一个镜像。
+Dify 保留历史兼容入口。没有额外 broker、权重、分桶或商用队列门槛。
 
-## 进程与依赖
+## 进程边界
 
-API 和 Worker 使用同一份 Python 包，通过 MySQL 任务表协作。MySQL 同时保存业务状态和待处理队列，没有额外消息中间件。
+- API 初始化数据库、任务服务、API 参数；不初始化工作流客户端、上传目录或 WorkerExecutor。
+- Worker 初始化所选适配器、共享解析器、WorkerExecutor 和线程 Runner。
+- 迁移只加载数据库和迁移参数；日志初始化前加载环境。
+- 所有运行时环境变量读取集中于 config/settings.py；logging_utils 使用同一环境读取入口。
 
-- API：校验提交、保存可选图片、调用领域服务入队，并提供列表和结果查询。
-- Worker：领取符合任务类型、环境和执行目标要求的任务，调用远端工作流，再写入结果。
-- migrate：扫描 `db/migrations/*.sql`，在共享连接上按文件名顺序执行全部迁移。
+## Worker 合约
 
-根目录 `docker-compose.yml` 统一管理 `migrate`、`api`、`worker`、`commercial-worker` 和 `profile-runner-worker`，API 和三个 Worker 都依赖迁移成功退出。画像生成服务由 `PROFILE_RUNNER_BASE_URL_PRODUCTION` 指向外部服务。上传图片通过 `task_uploads` 共享卷提供给 API 和旧图片处理路径；日志写入宿主机 `logs/`。
+每个组声明任务类型、环境、每进程并发、目标 ID/revision 和模式。同类平台可以有多个
+不同目标；同目标可以有多个副本。local/commercial 字段仅用于旧数据兼容及旧策略预算，
+不控制新任务是否准入。现行字段与 Compose 映射见[配置指南](worker-configuration.md)。
 
-## 分层
+目标身份必须对应稳定的实际工作流/凭据，不同平台不能复用同一身份。新任务竞争队列后
+由实际领取目标记录运行归属。单目标重试保留目标，只清理旧 run_id；同目标副本可接续。
+数据库写回始终验证 generation、claim_token 和 processing 状态。用户重提开启新代次，旧
+持有者不能写入新任务。邀约额外使用 execution_id 核对本次业务回写。
 
-| 目录 | 职责 |
-|---|---|
-| `src/api/` | FastAPI、请求响应模型、HTTP 错误映射、中间件 |
-| `src/domain/task/` | 任务模型、仓储协议、任务服务、状态机和重试策略 |
-| `src/infrastructure/db/` | MySQL 连接、任务仓储和迁移执行 |
-| `src/infrastructure/dify/` | Dify HTTP 适配 |
-| `src/infrastructure/qingtian/` | 擎天提交、查询与错误分类 |
-| `src/infrastructure/runner/` | 独立画像生成服务的提交、查询与输出适配 |
-| `src/infrastructure/workflow/` | 公共工作流协议与输出解析 |
-| `src/worker/` | 执行编排、线程运行器、资源池路由和目标健康管理 |
-| `src/config/` | 冻结配置、环境变量加载和日志 |
-| `src/contracts/` | OpenAPI、输出 JSON Schema 和迁移路径的加载校验 |
+## 状态与恢复
 
-API 通过领域服务访问任务，不直接依赖 MySQL 或某个平台 HTTP 客户端。TOS 适配代码目前没有在 bootstrap 中接入主流程。
+queued -> processing -> succeeded / failed / retry_wait；retry_wait 再进入 processing。
+状态变化由事务 SQL 的条件更新保护；state_machine.py 提供可读状态图和基线测试。
+领取使用 FOR UPDATE SKIP LOCKED，更新与租约同事务。远端 ID 在轮询前落库；未知提交
+不盲目创建新运行。恢复扫描有独立维护循环，不因执行线程全部繁忙而停止。
 
-## 任务身份与状态
+默认 single_target_v1，旧 local_first_v1/throughput_first_v1 保留兼容历史记录。
+009 从最后一次同代 attempt 恢复升级前丢失的单目标绑定；有尝试却无法证明目标的任务
+不参与未绑定竞争，保留并告警。新任务不需要分桶或额外路由表。
 
-业务唯一键由 `customer_phonenumber` 和 `task_type` 组成。同一手机号的画像与邀约可以共存；重复提交同一业务键会重新排队已有记录并开始新的执行代次。
+## 结果、契约与观测
 
-当前状态转换定义在 `src/domain/task/state_machine.py`：
-
-```text
-queued -> processing -> succeeded | failed
-                   -> retry_wait -> processing | failed
-```
-
-`succeeded` 和 `failed` 是执行状态机的终态；重新提交由独立的入队路径处理。`retry_wait` 是内部等待状态，对结果查询仍映射为 HTTP 202 和 `processing`。
-
-`TASK_QUEUE_MAX_WAITING` 按任务类型分别限制 queued 深度。领取使用事务和 `FOR UPDATE SKIP LOCKED`，支持多个 Worker 线程或进程并发消费。
-
-## 工作流与恢复
-
-`bootstrap()` 根据 `WORKFLOW_PLATFORM` 选择 Dify、QingTian 或 Runner 客户端，并通过统一输出解析器将结果对齐到 `contracts/customer-profile-output.schema.json`。共享 `.env` 选择旧 Worker 的 Dify 或擎天平台；Compose 为 Runner 服务单独覆盖为 `runner`。
-
-擎天和 Runner 客户端提供可恢复的提交 / 查询路径。Worker 通过 generation、claim token 和租约保护回写；远端运行 ID 持久化后，只由相同目标 ID 和 revision 恢复查询。提交结果不明时不会盲目重新生成运行。
-
-Runner 使用独立目标 `profile-runner-production`，通过 `customer_profile_pipeline` 提交原任务的手机号和批次，只处理生产环境客户画像。邀约继续由原工作流处理。Runner 的并发默认 1，生成服务自行排队执行。
-
-旧 Dify 路径保持自身调用方式。具体目标模式、重试上限、资源池切换和升级顺序以[部署运行指南](deploy-and-run.md)为准。
-
-## 默认 Compose 的任务分工
-
-默认 Compose 将新生产画像全部交给 `profile-runner-worker`；`worker` 只领取新邀约，`commercial-worker` 固定为 `recovery_only`，只恢复已绑定的旧商用运行。API 将新任务的重试策略固定为 `single_target_v1`，新画像失败后仍在 Runner 重试，不切换到旧画像工作流。任务领取继续使用 `SELECT ... FOR UPDATE SKIP LOCKED`。
-
-任务类型、环境及 Runner 入参校验继续限制新任务领取范围。测试画像需配置测试 Runner；默认生产 Runner 不领取测试任务。已有远端运行保留原目标 ID、revision、run_id 和原重试策略，由原目标恢复；旧 Dify 在途任务应完成后再重建。旧 `PROFILE_ROUTING_*` 和 `PROFILE_RUNNER_TRAFFIC_PERCENT` 已停用。配置、升级和回滚步骤见 [Runner 接入与部署](profile-runner-integration.md)。
-
-## 数据库与契约维护
-
-001–006 迁移共同构成当前数据库升级历史，应全部保留。新增迁移需要保持幂等，并更新部署运行指南的迁移章节。
-
-接口定义维护在 `contracts/customer-profile-api.openapi.yaml`，工作流输出维护在 `contracts/customer-profile-output.schema.json`。修改实现时同时检查相应契约和已有测试。
+适配器校验各平台信封/业务身份，共享解析器接受扩展 JSON 对象并提取可选显示字段。
+手写 OpenAPI 的表单字段与实际 API 一起校验。业务成功、工作流成功和失败通知分别观察。
+Worker 汇总按目标与能力范围统计；用 queued_at/运行开始时间计算耗时，心跳只反映租约存活。
+API 提供保持兼容的 /health，以及用 HTTP 503 表示 DB 不可用的 /ready。

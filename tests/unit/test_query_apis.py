@@ -11,10 +11,6 @@ class _DBOK:
         return True
 
 
-class _UploadStore:
-    pass
-
-
 class _TaskService:
     def submit_task(self, customer_phonenumber: str, **_kwargs):
         return TaskRecord(id=1, customer_phonenumber=customer_phonenumber, status="queued")
@@ -95,7 +91,7 @@ class _TaskService:
 
 
 def _client() -> TestClient:
-    app = create_api_app(db_client=_DBOK(), task_service=_TaskService(), upload_store=_UploadStore())
+    app = create_api_app(db_client=_DBOK(), task_service=_TaskService())
     return TestClient(app)
 
 

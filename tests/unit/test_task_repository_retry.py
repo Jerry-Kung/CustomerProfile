@@ -365,7 +365,7 @@ def test_schedule_retry_can_atomically_switch_the_execution_pool_and_release_tar
         if "UPDATE customer_profile_tasks" in item[0]
     )
     assert "execution_pool = COALESCE(%s, execution_pool)" in task_update[0]
-    assert "workflow_target_id = NULL" in task_update[0]
+    assert "workflow_target_id = CASE WHEN retry_policy_version = 'single_target_v1'" in task_update[0]
     assert task_update[1][0] == "commercial"
     assert task_update[1][2] == "commercial"
     assert connection.commits == 1

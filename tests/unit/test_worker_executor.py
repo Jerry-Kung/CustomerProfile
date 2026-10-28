@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+
+import pytest
 
 from src.domain.task.models import TaskRecord
 from src.domain.task.service import TaskService
@@ -18,7 +19,6 @@ from src.infrastructure.workflow.errors import (
 from src.infrastructure.runner.errors import RunnerRequestFailed, RunnerTimeout, RunnerWorkflowTerminated
 from src.infrastructure.workflow.output_parser import WorkflowOutputParser
 from src.worker.executor import WorkerExecutor
-from src.worker.routing import CommercialQueueGate, CommercialQueueThreshold
 
 
 class _Repo:
@@ -225,18 +225,10 @@ def _logger() -> logging.Logger:
     return logger
 
 
-def _schema_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "contracts" / "customer-profile-output.schema.json"
 
 
 def _parser() -> WorkflowOutputParser:
-    return WorkflowOutputParser(schema_path=_schema_path())
-
-
-def _commercial_queue_gate() -> CommercialQueueGate:
-    return CommercialQueueGate(
-        CommercialQueueThreshold(queue_depth=5)
-    )
+    return WorkflowOutputParser()
 
 
 def _retry_config(
@@ -406,128 +398,18 @@ def test_executor_timeout_marks_failed():
     assert "WORKFLOW_TIMEOUT" in repo.failed[1]
 
 
-def test_local_worker_claims_regardless_of_commercial_queue_threshold():
-    repo = _Repo(
-        claimed=TaskRecord(
-            id=6,
-            customer_phonenumber="13800138000",
-            status="processing",
-        ),
-        queue_depth=0,
-    )
+@pytest.mark.parametrize("role", ["local", "commercial"])
+@pytest.mark.parametrize("mode", ["active", "draining", "recovery_only"])
+def test_worker_admission_depends_on_mode_not_commercial_queue_pressure(role, mode):
+    repo = _Repo(claimed=TaskRecord(id=6, customer_phonenumber="13800138000", status="processing"),
+                 queue_depth=0)
     executor = WorkerExecutor(
         task_service=TaskService(repository=repo, logger=_logger()),
-        workflow_client=_WorkflowSuccess(),
-        output_parser=_parser(),
-        logger=_logger(),
-        worker_role="local",
-        commercial_queue_gate=_commercial_queue_gate(),
+        workflow_client=_WorkflowSuccess(), output_parser=_parser(), logger=_logger(),
+        worker_role=role, worker_target_mode=mode,
     )
-
-    assert executor.execute_once() == "succeeded"
-    assert repo.claim_calls == 1
-
-
-def test_commercial_worker_does_not_claim_normal_task_below_queue_threshold():
-    repo = _Repo(
-        claimed=TaskRecord(
-            id=7,
-            customer_phonenumber="13800138000",
-            status="processing",
-        ),
-        queue_depth=4,
-        oldest_queued_age_seconds=599,
-    )
-    executor = WorkerExecutor(
-        task_service=TaskService(repository=repo, logger=_logger()),
-        workflow_client=_WorkflowSuccess(),
-        output_parser=_parser(),
-        logger=_logger(),
-        worker_role="commercial",
-        commercial_queue_gate=_commercial_queue_gate(),
-    )
-
-    assert executor.execute_once() == "idle"
-    assert repo.claim_calls == 0
-
-
-def test_commercial_worker_claims_normal_task_once_queue_threshold_is_reached():
-    repo = _Repo(
-        claimed=TaskRecord(
-            id=8,
-            customer_phonenumber="13800138000",
-            status="processing",
-        ),
-        queue_depth=5,
-        oldest_queued_age_seconds=20,
-    )
-    executor = WorkerExecutor(
-        task_service=TaskService(repository=repo, logger=_logger()),
-        workflow_client=_WorkflowSuccess(),
-        output_parser=_parser(),
-        logger=_logger(),
-        worker_role="commercial",
-        commercial_queue_gate=_commercial_queue_gate(),
-    )
-
-    assert executor.execute_once() == "succeeded"
-    assert repo.claim_calls == 1
-
-
-def test_parallel_commercial_worker_skips_queue_pressure_query():
-    repo = _Repo(
-        claimed=TaskRecord(
-            id=9,
-            customer_phonenumber="13800138000",
-            status="processing",
-        ),
-        queue_depth=0,
-    )
-    executor = WorkerExecutor(
-        task_service=TaskService(repository=repo, logger=_logger()),
-        workflow_client=_WorkflowSuccess(),
-        output_parser=_parser(),
-        logger=_logger(),
-        worker_role="commercial",
-        commercial_queue_gate=CommercialQueueGate(
-            CommercialQueueThreshold(
-                queue_depth=100,
-                routing_mode="parallel",
-                spillover_delay_seconds=600,
-            )
-        ),
-    )
-
-    assert executor.execute_once() == "succeeded"
-    assert repo.claim_calls == 1
-    assert repo.queue_stats_calls == 0
-
-
-def test_local_only_commercial_worker_skips_queue_pressure_query():
-    repo = _Repo(
-        claimed=TaskRecord(
-            id=10,
-            customer_phonenumber="13800138000",
-            status="processing",
-        ),
-        queue_depth=100,
-    )
-    executor = WorkerExecutor(
-        task_service=TaskService(repository=repo, logger=_logger()),
-        workflow_client=_WorkflowSuccess(),
-        output_parser=_parser(),
-        logger=_logger(),
-        worker_role="commercial",
-        commercial_queue_gate=CommercialQueueGate(
-            CommercialQueueThreshold(
-                queue_depth=1,
-                routing_mode="local_only",
-            )
-        ),
-    )
-
-    assert executor.execute_once() == "idle"
-    assert repo.claim_calls == 0
+    assert executor.execute_once() == ("succeeded" if mode == "active" else "idle")
+    assert repo.claim_calls == (1 if mode == "active" else 0)
     assert repo.queue_stats_calls == 0
 
 
@@ -806,7 +688,6 @@ def test_qingtian_durable_retry_is_supported_by_the_commercial_worker():
         logger=_logger(),
         platform_name="qingtian",
         worker_role="commercial",
-        commercial_queue_gate=_commercial_queue_gate(),
         retry_config=_retry_config(),
     )
 
@@ -818,7 +699,7 @@ def test_qingtian_durable_retry_is_supported_by_the_commercial_worker():
             "execution_pool": "commercial",
             "workflow_target_id": "commercial-default",
             "workflow_target_revision": "v1",
-            "allow_new_tasks": False,
+            "allow_new_tasks": True,
             "allow_unbound_retries": True,
             "task_types": ("customer_profile", "invitation_strategy"),
             "work_envs": ("test", "production"),
@@ -922,7 +803,6 @@ def test_commercial_fallback_failure_stops_after_one_commercial_attempt():
         logger=_logger(),
         platform_name="qingtian",
         worker_role="commercial",
-        commercial_queue_gate=_commercial_queue_gate(),
         retry_config=_retry_config(),
     )
 
@@ -956,7 +836,6 @@ def test_throughput_policy_releases_failed_target_back_to_any_pool():
         platform_name="qingtian",
         worker_role="commercial",
         workflow_target_id="commercial-01",
-        commercial_queue_gate=_commercial_queue_gate(),
         retry_config=_retry_config(),
     )
 
@@ -983,7 +862,6 @@ def test_throughput_policy_can_reuse_a_target_within_the_shared_total_budget():
         platform_name="qingtian",
         worker_role="commercial",
         workflow_target_id="commercial-02",
-        commercial_queue_gate=_commercial_queue_gate(),
         retry_config=_retry_config(),
     )
 
@@ -1014,7 +892,6 @@ def test_worker_never_polls_a_run_owned_by_another_target():
         platform_name="qingtian",
         worker_role="commercial",
         workflow_target_id="commercial-02",
-        commercial_queue_gate=_commercial_queue_gate(),
         retry_config=_retry_config(),
     )
 

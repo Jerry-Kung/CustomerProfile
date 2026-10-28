@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from src.infrastructure.dify.client import extract_output_string
@@ -11,12 +9,6 @@ from src.infrastructure.workflow.errors import (
     WorkflowOutputSchemaMismatch,
 )
 from src.infrastructure.workflow.output_parser import WorkflowOutputParser
-
-
-def _schema_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "contracts" / "customer-profile-output.schema.json"
-
-
 def test_extract_output_string_supports_top_level_output():
     body = {"output": '{"card_id":"c1","nickname":"n1"}'}
     assert extract_output_string(body) == '{"card_id":"c1","nickname":"n1"}'
@@ -34,7 +26,7 @@ def test_extract_output_string_missing_raises_dify_specific():
 
 
 def test_parse_success():
-    parser = WorkflowOutputParser(schema_path=_schema_path())
+    parser = WorkflowOutputParser()
     parsed = parser.parse('{"card_id":"c1","nickname":"n1"}')
     assert parsed.card_id == "c1"
     assert parsed.nickname == "n1"
@@ -43,7 +35,7 @@ def test_parse_success():
 
 def test_parse_promotes_customer_nickname_to_top_level():
     """Some workflows output nickname only under customer.nickname (rich profile JSON)."""
-    parser = WorkflowOutputParser(schema_path=_schema_path())
+    parser = WorkflowOutputParser()
     raw = '{"card_id":"lc_1","customer":{"nickname":"李宁/Niki"}}'
     parsed = parser.parse(raw)
     assert parsed.card_id == "lc_1"
@@ -52,13 +44,13 @@ def test_parse_promotes_customer_nickname_to_top_level():
 
 
 def test_parse_invalid_json():
-    parser = WorkflowOutputParser(schema_path=_schema_path())
+    parser = WorkflowOutputParser()
     with pytest.raises(WorkflowOutputInvalidJson):
         parser.parse("{bad-json}")
 
 
 def test_parse_missing_profile_fields_succeeds_with_none_values():
-    parser = WorkflowOutputParser(schema_path=_schema_path())
+    parser = WorkflowOutputParser()
     parsed = parser.parse('{"summary":"valid workflow output"}')
     assert parsed.card_id is None
     assert parsed.nickname is None
@@ -66,7 +58,7 @@ def test_parse_missing_profile_fields_succeeds_with_none_values():
 
 
 def test_parse_invalid_profile_field_types_do_not_fail_output():
-    parser = WorkflowOutputParser(schema_path=_schema_path())
+    parser = WorkflowOutputParser()
     parsed = parser.parse('{"card_id":123,"nickname":[]}')
     assert parsed.card_id is None
     assert parsed.nickname is None

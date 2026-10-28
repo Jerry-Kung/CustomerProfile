@@ -4,7 +4,6 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from src.infrastructure.workflow.errors import (
@@ -19,7 +18,7 @@ _log = logging.getLogger(__name__)
 
 def normalize_profile_output_dict(data: dict[str, Any]) -> dict[str, Any]:
     """
-    Align workflow JSON with contract-required top-level fields.
+    Extract optional display metadata from workflow JSON.
 
     Some workflows put `nickname` under `customer.nickname` while the API contract
     and DB extraction expect top-level `nickname` (and `card_id`).
@@ -43,8 +42,11 @@ class ParsedOutput:
 
 
 class WorkflowOutputParser:
-    def __init__(self, schema_path: Path):
-        self._schema_path = schema_path
+    """Parse an extensible JSON object and best-effort display metadata.
+
+    Provider-specific structure/identity checks belong to the adapters. The
+    public output contract intentionally permits arbitrary object properties.
+    """
 
     def parse(self, output_raw: str) -> ParsedOutput:
         start = time.perf_counter()

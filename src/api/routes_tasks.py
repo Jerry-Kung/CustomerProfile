@@ -26,7 +26,7 @@ router = APIRouter(prefix="/v1/customer-profile/tasks", tags=["CustomerProfileTa
 
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED, response_model=TaskAcceptedResponse)
-async def submit_task(
+def submit_task(
     request: Request,
     customer_phonenumber: str = Form(..., description="Customer phone; digits and + only"),
     work_env: str | None = Form(None, description="Optional workflow environment: test or production"),

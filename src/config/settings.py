@@ -109,7 +109,7 @@ class UploadConfig:
 
 @dataclass(frozen=True)
 class WorkerConfig:
-    """Background task worker: concurrent Dify executions per process (DB claim uses SKIP LOCKED)."""
+    """Per-process execution capacity and capability scope; DB claims use SKIP LOCKED."""
 
     concurrency: int
     poll_interval_seconds: float
@@ -124,12 +124,10 @@ class WorkerConfig:
 
 
 @dataclass(frozen=True)
-class CommercialQueueConfig:
-    """Admission policy for commercial Workers claiming ordinary queued work."""
-
-    threshold: int = 5
-    routing_mode: str = "parallel"
-    spillover_delay_seconds: int = 0
+class ApiConfig:
+    host: str = "0.0.0.0"
+    port: int = 18008
+    cors_allow_origins: tuple[str, ...] = ("*",)
 
 
 @dataclass(frozen=True)
@@ -144,7 +142,7 @@ class RetryConfig:
     max_poll_recoveries: int = 3
     max_run_lifetime_seconds: int = 7200
     max_workflow_attempts: int = 3
-    policy_version: str = "throughput_first_v1"
+    policy_version: str = "single_target_v1"
     backoff_seconds: tuple[int, ...] = (30, 120, 600)
     lease_seconds: int = 180
     lease_heartbeat_seconds: int = 30
@@ -179,19 +177,13 @@ class AppConfig:
     dify: DifyConfig
     qingtian: QingTianConfig
     mysql: MySQLConfig
-    upload: UploadConfig
     worker: WorkerConfig
-    tos: TosConfig
     migration: MigrationConfig
     task_queue_max_waiting: int = 500
-    commercial_queue: CommercialQueueConfig = field(default_factory=CommercialQueueConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     runner: ProfileRunnerConfig = field(default_factory=ProfileRunnerConfig)
     failure_callback: FailureCallbackConfig = field(default_factory=FailureCallbackConfig)
-
-
-def _default_task_upload_dir() -> Path:
-    return Path(__file__).resolve().parents[2] / "data" / "task-uploads"
+    api: ApiConfig = field(default_factory=ApiConfig)
 
 
 _SUPPORTED_PLATFORMS = ("dify", "qingtian", "runner")
@@ -209,111 +201,103 @@ def load_mysql_config() -> MySQLConfig:
     )
 
 
-def load_config() -> AppConfig:
+def env_value(key: str, default: str = "") -> str:
+    """Read runtime/logging options through the same dotenv precedence rules."""
     _load_dotenv_from_project_root()
-    upload_dir_raw = os.getenv("TASK_UPLOAD_DIR", "").strip()
-    upload_base = (
-        Path(upload_dir_raw).expanduser().resolve()
-        if upload_dir_raw
-        else _default_task_upload_dir().resolve()
-    )
-    workflow_platform = (os.getenv("WORKFLOW_PLATFORM", "dify") or "dify").strip().lower()
-    if workflow_platform not in _SUPPORTED_PLATFORMS:
-        raise ValueError(
-            f"invalid WORKFLOW_PLATFORM: {workflow_platform!r}; "
-            f"expected one of {', '.join(_SUPPORTED_PLATFORMS)}"
-        )
+    return _env_str(key, default)
 
-    dify_required = workflow_platform == "dify"
-    qingtian_required = workflow_platform == "qingtian"
-    worker_role = _worker_role()
-    commercial_queue_config = _commercial_queue_config()
-    retry_config = _retry_config()
-    work_envs = _worker_work_envs(workflow_platform=workflow_platform)
-    runner_config = _runner_config(workflow_platform=workflow_platform, work_envs=work_envs)
-    if workflow_platform == "runner":
-        if _require_env("WORKFLOW_TARGET_ID") in {"local-default", "commercial-default"}:
+
+def load_config(*, component: str = "worker") -> AppConfig:
+    """Only validate settings needed by the process being started.
+
+    API and migrations must remain available when a workflow is unconfigured.
+    Workers share one configuration contract regardless of platform or cost pool.
+    """
+    if component not in {"api", "worker", "migration"}:
+        raise ValueError("component must be api, worker, or migration")
+    _load_dotenv_from_project_root()
+    is_worker = component == "worker"
+    platform = _env_str("WORKFLOW_PLATFORM", "qingtian").lower()
+    if is_worker and platform not in _SUPPORTED_PLATFORMS:
+        raise ValueError("WORKFLOW_PLATFORM must be qingtian or runner (dify is legacy compatibility)")
+    role = _worker_role() if is_worker else "local"
+    task_types = _worker_task_types(workflow_platform=platform) if is_worker else WorkerConfig.task_types
+    work_envs = _worker_work_envs(workflow_platform=platform) if is_worker else WorkerConfig.work_envs
+    target_id = _worker_target_id(role) if is_worker else "local-default"
+    if is_worker and platform == "runner":
+        target_id = _require_env("WORKFLOW_TARGET_ID")
+        if target_id in {"local-default", "commercial-default"}:
             raise ValueError("runner requires an independent WORKFLOW_TARGET_ID")
-        if worker_role != "local":
-            raise ValueError("runner requires WORKER_ROLE=local")
-
-    legacy_dify_api_key = os.getenv("DIFY_API_KEY", "").strip()
-    dify_api_key_test = os.getenv("DIFY_API_KEY_TEST", "").strip() or legacy_dify_api_key
-    dify_api_key_production = os.getenv("DIFY_API_KEY_PRODUCTION", "").strip()
-    invitation_strategy_api_key = os.getenv("DIFY_INVITATION_STRATEGY_API_KEY", "").strip()
+    origins = tuple(v.strip() for v in _env_str("CORS_ALLOW_ORIGINS", "*").split(",") if v.strip())
+    api_port = _positive_env_int("API_PORT", 18008) if component == "api" else 18008
+    if api_port > 65535:
+        raise ValueError("API_PORT must be <= 65535")
     return AppConfig(
-        app_env=os.getenv("APP_ENV", "local").strip() or "local",
-        log_level=os.getenv("LOG_LEVEL", "INFO").strip() or "INFO",
-        workflow_platform=workflow_platform,
-        dify=DifyConfig(
-            base_url=_require_or_empty("DIFY_BASE_URL", dify_required),
-            run_url=_require_or_empty("DIFY_RUN_URL", dify_required),
-            api_key_test=(
-                dify_api_key_test
-                if dify_api_key_test or not dify_required
-                else _require_env("DIFY_API_KEY_TEST")
-            ),
-            api_key_production=(
-                dify_api_key_production
-                if dify_api_key_production or not dify_required
-                else _require_env("DIFY_API_KEY_PRODUCTION")
-            ),
-            invitation_strategy_api_key=(
-                invitation_strategy_api_key
-                if invitation_strategy_api_key or not dify_required
-                else _require_env("DIFY_INVITATION_STRATEGY_API_KEY")
-            ),
-            user_id=_require_or_empty("DIFY_USER_ID", dify_required),
-            image_mode=os.getenv("DIFY_IMAGE_MODE", "file_id").strip() or "file_id",
-            stream_init_timeout_ms=_env_int("DIFY_STREAM_INIT_TIMEOUT_MS", 30000),
-            poll_interval_ms=_env_int("DIFY_POLL_INTERVAL_MS", 2000),
-            poll_timeout_ms=_env_int("DIFY_POLL_TIMEOUT_MS", 2400000),
-        ),
-        qingtian=QingTianConfig(
-            base_url=_require_or_empty("QINGTIAN_BASE_URL", qingtian_required),
-            api_key_test=_require_or_empty("QINGTIAN_API_KEY_TEST", qingtian_required),
-            api_key_production=_require_or_empty("QINGTIAN_API_KEY_PRODUCTION", qingtian_required),
-            invitation_strategy_api_key=_require_or_empty(
-                "QINGTIAN_INVITATION_STRATEGY_API_KEY", qingtian_required
-            ),
-            user_id=_require_or_empty("QINGTIAN_USER_ID", qingtian_required),
-            poll_interval_ms=_env_int("QINGTIAN_POLL_INTERVAL_MS", 2000),
-            poll_timeout_ms=_env_int("QINGTIAN_POLL_TIMEOUT_MS", 2400000),
-        ),
+        app_env=_env_str("APP_ENV", "local") or "local",
+        log_level=_env_str("LOG_LEVEL", "INFO") or "INFO",
+        workflow_platform=platform,
         mysql=load_mysql_config(),
-        failure_callback=_failure_callback_config(),
-        upload=UploadConfig(
-            base_dir=upload_base,
-            max_bytes_per_file=_env_int("TASK_UPLOAD_MAX_BYTES_PER_FILE", 10 * 1024 * 1024),
-        ),
+        dify=_dify_config(selected=is_worker and platform == "dify", task_types=task_types, work_envs=work_envs),
+        qingtian=_qingtian_config(selected=is_worker and platform == "qingtian", task_types=task_types, work_envs=work_envs),
+        runner=(_runner_config(workflow_platform=platform, work_envs=work_envs)
+                if is_worker and platform == "runner" else ProfileRunnerConfig()),
+        failure_callback=_failure_callback_config() if is_worker else FailureCallbackConfig(),
         worker=WorkerConfig(
-            concurrency=_worker_concurrency(),
-            poll_interval_seconds=_env_int("WORKER_POLL_INTERVAL_MS", 2000) / 1000.0,
-            role=worker_role,
-            target_id=_worker_target_id(worker_role),
-            target_revision=_worker_target_revision(),
-            target_mode=_worker_target_mode(),
-            task_types=_worker_task_types(workflow_platform=workflow_platform),
+            concurrency=_worker_concurrency() if is_worker else 1,
+            poll_interval_seconds=_positive_env_int("WORKER_POLL_INTERVAL_MS", 2000) / 1000 if is_worker else 2,
+            role=role,
+            target_id=target_id,
+            target_revision=_worker_target_revision() if is_worker else "v1",
+            target_mode=_worker_target_mode() if is_worker else "active",
+            task_types=task_types,
             work_envs=work_envs,
-            target_failure_threshold=_worker_target_failure_threshold(),
-            target_cooldown_seconds=_worker_target_cooldown_seconds(),
-        ),
-        tos=TosConfig(
-            access_key_id=_env_str("TOS_ACCESS_KEY_ID"),
-            access_key_secret=_env_str("TOS_ACCESS_KEY_SECRET"),
-            region=_env_str("TOS_REGION"),
-            endpoint=_env_str("TOS_ENDPOINT"),
-            bucket=_env_str("TOS_BUCKET"),
-            presigned_url_expires_seconds=_env_int("TOS_PRESIGNED_URL_EXPIRES_SECONDS", 3600),
+            target_failure_threshold=_worker_target_failure_threshold() if is_worker else 3,
+            target_cooldown_seconds=_worker_target_cooldown_seconds() if is_worker else 60,
         ),
         migration=MigrationConfig(
             db_wait_max_tries=_migration_db_wait_max_tries(),
-            db_wait_interval_seconds=_env_int("MIGRATION_DB_WAIT_INTERVAL_MS", 2000) / 1000.0,
+            db_wait_interval_seconds=_positive_env_int("MIGRATION_DB_WAIT_INTERVAL_MS", 2000) / 1000,
         ),
-        task_queue_max_waiting=_task_queue_max_waiting(),
-        commercial_queue=commercial_queue_config,
-        retry=retry_config,
-        runner=runner_config,
+        task_queue_max_waiting=_task_queue_max_waiting() if component != "migration" else 500,
+        retry=_retry_config() if component != "migration" else RetryConfig(),
+        api=ApiConfig(host=_env_str("API_HOST", "0.0.0.0") or "0.0.0.0", port=api_port,
+                      cors_allow_origins=origins or ("*",)),
+    )
+
+
+def _qingtian_config(*, selected: bool, task_types: tuple[str, ...], work_envs: tuple[str, ...]) -> QingTianConfig:
+    if not selected:
+        return QingTianConfig("", "", "", "", "", 2000, 2400000)
+    profile = "customer_profile" in task_types
+    return QingTianConfig(
+        base_url=_validated_url("QINGTIAN_BASE_URL", required=True),
+        api_key_test=_require_or_empty("QINGTIAN_API_KEY_TEST", profile and "test" in work_envs),
+        api_key_production=_require_or_empty("QINGTIAN_API_KEY_PRODUCTION", profile and "production" in work_envs),
+        invitation_strategy_api_key=_require_or_empty("QINGTIAN_INVITATION_STRATEGY_API_KEY", "invitation_strategy" in task_types),
+        user_id=_require_env("QINGTIAN_USER_ID"),
+        poll_interval_ms=_positive_env_int("QINGTIAN_POLL_INTERVAL_MS", 2000),
+        poll_timeout_ms=_positive_env_int("QINGTIAN_POLL_TIMEOUT_MS", 2400000),
+    )
+
+
+def _dify_config(*, selected: bool, task_types: tuple[str, ...], work_envs: tuple[str, ...]) -> DifyConfig:
+    if not selected:
+        return DifyConfig("", "", "", "", "", "", "file_id", 30000, 2000, 2400000)
+    profile = "customer_profile" in task_types
+    test_key = _env_str("DIFY_API_KEY_TEST") or _env_str("DIFY_API_KEY")
+    if profile and "test" in work_envs and not test_key:
+        raise ValueError("missing required environment variable: DIFY_API_KEY_TEST")
+    return DifyConfig(
+        base_url=_validated_url("DIFY_BASE_URL", required=True),
+        run_url=_validated_url("DIFY_RUN_URL", required=True),
+        api_key_test=test_key,
+        api_key_production=_require_or_empty("DIFY_API_KEY_PRODUCTION", profile and "production" in work_envs),
+        invitation_strategy_api_key=_require_or_empty("DIFY_INVITATION_STRATEGY_API_KEY", "invitation_strategy" in task_types),
+        user_id=_require_env("DIFY_USER_ID"),
+        image_mode="file_id",
+        stream_init_timeout_ms=_positive_env_int("DIFY_STREAM_INIT_TIMEOUT_MS", 30000),
+        poll_interval_ms=_positive_env_int("DIFY_POLL_INTERVAL_MS", 2000),
+        poll_timeout_ms=_positive_env_int("DIFY_POLL_TIMEOUT_MS", 2400000),
     )
 
 
@@ -324,7 +308,7 @@ def _require_or_empty(key: str, required: bool) -> str:
 
 
 def _worker_concurrency() -> int:
-    n = _env_int("WORKER_CONCURRENCY", 8)
+    n = _env_int("WORKER_CONCURRENCY", 1)
     if n < 1:
         raise ValueError("WORKER_CONCURRENCY must be >= 1")
     return n
@@ -412,25 +396,6 @@ def _worker_target_cooldown_seconds() -> int:
     return value
 
 
-def _commercial_queue_config() -> CommercialQueueConfig:
-    threshold = _env_int("COMMERCIAL_QUEUE_THRESHOLD", 5)
-    spillover_delay_seconds = _env_int("COMMERCIAL_SPILLOVER_DELAY_SECONDS", 0)
-    routing_mode = _env_str("WORKER_ROUTING_MODE", "parallel").lower()
-    if threshold < 1:
-        raise ValueError("COMMERCIAL_QUEUE_THRESHOLD must be >= 1")
-    if spillover_delay_seconds < 0:
-        raise ValueError("COMMERCIAL_SPILLOVER_DELAY_SECONDS must be >= 0")
-    if routing_mode not in {"parallel", "local_preferred", "local_only"}:
-        raise ValueError(
-            "WORKER_ROUTING_MODE must be one of: parallel, local_preferred, local_only"
-        )
-    return CommercialQueueConfig(
-        threshold=threshold,
-        routing_mode=routing_mode,
-        spillover_delay_seconds=spillover_delay_seconds,
-    )
-
-
 def _task_queue_max_waiting() -> int:
     n = _env_int("TASK_QUEUE_MAX_WAITING", 500)
     if n < 1:
@@ -442,7 +407,7 @@ def _retry_config() -> RetryConfig:
     max_poll_recoveries = _env_int("RETRY_MAX_POLL_RECOVERIES", 3)
     max_run_lifetime_seconds = _env_int("RETRY_MAX_RUN_LIFETIME_SECONDS", 7200)
     max_workflow_attempts = _env_int("RETRY_MAX_WORKFLOW_ATTEMPTS", 3)
-    policy_version = _env_str("RETRY_POLICY_VERSION", "throughput_first_v1").lower()
+    policy_version = _env_str("RETRY_POLICY_VERSION", "single_target_v1").lower()
     if max_poll_recoveries < 1:
         raise ValueError("RETRY_MAX_POLL_RECOVERIES must be >= 1")
     if max_run_lifetime_seconds < 1:

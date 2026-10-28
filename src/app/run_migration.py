@@ -7,9 +7,9 @@ from src.infrastructure.db.migration_runner import run_migration
 
 
 def main() -> int:
+    config = load_config(component="migration")
     configure_root_logging("migration")
     logger = get_logger("migration")
-    config = load_config()
     log_runtime_identity(logger, component="migration", app_env=config.app_env)
     paths = default_contract_paths()
     run_migration(config.mysql, paths, wait=config.migration)
