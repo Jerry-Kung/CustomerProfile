@@ -61,16 +61,19 @@ def test_spec_note_isolated_per_field(notes):
 def test_spec_rules_cover_exactly_the_migrated_fields(notes, registry):
     """迁入字段与登记表里的 SPEC 规则一一对应，不多不少。
 
-    多字段规则（SPEC-17/18）按**全部作用域字段**参与比对：只取 ``scope[0]`` 会让
-    它另外声明的字段既不进比对、也不被任何断言覆盖。
+    多字段规则（SPEC-17）的正文只在**主字段**下渲染一次，其余适用字段由
+    :func:`render.field_note_extra_scopes` 以「本条口径同样适用于」一行带出。
+    因此比对集合是「有正文的字段 ∪ 被同样适用标注的字段」。
     """
+    extra = render.field_note_extra_scopes(stage="extract")
+    covered = set(notes) | {field for fields in extra.values() for field in fields}
     registered = {
         field
         for rule in registry.active()
         if rule.cluster == "spec" and rule.enables_channel("prompt")
         for field in rule.scope
     }
-    assert registered == set(notes)
+    assert registered == covered
 
 
 def test_spec_fields_are_extraction_fields(notes):
@@ -110,10 +113,10 @@ def test_l1_guide_is_unchanged_by_the_migration():
 
     2026-10-27 经业务确认追加一条：``SPEC-16`` 消费等级档位方向（8240 → 8327 字符）。
     2026-10-28 经业务确认追加两条：``SPEC-17`` 小订/大定不是拥车、``SPEC-18`` 小订/
-    大定的车型归意向与进度（8327 → 9345 字符）。
+    大定的看车进度；同日业务确认多字段规则只渲染一次，长度 8327 → 8688 字符。
     """
     guide = pipe.l1_guide()
-    assert len(guide) == 9345
+    assert len(guide) == 8688
     assert "取证范围：从沟通记录里的时间表述推断" in guide
     assert "数字越大代表消费水平越高" in guide
     # 标记不得漏进提示词：它们是落点凭据，不是给模型看的内容

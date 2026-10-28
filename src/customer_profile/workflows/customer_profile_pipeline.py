@@ -1259,6 +1259,7 @@ def field_inference_guide() -> str:
     # 取证方向的正文已随 SPEC 规则迁入 ``rules/texts/spec.txt``。这里按字段取，
     # 不再持有第二份：常量与正文各写一份，正是「改一处漏一处」的老问题。
     notes = rules.render.field_notes(stage="extract")
+    extra_scopes = rules.render.field_note_extra_scopes(stage="extract")
     lines = ["## 目标字段清单（默认全部覆盖，确实无关的可留空）", ""]
     current: str | None = None
     for entry in nc.RAW_CONFIGS:
@@ -1274,6 +1275,10 @@ def field_inference_guide() -> str:
         note = notes.get(key)
         if note:
             lines.append(f"  - 取证范围：{note}")
+        extra = extra_scopes.get(key)
+        if extra:
+            names = "、".join(f"`{item}`" for item in extra)
+            lines.append(f"  - 本条口径同样适用于：{names}")
 
     # ---- 画像卡字段：不在 Notes 契约里，但产出回传体的分析区块
     lines.append("")
@@ -1286,6 +1291,10 @@ def field_inference_guide() -> str:
         note = notes.get(key)
         if note:
             lines.append(f"  - 取证范围：{note}")
+        extra = extra_scopes.get(key)
+        if extra:
+            names = "、".join(f"`{item}`" for item in extra)
+            lines.append(f"  - 本条口径同样适用于：{names}")
 
     # ---- 编外字段：照样取证，但不回传（契约里已经没有它们，不列出来模型就不会去找）
     lines.append("")
@@ -1298,6 +1307,10 @@ def field_inference_guide() -> str:
         note = notes.get(key)
         if note:
             lines.append(f"  - 取证范围：{note}")
+        extra = extra_scopes.get(key)
+        if extra:
+            names = "、".join(f"`{item}`" for item in extra)
+            lines.append(f"  - 本条口径同样适用于：{names}")
     return "\n".join(lines)
 
 

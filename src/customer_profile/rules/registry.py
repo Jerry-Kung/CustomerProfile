@@ -222,6 +222,7 @@ class RuleRegistry:
     def verify(self) -> list[str]:
         """返回全部问题；空列表表示登记表可用。"""
         issues: list[str] = []
+        prompt_scope: dict[str, str] = {}
         for rule in self._rules.values():
             if rule.status != "active":
                 continue
@@ -231,6 +232,22 @@ class RuleRegistry:
                 )
             if rule.cluster and not rule.cluster.strip():
                 issues.append(f"{rule.id} 的 cluster 是空白串")
+            # 同一字段被两条 active 提示词规则占用：渲染时先到先得，后者的正文会
+            # **静默丢失**（SPEC-18 的 `intended_model` 就这样丢过一次）。正文只渲染
+            # 一次的前提是「一个字段只有一条规则说它」，故在启动期拦下。
+            if not rule.enables_channel("prompt"):
+                continue
+            for field in rule.scope:
+                if field == "*":
+                    continue
+                owner = prompt_scope.get(field)
+                if owner is not None:
+                    issues.append(
+                        f"{rule.id} 与 {owner} 都声明了取证方向 {field!r}——"
+                        "同一字段只能有一条提示词规则，否则后者的正文会被丢弃"
+                    )
+                else:
+                    prompt_scope[field] = rule.id
         return issues
 
     def require_valid(self) -> "RuleRegistry":

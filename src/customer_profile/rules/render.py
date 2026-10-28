@@ -164,9 +164,14 @@ def field_notes(
     这个给《目标字段清单》这类**按字段逐行**渲染的场景——正文要贴着字段出现，拼成
     一整节模型就读不到归属了。
 
+    **多字段规则只在它的第一个字段下渲染一次**（2026-10-28）：一条规则声明五个字段
+    就把同一段正文抄五遍，是最贵的写法——SPEC-17 曾因此让提示词多出 920 字，全部是
+    重复。其余适用字段由 :func:`field_note_extra_scopes` 给出，调用方渲染成一行
+    「本条口径同样适用于：…」。
+
     ``scope=("*",)`` 的规则不参与：全局规则没有「贴在哪个字段下面」这回事，调用方
-    要用它就该走 :func:`render`。同一字段被两条规则命中时先到先得并留给守卫报红——
-    一处被两条规则共用，说明这两条该拆。
+    要用它就该走 :func:`render`。同一字段被两条 active 规则占用在启动期自检即报错
+    （:meth:`RuleRegistry.verify`），不会静默丢正文。
     """
     table = registry if registry is not None else default_registry()
     pools = blocks if blocks is not None else load_blocks()
@@ -186,7 +191,35 @@ def field_notes(
             if field == "*":
                 continue
             notes.setdefault(field, text)
+            break
     return notes
+
+
+def field_note_extra_scopes(
+    *,
+    stage: str = "extract",
+    registry: RuleRegistry | None = None,
+    blocks: Mapping[str, RuleBlock] | None = None,
+) -> dict[str, tuple[str, ...]]:
+    """``{主字段: 其余适用字段}``：多字段规则在正文之外还要标注的字段名。
+
+    与 :func:`field_notes` 配对使用——正文只抄一次，其余字段以一行列名带过。
+    只列**真的会被渲染到字段清单里**的字段（交集 ``EXTRACTION_KEYS`` 等由调用方
+    保证），这里照规则声明原样返回。
+    """
+    table = registry if registry is not None else default_registry()
+    pools = blocks if blocks is not None else load_blocks()
+    extra: dict[str, tuple[str, ...]] = {}
+    for rule in table.active():
+        if not rule.enables_channel("prompt") or not rule.enables_stage(stage):
+            continue
+        block = pools.get(rule.id)
+        if block is None or not block.text.strip():
+            continue
+        fields = tuple(field for field in rule.scope if field != "*")
+        if len(fields) > 1:
+            extra[fields[0]] = fields[1:]
+    return extra
 
 
 def render_rule(rule: Rule, *, blocks: Mapping[str, RuleBlock] | None = None) -> str:
