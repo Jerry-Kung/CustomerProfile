@@ -363,64 +363,42 @@ class MySQLTaskRepository:
                 conn.commit()
                 return None
 
+            claimed_target_id = row.get("workflow_target_id") or workflow_target_id
+            claimed_target_revision = (
+                workflow_target_revision if row.get("workflow_target_id") is None
+                else row.get("workflow_target_revision") or workflow_target_revision
+            )
             token = uuid.uuid4().hex
+            # The selected task stays locked until commit. All admission and
+            # legacy-owner checks ran above; fence the update to that same
+            # generation/status instead of duplicating the selection policy.
             cursor.execute(
                 """
                 UPDATE customer_profile_tasks
                 SET status = 'processing',
                     execution_backend = %s,
                     execution_pool = %s,
-                    workflow_target_id = COALESCE(workflow_target_id, %s),
-                    workflow_target_revision = COALESCE(workflow_target_revision, %s),
+                    workflow_target_id = %s,
+                    workflow_target_revision = %s,
                     claim_token = %s,
                     lease_expires_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL %s SECOND),
                     started_at = CURRENT_TIMESTAMP,
                     next_retry_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
-                  AND (
-                    (
-                        status = 'retry_wait'
-                        AND next_retry_at <= CURRENT_TIMESTAMP
-                        AND (
-                            (
-                                workflow_target_id = %s
-                                AND (
-                                    workflow_target_revision IS NULL
-                                    OR workflow_target_revision = %s
-                                )
-                            )
-                            OR (
-                                workflow_target_id IS NULL
-                                AND workflow_run_id IS NULL
-                                AND %s = 1
-                                AND (
-                                    execution_pool = %s
-                                    OR execution_pool = 'any'
-                                )
-                            )
-                        )
-                    )
-                    OR (
-                        status = 'queued'
-                        AND workflow_target_id IS NULL
-                        AND %s = 1
-                    )
-                  )
+                  AND generation = %s
+                  AND status = %s
                 """,
                 (
                     execution_pool,
                     execution_pool,
-                    workflow_target_id,
-                    workflow_target_revision,
+                    claimed_target_id,
+                    claimed_target_revision,
                     token,
                     lease_seconds,
                     row["id"],
-                    workflow_target_id,
-                    workflow_target_revision,
-                    int(allow_unbound_retries),
-                    execution_pool,
-                    int(allow_new_tasks),
+                    row["generation"],
+                    row["status"],
                 ),
             )
             if cursor.rowcount != 1:
@@ -438,10 +416,8 @@ class MySQLTaskRepository:
             row["claim_token"] = token
             row["execution_backend"] = execution_pool
             row["execution_pool"] = execution_pool
-            row["workflow_target_id"] = row.get("workflow_target_id") or workflow_target_id
-            row["workflow_target_revision"] = (
-                row.get("workflow_target_revision") or workflow_target_revision
-            )
+            row["workflow_target_id"] = claimed_target_id
+            row["workflow_target_revision"] = claimed_target_revision
             record = self._to_record(row)
             queued_at = row.get("queued_at") or row.get("updated_at")
             queue_wait_seconds = (
@@ -1644,8 +1620,12 @@ class MySQLTaskRepository:
                 admission_scope = " AND ".join(filters) if filters else "1 = 1"
                 filters = [f"((status IN ('queued', 'retry_wait') AND workflow_target_id IS NULL "
                            f"AND {admission_scope}) OR (workflow_target_id = %s AND "
-                           "(workflow_target_revision IS NULL OR workflow_target_revision = %s)))"]
-                filter_params.extend((workflow_target_id, workflow_target_revision))
+                           "(workflow_target_revision IS NULL OR workflow_target_revision = %s)) "
+                           f"OR (status = 'retry_wait' AND workflow_target_id IS NULL "
+                           f"AND workflow_run_id IS NULL AND retry_policy_version = 'single_target_v1' "
+                           f"AND attempt_count > 0 AND {_last_retry_attempt_exists_sql(match_target=True)}))"]
+                filter_params.extend((workflow_target_id, workflow_target_revision,
+                                      workflow_target_id, workflow_target_revision))
             scope = " WHERE " + " AND ".join(filters) if filters else ""
             cursor.execute(
                 f"""
@@ -1656,7 +1636,8 @@ class MySQLTaskRepository:
                     SUM(status = 'succeeded') AS succeeded_count,
                     SUM(status = 'failed') AS failed_count,
                     SUM(status = 'retry_wait' AND retry_policy_version = 'single_target_v1'
-                        AND workflow_target_id IS NULL AND attempt_count > 0) AS unbound_single_target_retry_count,
+                        AND workflow_target_id IS NULL AND attempt_count > 0
+                        AND (workflow_run_id IS NOT NULL OR NOT {_last_retry_attempt_exists_sql()})) AS unbound_single_target_retry_count,
                     SUM(
                         status = 'processing'
                         AND COALESCE(workflow_run_started_at, started_at, updated_at) < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 40 MINUTE)
@@ -1671,7 +1652,7 @@ class MySQLTaskRepository:
                         MIN(CASE WHEN status = 'processing' THEN COALESCE(workflow_run_started_at, started_at, updated_at) END),
                         CURRENT_TIMESTAMP
                     ) AS oldest_processing_age_seconds
-                FROM customer_profile_tasks {scope}
+                FROM customer_profile_tasks AS task {scope}
                 """, tuple(filter_params),
             )
             row = cursor.fetchone() or {}
@@ -1898,6 +1879,36 @@ def _select_next_queued_sql(
     return sql, tuple(params)
 
 
+def _last_retry_attempt_exists_sql(*, match_target: bool = False, match_pool: bool = False) -> str:
+    """Read legacy retry ownership from existing audit rows; never bulk backfill.
+
+    A finished retryable attempt is proof of a safe new run on that same target.
+    Missing, stale-generation or uncertain submissions must remain unclaimed.
+    """
+    # Target identity must stay case sensitive even on the default MySQL collation.
+    target_filter = (
+        "AND CAST(last_attempt.workflow_target_id AS BINARY) = CAST(%s AS BINARY) "
+        "AND CAST(last_attempt.workflow_target_revision AS BINARY) = CAST(%s AS BINARY)"
+        if match_target else ""
+    )
+    pool_filter = "AND COALESCE(last_attempt.execution_pool, last_attempt.execution_backend) = %s" if match_pool else ""
+    return f"""EXISTS (
+        SELECT 1 FROM customer_profile_task_attempts AS last_attempt
+        WHERE last_attempt.task_id = task.id
+          AND last_attempt.generation = task.generation
+          AND last_attempt.attempt_no = task.attempt_count
+          AND last_attempt.status = 'failed'
+          AND last_attempt.retryable = 1
+          AND last_attempt.workflow_target_id IS NOT NULL
+          AND last_attempt.workflow_target_id <> ''
+          AND last_attempt.workflow_target_revision IS NOT NULL
+          AND last_attempt.workflow_target_revision <> ''
+          AND COALESCE(last_attempt.execution_pool, last_attempt.execution_backend) IN ('local', 'commercial')
+          {target_filter}
+          {pool_filter}
+    )"""
+
+
 def _select_next_eligible_sql(
     has_work_env: bool,
     has_batch_id: bool,
@@ -1984,6 +1995,15 @@ def _select_next_eligible_sql(
                         AND task.execution_pool = %s
                     )
                     OR (
+                        task.status = 'retry_wait'
+                        AND task.next_retry_at <= CURRENT_TIMESTAMP
+                        AND task.retry_policy_version = 'single_target_v1'
+                        AND task.workflow_target_id IS NULL
+                        AND task.workflow_run_id IS NULL
+                        AND task.attempt_count > 0
+                        AND {_last_retry_attempt_exists_sql(match_target=True, match_pool=True)}
+                    )
+                    OR (
                         (
                             (
                                 task.status = 'retry_wait'
@@ -2035,6 +2055,9 @@ def _select_next_eligible_sql(
                 FOR UPDATE SKIP LOCKED
                 """
     params: tuple[object, ...] = (
+        workflow_target_id,
+        workflow_target_revision,
+        execution_pool,
         workflow_target_id,
         workflow_target_revision,
         execution_pool,

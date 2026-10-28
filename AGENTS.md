@@ -61,10 +61,13 @@ are explicitly mapped to the uniform runtime contract; per-process concurrency m
 is total configured capacity. Config changes require container recreation, not just restart.
 
 Migrations scan all db/migrations/*.sql in order, executing statements on one connection. Every migration
-must be replay-safe; keep the splitter's session-variable semantics. Current migrations are 001–009.
-009 restores lost single-target retry bindings from the same generation's latest attempt. A previously
-attempted single-target retry without provable lineage must stay blocked and observable, not be guessed
-from its local/commercial pool. Update deployment docs whenever adding migrations.
+must be replay-safe; keep the splitter's session-variable semantics. Current migrations are 001–008.
+The unified Worker change adds no migrations, schema changes or bulk historical-data repair. Resolve
+lost single-target retry ownership by reading the same generation's last failed, retryable attempt
+inside the normal claim transaction. Only its exact target/revision/pool may claim it, including while
+draining. Without provable lineage, keep the task blocked and observable; never guess from its pool.
+On an existing 008 deployment, update API/Workers with Compose --no-deps to skip the migration service.
+Update deployment docs whenever changing these rules.
 
 Never modify/push production configuration, run real workflows, or migrate a business database just to
 validate code. Prefer isolated tests. Keep passwords, API keys and tokens out of source and tool output.

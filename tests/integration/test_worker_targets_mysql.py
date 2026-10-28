@@ -95,7 +95,7 @@ def test_failed_run_stays_on_target_and_old_claim_cannot_overwrite(repository):
         claim_token=resumed.claim_token, output={"current": True}, card_id=None, nickname=None, attempt_no=attempt)
 
 
-def test_scope_filters_and_replay_safe_upgrade_restore_old_retry(repository):
+def test_scope_filters_and_old_retry_claim_without_data_migration(repository):
     repo, config = repository
     submit(repo, 1, task_type="invitation_strategy")
     submit(repo, 2, work_env="test")
@@ -118,7 +118,8 @@ def test_scope_filters_and_replay_safe_upgrade_restore_old_retry(repository):
     finally:
         connection.close()
     assert claim(repo, "runner-production") is None
-    for _ in range(2):
-        run_migration(config, default_contract_paths(), wait=MigrationConfig(1, 0))
-    assert claim(repo, "runner-production") is None
-    assert claim(repo, "qt-a").id == owned.id
+    assert claim(repo, "qt-b") is None
+    assert claim(repo, "QT-A") is None
+    resumed = claim(repo, "qt-a", active=False, types=("invitation_strategy",), envs=("test",))
+    assert resumed.id == owned.id
+    assert resumed.workflow_target_id == "qt-a" and resumed.workflow_target_revision == "v1"

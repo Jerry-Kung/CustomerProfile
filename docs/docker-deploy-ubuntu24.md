@@ -104,8 +104,8 @@ nano .env   # 或用 vim
 ## 4. 数据库迁移
 
 无需手工逐个执行 SQL。Compose 的 `migrate` 一次性服务会按文件名顺序执行全部幂等
-迁移（当前 001–009，包括重试状态、目标绑定和旧单目标重试修复），成功后 API 和三个
-Worker 才会启动。已有环境按[升级顺序](worker-configuration.md#重试与升级顺序)统一替换消费者。
+迁移（当前仍为既有 001–008），成功后 API 和三个 Worker 才会启动。本次不新增迁移或
+改表；已有 008 环境按[升级顺序](worker-configuration.md#重试与升级顺序)跳过迁移服务、统一替换消费者。
 
 ---
 
@@ -270,9 +270,8 @@ HTTPS 页面调用 HTTP 接口还会受到浏览器混合内容限制，应保�
 # 停止
 docker compose down
 
-# 更新代码后重新构建并启动
-docker compose build --no-cache
-docker compose up -d
+# 已完成 008 的环境：更新代码并跳过迁移服务
+scripts/compose.sh up -d --build --no-deps api worker commercial-worker profile-runner-worker
 
 # 查看资源占用
 docker stats
@@ -284,7 +283,7 @@ docker stats
 
 - [ ] Docker 与 `docker compose` 可用  
 - [ ] `.env` 中 MySQL、擎天、Runner 及业务 M2M 地址对容器可达（注意 `127.0.0.1` 陷阱）
-- [ ] `migrate` 已成功执行全部 `001`–`009` 迁移
+- [ ] 首次部署已执行既有 `001`–`008` 迁移；已有 008 环境更新跳过 migrate
 - [ ] `HOST_API_PORT` 无冲突，且 **UFW + 云安全组** 已放通  
 - [ ] `curl http://127.0.0.1:<HOST_API_PORT>/ready` 返回 HTTP 200、数据库 `up`
 - [ ] 前端 Base URL = `http(s)://<主机>:<HOST_API_PORT>`（或反代后的域名）

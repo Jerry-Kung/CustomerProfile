@@ -30,11 +30,12 @@ customer-profile-worker
 
 ## 数据库迁移
 
-customer-profile-migrate 扫描 db/migrations/*.sql，按文件名排序；当前 001–009。所有文件保持
-幂等，使用同一连接执行单条 SQL。先迁移后升级所有 Worker，不删除旧状态字段或尝试历史。
+customer-profile-migrate 扫描 db/migrations/*.sql，按文件名排序；当前仍为既有 001–008。
+本次统一 Worker 不新增迁移、不改表/字段，也不批量修复历史任务。已完成 008 的环境
+可按[升级顺序](worker-configuration.md#重试与升级顺序)使用 Compose --no-deps 直接更新 API/Worker，跳过 migrate。
 
-009 恢复旧单目标重试丢失的目标绑定，无法证明归属时不允许其他目标接管。注意此保护适用于
-已经尝试过的单目标任务；全新未执行任务仍可由任何能力匹配的 active Worker 竞争。
+旧单目标重试丢失绑定时，在正常领取事务中读取现有 attempt，只有原目标可以接续；无法
+证明归属时不允许其他目标接管。全新未执行任务仍可由任何能力匹配的 active Worker 竞争。
 迁移以及业务用户需具备相应表的访问/建表权限。等待参数：MIGRATION_DB_WAIT_MAX_TRIES=30、
 MIGRATION_DB_WAIT_INTERVAL_MS=2000。
 
@@ -69,6 +70,6 @@ scripts/compose.sh logs --tail=100 api worker commercial-worker profile-runner-w
 ```
 
 /health 保留原响应，/ready 在 DB 不可用时返回 503。Worker 汇总按范围和目标观察；
-worker_retry_lineage_missing 表示需核对旧 attempts 和 009 迁移，不能直接清除远端 ID 重跑。
+worker_retry_lineage_missing 表示现有 attempts 无法证明旧重试的原目标，需核对历史与远端状态，不能清除远端 ID 重跑。
 任务停留 queued 时先核对是否存在匹配类型和环境的 active 目标、Runner 业务身份是否有效，
 再看目标熔断、容量和平台连接。排空目标仍会恢复自身已绑定运行，应保留其原 URL/凭据。

@@ -25,6 +25,7 @@ class Cursor:
             self.db.execute("BEGIN")
             return
         sql = sql.replace("FOR UPDATE SKIP LOCKED", "").replace("FOR UPDATE", "")
+        sql = sql.replace(" AS BINARY)", " AS BLOB)")  # Exact byte comparison on both engines.
         sql = re.sub(r"DATE_(ADD|SUB)\(\s*CURRENT_TIMESTAMP,\s*INTERVAL (%s|\d+) (SECOND|MINUTE)\s*\)",
                      lambda m: "datetime(CURRENT_TIMESTAMP, '" + ("+" if m[1] == "ADD" else "-")
                      + "' || " + m[2] + " || ' " + m[3].lower() + "s')", sql)
@@ -118,6 +119,19 @@ def retry(repo, **overrides):
     return repo.schedule_retry(**args)
 
 
+def insert_legacy_retry(db, *, task_id=91, pool="local", **attempt_overrides):
+    insert_task(db, task_id=task_id, attempt_count=1, execution_pool=pool)
+    db.execute("UPDATE customer_profile_tasks SET status='retry_wait', workflow_target_id=NULL, "
+               "workflow_target_revision=NULL, claim_token=NULL, next_retry_at=CURRENT_TIMESTAMP WHERE id=?", (task_id,))
+    attempt = dict(task_id=task_id, generation=7, attempt_no=1, status="failed", retryable=1,
+                   workflow_target_id="qt-a", workflow_target_revision="v1", execution_pool=pool,
+                   execution_backend=pool)
+    attempt.update(attempt_overrides)
+    db.execute("INSERT INTO customer_profile_task_attempts (" + ",".join(attempt) + ") VALUES ("
+               + ",".join("?" for _ in attempt) + ")", tuple(attempt.values()))
+    db.commit()
+
+
 @pytest.mark.parametrize("pool", ("local", "commercial"))
 def test_new_run_keeps_target_and_can_be_claimed_by_another_replica(repository, pool):
     repo, db = repository
@@ -202,3 +216,53 @@ def test_pre_upgrade_single_target_retry_without_lineage_is_not_reassigned(repos
     assert claim(repo, "runner-production") is None
     assert claim(repo, "qt-a") is None
     assert repo.get_queue_stats(workflow_target_id="qt-a", workflow_target_revision="v1")["unbound_single_target_retry_count"] == 1
+
+
+@pytest.mark.parametrize("pool", ("local", "commercial"))
+def test_legacy_retry_resumes_on_proven_owner_without_migration_or_bulk_repair(repository, pool):
+    repo, db = repository
+    insert_legacy_retry(db, pool=pool)
+    insert_legacy_retry(db, task_id=92, pool=pool)
+    before = [dict(row) for row in db.execute("SELECT * FROM customer_profile_tasks ORDER BY id")]
+    assert claim(repo, "runner-production", pool=pool) is None
+    assert claim(repo, "qt-b", pool=pool) is None
+    assert claim(repo, "qt-a", revision="v2", pool=pool) is None
+    assert claim(repo, "QT-A", pool=pool) is None
+    assert claim(repo, "qt-a", revision="V1", pool=pool) is None
+    stats = repo.get_queue_stats(task_types=("invitation_strategy",), work_envs=("test",),
+                                workflow_target_id="qt-a", workflow_target_revision="v1")
+    assert stats["retry_wait_count"] == 2  # Original owner stays visible outside the new scope.
+    assert stats["unbound_single_target_retry_count"] == 0
+    assert [dict(row) for row in db.execute("SELECT * FROM customer_profile_tasks ORDER BY id")] == before
+    resumed = claim(repo, "qt-a", pool=pool, active=False, types=("invitation_strategy",), envs=("test",))
+    assert resumed.id == 91 and resumed.workflow_target_id == "qt-a"
+    assert resumed.workflow_target_revision == "v1" and resumed.workflow_run_id is None
+    assert resumed.generation == 7 and resumed.attempt_count == 1
+    # Normal claim updates only its task; there is no migration or sweep of other rows.
+    assert dict(db.execute("SELECT * FROM customer_profile_tasks WHERE id=92").fetchone()) == before[1]
+    assert db.execute("SELECT COUNT(*) FROM customer_profile_task_attempts").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("attempt", [
+    {"generation": 6}, {"attempt_no": 0}, {"status": "submitting"}, {"status": "abandoned"},
+    {"retryable": 0}, {"workflow_target_id": None}, {"workflow_target_revision": None},
+    {"workflow_target_id": ""}, {"execution_pool": "any", "execution_backend": "any"},
+])
+def test_legacy_retry_never_guesses_missing_or_uncertain_owner(repository, attempt):
+    repo, db = repository
+    insert_legacy_retry(db, **attempt)
+    assert claim(repo, "qt-a") is None
+    assert claim(repo, "runner-production") is None
+    stats = repo.get_queue_stats(workflow_target_id="qt-a", workflow_target_revision="v1")
+    assert stats["unbound_single_target_retry_count"] == 1
+
+
+def test_legacy_retry_respects_backoff_and_does_not_reassign_known_run(repository):
+    repo, db = repository
+    insert_legacy_retry(db)
+    db.execute("UPDATE customer_profile_tasks SET next_retry_at='2999-01-01 00:00:00'")
+    db.commit()
+    assert claim(repo, "qt-a") is None
+    db.execute("UPDATE customer_profile_tasks SET next_retry_at=CURRENT_TIMESTAMP, workflow_run_id='unknown-owner-run'")
+    db.commit()
+    assert claim(repo, "qt-a") is None

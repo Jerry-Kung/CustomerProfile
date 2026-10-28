@@ -102,16 +102,26 @@ PROFILE_FAILURE_CALLBACK_ENABLED=true 配合 PROFILE_API_BASE_URL、PROFILE_API_
 同一个 run_id；明确终态失败可在相同目标创建下一运行，默认最多 3 次。旧
 throughput_first_v1/local_first_v1 任务继续采用其已持久化的策略，不能凭资源池推断原目标。
 
-1. 暂停旧消费者的新领取，保留在途运行的目标身份和凭据；备份数据库及已部署配置。
-2. 使用新镜像执行 migrate（扫描 001–009），先迁移、后统一更新所有 Worker/API。
-3. 009 从同一 generation 最后一次已确认失败、可重试的 attempt 恢复旧单目标重试的目标 ID/revision。
-   无法恢复的已尝试单目标任务会留在 retry_wait，并在日志提示 worker_retry_lineage_missing；
-   核对 attempts/远端状态后处理，不能任意指向 Runner 或从头重跑。
-4. 统一替换旧消费者，再启用各组 active。保留相同的旧 ID/revision 恢复存量。
+本次不新增迁移、不改表/字段，也不批量回填历史数据；复用 main 已有的 001–008 结构。
+旧单目标重试如果丢了绑定，领取 SQL 会只读查询同一 generation 最后一次已确认失败且
+可重试的 attempt，只允许其中记录的目标 ID/revision/pool 领取。这个判断也适用于 draining，
+不会要求原目标重新接收新任务；只有正常领取的那条任务会更新状态和绑定。
+无法证明归属的任务继续留在 retry_wait，并提示 worker_retry_lineage_missing，需核对
+attempts/远端状态，不能任意指向 Runner 或从头重跑。
+
+1. 确认当前环境已使用 main 的 001–008 库结构，保存已部署镜像和配置。
+2. 暂停旧消费者的新领取，保留在途运行的目标身份和凭据；统一替换旧消费者。
+3. 已有 008 环境更新时跳过迁移服务，不需要执行额外 SQL：
+
+   ```bash
+   scripts/compose.sh up -d --build --no-deps api worker commercial-worker profile-runner-worker
+   ```
+
+4. 启用各组 active；保留相同的旧 ID/revision 恢复存量。
 5. 先以小并发启动 Runner，比较按目标统计的成功、耗时、业务回写和样本质量，再调整容量。
 
-回滚时保留新增迁移和尝试历史，恢复上一个已验证的镜像/配置；旧版可能再次清空目标，
-重新升级前重跑幂等迁移。不要回退/删除已经上线的数据库列来配合镜像回滚。
+首次建库仍使用已有 migrate 服务执行 001–008；本次功能不增加其 SQL 文件。回滚时恢复
+上一个已验证的镜像/配置并保留原数据库和尝试历史，不需要本次功能的数据库回滚。
 
 完全迁移后，让旧画像组进入 draining，直到该目标的 processing/retry_wait 及失败通知均完成
 再停止。邀请若仍走擎天，应继续保留邀请目标、客户端和公共平台配置。

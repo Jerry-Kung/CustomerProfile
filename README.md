@@ -37,6 +37,6 @@ docker compose up -d --build
 
 同一份 Compose 会先迁移，再启动 API 和多个统一 Worker。主线支持 `qingtian`、`runner` 两种平台；每个组独立配置任务范围、环境、目标身份、并发和模式。商用也是普通擎天目标，旧工作流与新服务可按空闲并发共同消费画像；邀请可以配置独立组。
 
-新任务默认同目标重试，远端运行可由相同目标的其他副本恢复。增加不同目标或扩容副本无需新增业务执行代码。配置来源、现有线上 env 迁移、009 升级保护和多目标示例统一见 [Worker 配置指南](docs/worker-configuration.md)。
+新任务默认同目标重试，远端运行可由相同目标的其他副本恢复。增加不同目标或扩容副本无需新增业务执行代码。本次复用现有库结构，不新增数据库迁移；配置来源、现有线上 env 调整、兼容处理和多目标示例统一见 [Worker 配置指南](docs/worker-configuration.md)。
 
 使用外部环境文件时推荐 `scripts/compose.sh --env-file /absolute/path/env`，让 Compose 插值和容器注入使用同一份文件。API 和迁移不再要求工作流凭据，也不初始化未使用的上传目录。

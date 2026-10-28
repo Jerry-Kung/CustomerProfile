@@ -101,7 +101,7 @@ class WorkerRunner:
                 self._logger.exception("worker_operational_snapshot_failed")
         if snapshot.get("unbound_single_target_retry_count"):
             self._logger.warning(
-                "worker_retry_lineage_missing tasks=%s action=apply_migration_009_and_reconcile_attempt_history",
+                "worker_retry_lineage_missing tasks=%s action=reconcile_attempt_history_and_remote_state",
                 snapshot["unbound_single_target_retry_count"],
             )
         self._logger.info(
