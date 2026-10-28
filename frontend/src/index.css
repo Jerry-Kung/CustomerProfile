@@ -1466,6 +1466,33 @@ button {
   text-align: center;
 }
 
+/* 参考标准表的准入模式徽标。两类用不同色调：事实是「有原文」，推断是「有依据」，
+ * 不是好坏之分，所以两类都用中性偏冷的色，不借用 ok/danger。 */
+.admission-fact {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  color: var(--accent);
+}
+
+.admission-controlled_inference {
+  background: var(--tone-muted-bg);
+  border: 1px solid var(--tone-muted-line);
+  color: var(--tone-muted);
+}
+
+/* 一个字段下挂多条规则时，逐条给标题行，正文各自成块。 */
+.standard-rule + .standard-rule {
+  margin-top: 12px;
+}
+
+.standard-rule-head {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
 .pager {
   align-items: center;
   border-top: 1px solid var(--border);

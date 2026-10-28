@@ -204,6 +204,9 @@ export function RuleCatalog() {
   const shown = useMemo(() => {
     const text = keyword.trim().toLowerCase()
     return rules.filter((rule) => {
+      // 逐字段口径已收进「参考标准表」。这里不显示，避免同一句话在两页各说一遍、
+      // 改一处漏一处；规则本身仍生效，接口也照旧返回（见后端注释）。
+      if (rule.in_reference_standards) return false
       if (cluster && rule.cluster !== cluster) return false
       if (channel && !rule.channels.includes(channel)) return false
       if (!text) return true

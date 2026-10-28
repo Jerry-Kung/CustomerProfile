@@ -300,6 +300,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
         """
         from dataclasses import asdict
 
+        from .reference_standards import is_field_bound
         from .rules import default as default_rules
         from .rules import guard as rule_guard
         from .rules import render as rule_render
@@ -320,6 +321,10 @@ def create_app(service_factory: Any = None) -> FastAPI:
             block = blocks.get(rule.id)
             row["text"] = block.text.strip() if block is not None else ""
             row["landings"] = landings.get(rule.id, [])
+            # 逐字段口径已收进参考标准表。**不在这里过滤**：接口仍返回全量，
+            # 由页面决定显示哪一页。规则本身照旧生效，过滤只是视图层的事——
+            # 若在此处删行，``total`` 与登记表就不再对得上。
+            row["in_reference_standards"] = is_field_bound(rule)
             rows.append(row)
 
         return {
@@ -327,6 +332,20 @@ def create_app(service_factory: Any = None) -> FastAPI:
             "active": len(registry.active()),
             "rules": rows,
         }
+
+    @app.get("/standards", tags=["meta"])
+    async def list_standards() -> dict[str, Any]:
+        """参考标准表（运行台「参考标准表」页用）。
+
+        与 ``/rules`` 同一定位：只读、不依赖服务实例、进程常量现拼。**没有写接口**——
+        这一页只是把散在契约、编外登记表与规则正文里的字段口径汇到一处给人看。
+
+        派生列（名称/业务类型/定义/输出模式）全部现读，不在这里留副本；表里真正
+        手写的只有准入模式与三列说明。因此契约一变，刷新页面即对齐。
+        """
+        from .reference_standards import build_payload
+
+        return build_payload()
 
     # ------------------------------------------------------------ 运行
 

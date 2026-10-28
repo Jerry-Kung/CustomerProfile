@@ -194,12 +194,50 @@ export interface RuleConfig {
   legacy_codes: string[]
   text: string
   landings: RuleLanding[]
+  /** 是否已收进参考标准表。为真时「规则清单」页不显示，改在标准表里按字段看。 */
+  in_reference_standards: boolean
 }
 
 export interface RuleCatalog {
   total: number
   active: number
   rules: RuleConfig[]
+}
+
+/** 参考标准表里挂在某字段下的规则（`GET /standards`）。 */
+export interface StandardRule {
+  id: string
+  title: string
+  channels: string[]
+  default_action: string
+  text: string
+}
+
+/** 参考标准表的一行：一个字段的全部填写口径。 */
+export interface StandardRow {
+  code: string
+  attribute_key: string
+  name: string
+  category: string
+  field_type: string
+  scope_label: string
+  description: string
+  admission: string
+  admission_label: string
+  admission_hint: string
+  output_mode: string
+  reasoning_path: string
+  forbidden: string
+  note: string
+  rules: StandardRule[]
+}
+
+export interface StandardTable {
+  contract_signature: string
+  total: number
+  by_admission: Record<string, number>
+  admission_labels: Record<string, string>
+  rows: StandardRow[]
 }
 
 export interface WorkflowBrief {
@@ -264,6 +302,9 @@ export const api = {
 
   /** 当前项目配置的全部规则。规则集是进程常量，与运行无关，服务未就绪也能取。 */
   rules: () => getJson<RuleCatalog>('/rules'),
+
+  /** 参考标准表：每个回传字段的准入模式、输出模式与挂在上面的规则。只读。 */
+  standards: () => getJson<StandardTable>('/standards'),
 
   /** 当前运行态（回放模式、回写开关、并发上限）。 */
   runtime: () => getJson<RuntimeInfo>('/runtime'),

@@ -15,9 +15,10 @@ import { api, type RuntimeInfo } from './api/client'
 import { RuleCatalog } from './components/RuleCatalog'
 import { RunList } from './components/RunList'
 import { RunDetail } from './components/RunDetail'
+import { StandardTable } from './components/StandardTable'
 import { SubmitRun } from './components/SubmitRun'
 
-type Tab = 'runs' | 'submit' | 'rules'
+type Tab = 'runs' | 'submit' | 'rules' | 'standards'
 
 function App() {
   const [tab, setTab] = useState<Tab>('runs')
@@ -72,6 +73,13 @@ function App() {
           >
             规则清单
           </button>
+          <button
+            type="button"
+            className={tab === 'standards' ? 'active' : ''}
+            onClick={() => setTab('standards')}
+          >
+            参考标准表
+          </button>
         </nav>
       </header>
 
@@ -97,6 +105,8 @@ function App() {
         ) : null}
 
         {tab === 'rules' ? <RuleCatalog /> : null}
+
+        {tab === 'standards' ? <StandardTable /> : null}
 
         {tab === 'runs' && currentRun ? (
           <RunDetail
