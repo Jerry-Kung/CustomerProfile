@@ -127,6 +127,15 @@ async def execute_code(
     """
     function = _lookup_code_function(node, rt)
     inputs = ctx.bind_inputs(node.bindings)
+    # 声明了 ``node_ref`` 的 code 函数才能拿到尝试留痕的引用。
+    #
+    # **为什么要给**：code 节点调用 ``llm_call`` 时不传 ``node_ref``，``_record_attempt``
+    # 会直接返回——于是「这个节点发过几次请求、有没有重试、为什么失败」在
+    # ``request_attempts`` 里一条也查不到。llm 节点天然有留痕，改写成 code 节点后
+    # 静默丢掉（2026-10-28 L2 兜底改造实测：整批 0 条）。只给声明了该参数的函数注入，
+    # 其余 code 函数签名与行为不变。
+    if "node_ref" in inspect.signature(function).parameters:
+        inputs.setdefault("node_ref", _attempt_ref(ctx, node))
 
     if inspect.iscoroutinefunction(function):
         raw = await function(**inputs)
@@ -143,6 +152,26 @@ async def execute_code(
             f"code 节点 {node.node_id} 返回值应为字段字典，实际为 {type(raw)!r}"
         )
     return ExecutionOutcome(outputs=dict(raw))
+
+
+class _CodeAttemptRef:
+    """code 节点调用外部服务时的留痕引用。
+
+    只带 ``attempt_recorded`` 真正会读的三个属性（``run_id`` / ``node_id`` / ``call_path``），
+    形态与 llm 执行器的 ``_NodeRef`` 一致——留痕层按 getattr 读取，不依赖具体类型。
+    """
+
+    __slots__ = ("run_id", "node_id", "call_path", "node_title")
+
+    def __init__(self, ctx: RunContext, node: NodeDef) -> None:
+        self.run_id = ctx.run_id
+        self.node_id = node.node_id
+        self.call_path = ctx.call_path
+        self.node_title = node.title
+
+
+def _attempt_ref(ctx: RunContext, node: NodeDef) -> _CodeAttemptRef:
+    return _CodeAttemptRef(ctx, node)
 
 
 def _lookup_code_function(node: NodeDef, rt: NodeRuntime) -> Callable[..., Any]:

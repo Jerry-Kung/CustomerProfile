@@ -474,12 +474,23 @@ def looks_like_enum_key(value: Any) -> bool:
 
 
 def legacy_cross_field(attribute_key: str, value: Any) -> str | None:
-    """旧字段名贴错的取值应搬去的**目标字段名**；不适用则返回 ``None``。"""
+    """旧字段名贴错的取值应搬去的**目标字段名**；不适用则返回 ``None``。
+
+    **既认目标字段的合法键，也认它的中文展示名**（2026-10-28）：L1 常常把「首购 /
+    增购 / 换购」写成中文落在 ``purchase_type`` 上，那不是非法值，而是贴错了字段名。
+    只认英文键会把这三类一并判成「无法归一到契约枚举」，白丢三条最基础的销售信息。
+    判定只看**目标字段**的键与展示名——``贷款`` 在 ``purchase_nature`` 里没有对应项，
+    因此仍然归不了，不会被硬塞进某个键。
+    """
     target = LEGACY_CROSS_FIELD.get(attribute_key)
     if target is None or not isinstance(value, str):
         return None
     text = value.strip()
-    return target if text in legal_keys(target) else None
+    if not text:
+        return None
+    if text in legal_keys(target) or display_to_key(target, text):
+        return target
+    return None
 
 
 def structured_spec(attribute_key: str, enum_key: str) -> str | None:

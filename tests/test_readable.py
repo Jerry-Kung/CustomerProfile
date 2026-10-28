@@ -164,9 +164,17 @@ def test_l3_express_reads_readable_facts():
 
 @pytest.mark.parametrize(
     "node_id, input_name",
-    [(pipe.L2_FALLBACK, "arg2")],
+    [(pipe.L2_FALLBACK, "facts_readable")],
 )
 def test_llm_fallback_reads_readable_facts(node_id, input_name):
-    """L2 兜底的事实输入同理：理由是给销售的，不能出现内部键。"""
+    """L2 兜底的事实输入同理：理由是给销售的，不能出现内部键。
+
+    事实源是 `L2_PROJECT` 的可读化出口。枚举语义映射节点 `L2_ENUM_MAP` 接在 `L2_APPLY`
+    之后（2026-10-28 修正：兜底写进 Notes 的中文原值在投影层还不存在），因此兜底看不到
+    映射结果——映射只负责把落定后的取值改写成合法键，不改兜底的输入。
+
+    兜底节点 2026-10-28 起由 code 承载，入参名随之从模板占位符 `arg2` 改成 `facts_readable`
+    （渲染时再映射回 `arg2`）。这条用例只钉「它读到的是可读化那份」。
+    """
     node = next(n for n in pipe.WORKFLOW.nodes if n.node_id == node_id)
     assert _bindings(node)[input_name] == (pipe.L2_PROJECT, "facts_readable")

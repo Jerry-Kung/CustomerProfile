@@ -77,7 +77,11 @@ def test_purchase_type_legacy_values_are_not_same_field_aliases():
 
 def test_purchase_type_legacy_values_route_to_purchase_nature():
     assert inf.legacy_cross_field("purchase_type", "replacement") == "purchase_nature"
-    assert inf.legacy_cross_field("purchase_type", "首购") is None
+    # 中文展示名同样路由（L1 常把「首购/增购/换购」写成中文落在 purchase_type 上）。
+    assert inf.legacy_cross_field("purchase_type", "首购") == "purchase_nature"
+    assert inf.legacy_cross_field("purchase_type", "增购") == "purchase_nature"
+    # 目标字段里没有对应项的值不硬塞：``贷款`` 是付款方式，不是购车性质。
+    assert inf.legacy_cross_field("purchase_type", "贷款") is None
     assert inf.legacy_cross_field("family_structure", "unmarried") is None
 
 

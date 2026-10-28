@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Mapping, Sequence
 
 from ..actions import BASIS_FACT, BASIS_INFERRED_LOW, Action
@@ -102,6 +103,30 @@ RULES: tuple[Rule, ...] = (
         ),
         legacy_codes=("enum_illegal_after_downgrade",),
     ),
+    Rule(
+        id="ENUM-02",
+        version=1,
+        title="非法枚举取值经语义映射归一",
+        content_kind="hard",
+        channels=("code",),
+        scope=("*",),
+        stages=("project",),
+        severity="repair",
+        default_action="rewrite",
+        message_internal=(
+            "枚举字段取值有信息但归不到合法键：经一次批量语义映射换成合法键，"
+            "置信档仍为 inferred_low；映射不上的保留原值并转确认"
+        ),
+        message_customer="",
+        owner="engineering",
+        status="active",
+        cluster="hard",
+        tests=(
+            "tests/test_enum_mapping.py::test_mapped_value_lands_in_facts_and_notes",
+            "tests/test_enum_mapping.py::test_contract_gap_value_is_never_sent",
+        ),
+        legacy_codes=(),
+    ),
 )
 
 
@@ -166,16 +191,32 @@ def is_unbacked_fact(has_quote: bool, channel: str) -> bool:
 
 
 def enum_values(value: Any) -> list[str]:
-    """把枚举字段的取值拆成待校验的字符串列表（多选用 ``||``，结构化取 ``key``）。"""
+    """把枚举字段的取值拆成待校验的字符串列表（多选用 ``||``，结构化取 ``key``）。
+
+    **结构化串先解析成 JSON 对象再取 ``key``**（2026-10-28）：Notes 出口的结构化枚举
+    是 JSON **字符串**（``'{"key":"yes","input_value":""}'``），整串既不等于合法键
+    也不等于展示名，直接判会把一个完全合规的取值当成非法枚举降级。回写出口有同一处
+    修复（``callback_build._enum_items``），两处必须同形，否则「gate 说违规、出口说
+    正常」——同一份取值两套结论。
+    """
     if isinstance(value, (list, tuple)):
         out: list[str] = []
         for item in value:
             out.extend(enum_values(item))
         return out
     if isinstance(value, str):
-        if "||" in value:
-            return [part.strip() for part in value.split("||") if part.strip()]
-        return [value.strip()] if value.strip() else []
+        text = value.strip()
+        if text.startswith("{"):
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict):
+                key = str(parsed.get("key") or "").strip()
+                return [key] if key else []
+        if "||" in text:
+            return [part.strip() for part in text.split("||") if part.strip()]
+        return [text] if text else []
     if isinstance(value, dict):
         return [str(value.get("key"))] if value.get("key") else []
     return [str(value)] if value not in (None, "") else []

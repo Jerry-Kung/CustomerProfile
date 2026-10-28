@@ -455,18 +455,21 @@ def test_pipeline_no_longer_carries_the_old_evidence_path():
         assert gone not in ids
 
 
-def test_pipeline_llm_nodes_are_l1_three_layers_and_l2_fallback():
-    """管线里 L1 是三层（事实 / 人设 / 分析投影）加 L2 兜底；成文段交给 L3 子流程。
+def test_pipeline_llm_nodes_are_l1_three_layers_and_level_assess():
+    """管线里 L1 是三层（事实 / 人设 / 分析投影）加独立定级；成文段交给 L3 子流程。
 
     v3.6 起多一个**独立定级**节点：商机等级对销售的重要程度断档领先，单开一次调用
     拿全量原始数据与足量输出篇幅（业务方 2026-10-19 要求）。
+
+    **L2 兜底不再是 llm 节点**（2026-10-28）：它改由 code 节点承载，以便候选为空时
+    不发起调用、并让输出量下限按候选数生效。它仍在调用模型，只是调度层的形态变了——
+    这条用例钉的是「谁在图里是 llm 节点」，别再把兜底算进来。
     """
     llm = sorted(n.node_id for n in pipe.WORKFLOW.nodes if n.node_type == "llm")
     assert llm == [
         pipe.L1_FACTS,
         pipe.L1_FIELDS,
         pipe.L1_PERSONA,
-        pipe.L2_FALLBACK,
         pipe.LEVEL_ASSESS,
     ]
 

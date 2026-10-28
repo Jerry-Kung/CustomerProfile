@@ -327,14 +327,28 @@ def _checker_functions(llm: Any, templates: Any) -> dict[str, Any]:
 
     ``functools.partial`` 包住异步函数后 ``iscoroutinefunction`` 仍为真，
     ``execute_code`` 会正确 await，不会丢进线程池。
+
+    **键必须与节点 ``config['function']`` 逐字一致**：那里写的是函数名
+    （``...:enum_map``），不是节点 ID（``...:pipeline_l2_enum_map``）。写成节点 ID 时
+    查找落空、悄悄回退到 ``module:callable`` 的模块属性，``llm`` 于是为 ``None``——
+    表现为「未注入 LLM 客户端」（2026-10-28 实测踩过）。故此处用 ``__name__`` 取名。
     """
     from functools import partial
 
     from .workflows import customer_profile_pipeline as pipeline
 
+    def _ref(func: Any) -> str:
+        return f"customer_profile.workflows.{pipeline.SLUG}:{func.__name__}"
+
     return {
-        f"customer_profile.workflows.{pipeline.SLUG}:{pipeline.RULE_CHECK}": partial(
-            pipeline.rule_check, llm=llm, templates=templates
+        _ref(pipeline.rule_check): partial(pipeline.rule_check, llm=llm, templates=templates),
+        # 枚举语义映射与 checker 同形：code 节点调 LLM，失败全吞、关闭即零 token。
+        # 两者共用同一个客户端，因而共享限额、重试与留痕。
+        _ref(pipeline.enum_map): partial(pipeline.enum_map, llm=llm, templates=templates),
+        # L2 兜底同样是 code 节点调 LLM：候选为空时零成本短路、输出量下限按候选数生效，
+        # 失败不阻断。它原先是个 llm 节点，失败会阻塞下游子树（见 L2_FALLBACK 常量说明）。
+        _ref(pipeline.fallback_verdict): partial(
+            pipeline.fallback_verdict, llm=llm, templates=templates
         ),
     }
 

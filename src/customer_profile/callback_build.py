@@ -415,7 +415,15 @@ def _append_consumption_note(summary: str) -> str:
 
 
 def _enum_items(attribute: str, value: Any) -> list[str]:
-    """把取值拆成待校验的字符串列表（多选 ``||`` / 结构化取 ``key``）。"""
+    """把取值拆成待校验的字符串列表（多选 ``||`` / 结构化取 ``key``）。
+
+    **结构化串必须先解析再校验**（2026-10-28 修复）：``attribute_value`` 落库时结构化
+    枚举是 JSON **字符串**（``'{"key":"yes","input_value":""}'``），若直接当成普通文本，
+    整串既不是合法键也不是展示名，``_repair_enum_value`` 会判它救不回来而**整条剔除**。
+    实测 ``driver_license_status`` 就是这样消失的——``basis=fact``、置信 1.0 的字段
+    因为一个引号结构被判成非法值。``projection.normalize_enum`` 一直是解析的，出错的是
+    回写出口这一侧，因此修在这里而不是放宽校验。
+    """
     if isinstance(value, (list, tuple)):
         out: list[str] = []
         for item in value:
@@ -427,9 +435,25 @@ def _enum_items(attribute: str, value: Any) -> list[str]:
     text = _as_text(value)
     if not text:
         return []
+    structured = _parse_json_object(text)
+    if structured is not None:
+        key = _as_text(structured.get("key"))
+        return [key] if key else []
     if inf.is_multi_value(attribute) and "||" in text:
         return [part.strip() for part in text.split("||") if part.strip()]
     return [text]
+
+
+def _parse_json_object(text: str) -> dict | None:
+    """``'{"key":"yes",...}'`` → dict；不是 JSON 对象则 ``None``。"""
+    stripped = text.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _repair_enum_value(attribute: str, value: Any) -> Any:

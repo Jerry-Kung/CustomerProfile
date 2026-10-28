@@ -51,6 +51,7 @@ SKIP_DIRS = {"__pycache__"}
 TRACE_NODES = (
     "pipeline_l1_localize",
     "pipeline_l2_project",
+    "pipeline_l2_enum_map",
     "pipeline_l2_review",
     "pipeline_level_apply",
     "pipeline_rule_apply",

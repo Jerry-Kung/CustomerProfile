@@ -223,6 +223,17 @@ class Settings(BaseSettings):
     code / prompt 通道照常工作，checker 动作集为空。
     """
 
+    enum_mapping_enabled: bool = False
+    """枚举语义映射总开关（``ENUM_MAPPING_ENABLED``）。
+
+    缺省 **false**：关闭时投影层之后**不发起**映射调用，产物与启用前逐字节一致。
+    开启后，L1 给出的、归不到契约合法键的中文自由文本（「已婚有子女」「分期」）会先经
+    一次批量 LLM 映射落到合法键，再进 gate 与回写。
+
+    与 ``rule_checker_enabled`` 分开是刻意的：两者方向相反（checker 只判不补，映射只补
+    不判），成本模型与风险面都不同，用一个开关会把「想省钱」与「想救字段」绑死。
+    """
+
     @property
     def disabled_rule_ids(self) -> tuple[str, ...]:
         """``rules_disabled`` 的解析结果（去空白、去空项）。"""
