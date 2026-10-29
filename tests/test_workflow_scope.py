@@ -35,6 +35,7 @@ async def scoped_service(tmp_path, scope, *, recover=False, **overrides):
         inline_worker=False,
         interrupt_on_start=recover,
         inbound_api_key="offline-scope-key",
+        worker_concurrency=None,
         worker_poll_interval_ms=10,
         **overrides,
     )
@@ -189,8 +190,12 @@ async def test_scope_has_its_own_queue_capacity_and_rejects_wrong_root(tmp_path)
         await profile.submit(ENTRY_WORKFLOW_ID, {})
         await invitation.submit(INVITATION, {})
         assert await profile.store.queue_depth() == 2
-        assert (await profile.store.queue_snapshot(workflow_scope="profile"))["queued"] == 1
-        assert (await invitation.store.queue_snapshot(workflow_scope="invitation"))["queued"] == 1
+        assert (await profile.store.queue_snapshot(workflow_scope="profile"))[
+            "queued"
+        ] == 1
+        assert (await invitation.store.queue_snapshot(workflow_scope="invitation"))[
+            "queued"
+        ] == 1
         with pytest.raises(QueueFull):
             await invitation.submit(INVITATION, {})
         with pytest.raises(KeyError, match="不接收"):

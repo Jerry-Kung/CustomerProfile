@@ -22,7 +22,7 @@
 
 部署配置、日志、原数据卷升级与接口验收见 [部署与运行](docs/runbooks/部署.md)。
 
-**容器部署**（画像和邀约各有 API 与 worker，镜像版本独立，保留同一个 SQLite 历史卷）：
+**容器部署**（画像和邀约各有 API 与 worker，Compose 自动构建镜像，可分别更新，共用原 SQLite 历史卷）：
 
 ```
 cp .env.example .env          # 然后填入真实端点与凭据

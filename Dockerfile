@@ -1,7 +1,7 @@
 # Customer Profile —— 运行镜像
 #
-# 同一构建定义产出画像和邀约两种发布镜像，各自的 API 与 worker 使用独立版本。
-# 三份几乎相同的镜像各自构建会互相漂移，因此只在 compose 里换 command。
+# 同一构建定义供两组 API/worker 使用，Compose 自动为每个服务命名镜像。
+# 按服务选择更新范围，另一组正在运行的镜像不受影响。
 #
 # 构建（在仓库根目录）：
 #     docker build -t customer-profile:latest .

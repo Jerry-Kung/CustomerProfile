@@ -25,16 +25,20 @@ flowchart LR
     BI[backend 邀约组] --> IA[inbound / 8099]
     PA --> DB[(原 SQLite 数据卷)]
     IA --> DB
-    DB -->|画像根任务| PW[profile-worker / 并发 5]
-    DB -->|邀约根任务| IW[invitation-worker / 并发 5]
+    DB -->|画像根任务| PW[profile-worker / 执行已派发画像]
+    DB -->|邀约根任务| IW[invitation-worker / 执行已派发邀约]
 ```
 
 两个 API 都只提交、查询，不执行或恢复任务。画像和邀约进程分别使用 `profile / invitation`
 范围；领取和排队容量按主任务类型过滤，启动恢复沿在跑任务的祖先确定归属，包含自己的子运行，
 不会把另一组的在跑任务标为中断。范围不是数据库分表，不丢失已有运行和稳定 run_id。
 
-同一构建定义产出两种独立标签的镜像；更新邀约只重建 `inbound / invitation-worker`，更新画像
-只重建 `api / profile-worker`。两组仍共享持久化格式，公共数据库契约变化须兼容旧版本，
+业务待派发队列与任务并发由 backend 的 MySQL 和 Worker 控制；线程占满后，后续任务继续
+留在 MySQL 等待。执行层不再配置第二套每类任务数量上限，接收后按派发任务自动启动；
+SQLite 仍负责可靠接单、记录运行身份与状态，接单和执行之间可以短暂处于 queued。
+
+Compose 自动为各服务命名和构建镜像；更新邀约只重建 `inbound / invitation-worker`，更新画像
+只重建 `api / profile-worker`，无需修改 env 的镜像版本。两组仍共享持久化格式，公共数据库契约变化须兼容旧版本，
 这类基础层升级可能需要联合发布。部署与首次从旧 worker 切换见运行指南。
 
 ### 2.1 内联消费者（`INLINE_WORKER`）

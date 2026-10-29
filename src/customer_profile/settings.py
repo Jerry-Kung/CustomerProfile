@@ -233,8 +233,8 @@ class Settings(BaseSettings):
     workflow_scope: WorkflowScope = "all"
     """本进程接收、领取和恢复的主任务范围；all 仅用于兼容本地单进程运行。"""
 
-    worker_concurrency: int = Field(default=1, ge=1)
-    """单个队列 worker 进程同时执行的主任务上限；与进程副本数、出网请求上限分开。"""
+    worker_concurrency: int | None = Field(default=1, ge=1)
+    """本地兼容模式的任务上限；None 时按已派发任务自动执行，业务并发由 backend 控制。"""
 
     max_active_runs: int | None = 4
     max_concurrent_requests: int | None = 8
@@ -351,6 +351,7 @@ class Settings(BaseSettings):
         "llm_rpm_limit",
         "llm_tpm_limit",
         "max_active_runs",
+        "worker_concurrency",
         "max_concurrent_requests",
         "max_queued_runs",
         "worker_poll_interval_ms",

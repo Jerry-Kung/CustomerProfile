@@ -65,16 +65,18 @@ async def test_standalone_worker_does_not_create_an_inline_consumer(
     assert not consumers[0].service.store.connected
 
 
-@pytest.mark.parametrize("concurrency", [1, 5])
-def test_compose_isolates_workers_and_pins_images_per_task_type(tmp_path, concurrency):
+@pytest.mark.parametrize("obsolete_concurrency", [1, 20])
+def test_compose_follows_backend_dispatch_and_names_images_automatically(
+    tmp_path, obsolete_concurrency
+):
     if not shutil.which("docker"):
         pytest.skip("需要 Docker Compose CLI，不需要 daemon")
     root = Path(__file__).resolve().parents[1]
     env_file = tmp_path / "worker env"
     env_file.write_text(
-        f"PROFILE_WORKER_CONCURRENCY={concurrency}\nINVITATION_WORKER_CONCURRENCY=5\n"
-        "PROFILE_IMAGE=customer-profile-profile:profile-v1\n"
-        "INVITATION_IMAGE=customer-profile-invitation:invitation-v2\n"
+        # 旧配置即使还在 env 中，也不能继续构成第二套业务限制或覆盖构建命名。
+        f"PROFILE_WORKER_CONCURRENCY={obsolete_concurrency}\nINVITATION_WORKER_CONCURRENCY=5\n"
+        "PROFILE_IMAGE=obsolete-profile\nINVITATION_IMAGE=obsolete-invitation\n"
         "LLM_RPM_LIMIT=100\nLLM_TPM_LIMIT=2000\n",
         encoding="utf-8",
     )
@@ -107,9 +109,9 @@ def test_compose_isolates_workers_and_pins_images_per_task_type(tmp_path, concur
     assert result.returncode == 0, "Compose 配置渲染失败（不输出凭据）"
     services = json.loads(result.stdout)["services"]
     assert "worker" not in services, "旧的全任务消费者不能继续作为默认服务启动"
-    for name, scope, limit in (
-        ("profile-worker", "profile", concurrency),
-        ("invitation-worker", "invitation", 5),
+    for name, scope in (
+        ("profile-worker", "profile"),
+        ("invitation-worker", "invitation"),
     ):
         settings = Settings(
             _env_file=None,
@@ -119,7 +121,7 @@ def test_compose_isolates_workers_and_pins_images_per_task_type(tmp_path, concur
             },
         )
         assert settings.workflow_scope == scope
-        assert settings.worker_concurrency == limit
+        assert settings.worker_concurrency is None
         assert settings.worker_replicas == 2
         assert settings.per_process_rpm_limit == 50
         assert settings.per_process_tpm_limit == 1000
@@ -127,16 +129,27 @@ def test_compose_isolates_workers_and_pins_images_per_task_type(tmp_path, concur
         assert settings.interrupt_on_start
         assert "depends_on" not in services[name]
         assert "ports" not in services[name]
-    assert (
-        services["api"]["image"]
-        == services["profile-worker"]["image"]
-        == "customer-profile-profile:profile-v1"
+    assert all("image" not in service for service in services.values())
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--project-directory",
+            str(root),
+            "--env-file",
+            str(env_file),
+            "-f",
+            str(root / "compose.yaml"),
+            "config",
+            "--images",
+        ],
+        env=runtime,
+        capture_output=True,
+        text=True,
     )
-    assert (
-        services["inbound"]["image"]
-        == services["invitation-worker"]["image"]
-        == "customer-profile-invitation:invitation-v2"
-    )
+    assert result.returncode == 0, "自动镜像命名校验失败（不输出凭据）"
+    images = {line.split(":")[0] for line in result.stdout.splitlines() if line}
+    assert images == {"customer-profile-" + name for name in services}
     for name in ("api", "inbound"):
         assert services[name]["environment"]["INTERRUPT_ON_START"] == "false"
         assert services[name]["environment"]["INLINE_WORKER"] == "false"
