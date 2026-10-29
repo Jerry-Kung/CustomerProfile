@@ -39,6 +39,8 @@ def register_invitation_routes(
     ) -> dict[str, Any]:
         service = get_service()
         require_key(service, x_api_key)
+        if service.settings.workflow_scope == "profile":
+            raise HTTPException(status_code=404, detail="当前服务只接收画像任务")
         try:
             run_id = await service.submit(
                 WORKFLOW_ID,
@@ -68,6 +70,8 @@ def register_invitation_routes(
     ) -> dict[str, Any]:
         service = get_service()
         require_key(service, x_api_key)
+        if service.settings.workflow_scope == "profile":
+            raise HTTPException(status_code=404, detail="当前服务只接收画像任务")
         if service.store is None:
             raise HTTPException(status_code=503, detail="运行存储不可用")
         row = await service.store.get_run(run_id)

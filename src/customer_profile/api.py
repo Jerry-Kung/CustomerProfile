@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from .definitions import RunStatus
 from .logging_config import configure_logging
 from .runner import QueueFull, RunSlotUnavailable, Service, build_service
+from .workflow_scope import accepts_workflow
 from .settings import get_settings
 
 
@@ -236,7 +237,8 @@ def create_app(service_factory: Any = None) -> FastAPI:
         slots = service.run_slots
         # 队列快照取自库，不是内存：worker 可能在另一个进程里，本进程无从知道它领走了什么。
         queue = (
-            await service.store.queue_snapshot() if service.store is not None else None
+            await service.store.queue_snapshot(workflow_scope=settings.workflow_scope)
+            if service.store is not None else None
         )
         quota = service.quota.snapshot() if service.quota is not None else {}
         return {
@@ -257,6 +259,8 @@ def create_app(service_factory: Any = None) -> FastAPI:
             "running_runs": queue["running"] if queue else 0,
             "interrupted_runs": queue["interrupted"] if queue else 0,
             "inline_worker": settings.inline_worker,
+            "workflow_scope": settings.workflow_scope,
+            "worker_concurrency": settings.worker_concurrency,
             "serve_ui": settings.serve_ui,
         }
 
@@ -278,6 +282,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
             }
             for definition in service.definitions.values()
             if not definition.is_synthetic
+            and accepts_workflow(service.settings.workflow_scope, definition.workflow_id)
         ]
 
     @app.get("/rules", tags=["meta"])

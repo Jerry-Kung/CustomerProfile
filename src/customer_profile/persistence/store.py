@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..definitions import RunStatus
+from ..workflow_scope import WorkflowScope, scope_predicate
 from .schema import (
     SCHEMA_STATEMENTS,
     RunRecordRow,
@@ -505,7 +506,7 @@ class Store:
         )
         return int(rows[0]["n"]) if rows else 0
 
-    async def mark_running_as_interrupted(self) -> int:
+    async def mark_running_as_interrupted(self, *, workflow_scope: WorkflowScope = "all") -> int:
         """把残留的 ``running`` 运行标记为 ``interrupted``（§7.3）。
 
         **只标 ``running``，不标 ``queued``**（V0.5.2 修正）。此前两者一起标，会让
@@ -515,22 +516,28 @@ class Store:
 
         ``running`` 只标不续跑：进程中断不能证明外部副作用未发生（既定约束），因此这些运行**保留已完成结果**并交人工处理。
         """
-        rows = await self._read(
-            "SELECT run_id FROM workflow_runs WHERE status = ?", (RunStatus.RUNNING,)
-        )
-        run_ids = [r["run_id"] for r in rows]
-        for run_id in run_ids:
-            await self._write(
-                "UPDATE workflow_runs SET status = ?, error = COALESCE(error, ?) "
-                "WHERE run_id = ? AND status = ?",
-                (
-                    RunStatus.INTERRUPTED,
-                    "进程中断：运行中任务未完成，已完成结果已保留",
-                    run_id,
-                    RunStatus.RUNNING,
-                ),
+        predicate, params = scope_predicate(workflow_scope)
+
+        def work(connection: sqlite3.Connection) -> int:
+            # 只沿在跑运行的祖先查找主任务，避免恢复时遍历全部历史子流程。
+            # 同名共享子工作流必须按其主任务归属恢复。
+            cursor = connection.execute(
+                "WITH RECURSIVE lineage(run_id, parent_run_id, workflow_id) AS ("
+                " SELECT run_id, parent_run_id, workflow_id FROM workflow_runs WHERE status = ?"
+                " UNION SELECT lineage.run_id, parent.parent_run_id, parent.workflow_id"
+                " FROM workflow_runs parent JOIN lineage ON parent.run_id = lineage.parent_run_id"
+                ") UPDATE workflow_runs SET status = ?, error = COALESCE(error, ?)"
+                " WHERE status = ? AND run_id IN ("
+                f" SELECT run_id FROM lineage WHERE parent_run_id IS NULL AND {predicate})"
+                " RETURNING run_id",
+                (RunStatus.RUNNING, RunStatus.INTERRUPTED,
+                 "进程中断：运行中任务未完成，已完成结果已保留", RunStatus.RUNNING, *params),
             )
-        return len(run_ids)
+            marked = len(cursor.fetchall())
+            connection.commit()
+            return marked
+
+        return await self._run(work)
 
     # ------------------------------------------------------------ 队列（V0.5.2）
 
@@ -579,7 +586,7 @@ class Store:
         return await self._run(work)
 
     async def claim_next_queued_run(
-        self, worker_id: str, *, lease_ms: int
+        self, worker_id: str, *, lease_ms: int, workflow_scope: WorkflowScope = "all"
     ) -> dict[str, Any] | None:
         """原子领取一个待跑运行；无待跑或已被别人领走时返回 ``None``。
 
@@ -592,6 +599,7 @@ class Store:
         ``RETURNING`` 需要 SQLite ≥ 3.35（本机实测 3.50.4）。
         """
         now = _now_ms()
+        predicate, params = scope_predicate(workflow_scope)
 
         def work(connection: sqlite3.Connection) -> dict[str, Any] | None:
             cursor = connection.execute(
@@ -600,7 +608,7 @@ class Store:
                 "    lease_expires_at_ms = ? "
                 "WHERE run_id = ("
                 "  SELECT run_id FROM workflow_runs "
-                "  WHERE status = ? AND parent_run_id IS NULL "
+                f"  WHERE status = ? AND parent_run_id IS NULL AND {predicate} "
                 "  ORDER BY created_at_ms LIMIT 1"
                 ") AND status = ? "
                 "RETURNING run_id, workflow_id, business_ref, inputs_json, "
@@ -612,6 +620,7 @@ class Store:
                     worker_id,
                     now + int(lease_ms),
                     RunStatus.QUEUED,
+                    *params,
                     RunStatus.QUEUED,
                 ),
             )
@@ -672,22 +681,24 @@ class Store:
 
         return await self._run(work)
 
-    async def queue_depth(self) -> int:
+    async def queue_depth(self, *, workflow_scope: WorkflowScope = "all") -> int:
         """待跑（``queued``）的主运行条数。提交侧的容量判断用它。"""
+        predicate, params = scope_predicate(workflow_scope)
         rows = await self._read(
             "SELECT COUNT(*) AS n FROM workflow_runs "
-            "WHERE status = ? AND parent_run_id IS NULL",
-            (RunStatus.QUEUED,),
+            f"WHERE status = ? AND parent_run_id IS NULL AND {predicate}",
+            (RunStatus.QUEUED, *params),
         )
         return int(rows[0]["n"]) if rows else 0
 
-    async def queue_snapshot(self) -> dict[str, int]:
+    async def queue_snapshot(self, *, workflow_scope: WorkflowScope = "all") -> dict[str, int]:
         """队列概览：待跑、在跑、中断待处理。供 ``GET /runtime`` 展示。"""
+        predicate, params = scope_predicate(workflow_scope)
         rows = await self._read(
             "SELECT status, COUNT(*) AS n FROM workflow_runs "
-            "WHERE parent_run_id IS NULL AND status IN (?, ?, ?) "
+            f"WHERE parent_run_id IS NULL AND {predicate} AND status IN (?, ?, ?) "
             "GROUP BY status",
-            (RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.INTERRUPTED),
+            (*params, RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.INTERRUPTED),
         )
         counts = {str(r["status"]): int(r["n"]) for r in rows}
         return {

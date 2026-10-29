@@ -1,6 +1,6 @@
 # Customer Profile —— 运行镜像
 #
-# 一个镜像承载三个进程（API / worker / inbound），具体命令由 docker-compose 指定。
+# 同一构建定义产出画像和邀约两种发布镜像，各自的 API 与 worker 使用独立版本。
 # 三份几乎相同的镜像各自构建会互相漂移，因此只在 compose 里换 command。
 #
 # 构建（在仓库根目录）：

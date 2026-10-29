@@ -180,6 +180,9 @@ def create_inbound_app(
         service = get_service()
         require_key(service, x_api_key)
 
+        if service.settings.workflow_scope == "invitation":
+            raise HTTPException(status_code=404, detail="当前服务只接收邀约任务")
+
         phone = (payload.phone_number or "").strip()
         if not PHONE_PATTERN.match(phone):
             raise HTTPException(

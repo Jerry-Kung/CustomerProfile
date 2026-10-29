@@ -14,6 +14,8 @@ from urllib.parse import urlsplit
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .workflow_scope import WorkflowScope
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 """仓库根目录（`src/customer_profile/settings.py` 上溯三层）。"""
 
@@ -228,6 +230,9 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------ 执行器
     database_url: str = "sqlite:///./data/customer_profile.db"
+    workflow_scope: WorkflowScope = "all"
+    """本进程接收、领取和恢复的主任务范围；all 仅用于兼容本地单进程运行。"""
+
     worker_concurrency: int = Field(default=1, ge=1)
     """单个队列 worker 进程同时执行的主任务上限；与进程副本数、出网请求上限分开。"""
 

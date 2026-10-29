@@ -3,7 +3,7 @@
     python -m customer_profile.worker
 
 与 API 进程的关系（既定约束「部署 = Docker Compose，含 API、
-单个执行 worker、数据库」）：
+按任务类型隔离的执行 worker、数据库」）：
 
 - API 进程负责提交（把运行写进队列）与查询；
 - worker 进程负责执行。两者共用一个 SQLite 文件，靠 ``Store`` 的原子领取避免双跑。
@@ -69,13 +69,15 @@ class Worker:
         # 「worker 重启不丢任务」由**未开始的 queued 任务不会被标成 interrupted** 保证：
         # 它们仍在队列里，本进程下一轮就会领走。
         if settings.interrupt_on_start:
-            marked = await self.service.store.mark_running_as_interrupted()
+            marked = await self.service.store.mark_running_as_interrupted(
+                workflow_scope=settings.workflow_scope
+            )
             if marked:
                 logger.warning("启动恢复：{} 个残留任务已标为中断（interrupted），待人工处理", marked)
 
         logger.info(
-            "执行进程已启动，标识={}，主任务并发={}，回写启用={}，回放模式={}",
-            self.worker_id, settings.worker_concurrency,
+            "执行进程已启动，标识={}，任务范围={}，主任务并发={}，回写启用={}，回放模式={}",
+            self.worker_id, settings.workflow_scope, settings.worker_concurrency,
             settings.writeback_enabled, settings.replay_mode,
         )
         self._consumers = [
@@ -131,7 +133,8 @@ class Worker:
         if store is None:
             return False
         claimed = await store.claim_next_queued_run(
-            self.worker_id, lease_ms=self.settings.worker_lease_ms
+            self.worker_id, lease_ms=self.settings.worker_lease_ms,
+            workflow_scope=self.settings.workflow_scope,
         )
         if claimed is None:
             return False
@@ -232,7 +235,8 @@ async def main_async() -> int:
     # 独立入口自带消费者，不能再由 build_service 创建第二个内联消费者。
     settings = get_settings().model_copy(update={"inline_worker": False})
     configure_logging(settings.log_level, component="worker")
-    service = await build_service(settings)
+    # 启动恢复统一由 Worker.run_forever 在消费前执行一次。
+    service = await build_service(settings, recover_running_runs=False)
     worker = Worker(service, settings)
     loop = asyncio.get_running_loop()
     _install_signal_handlers(worker, loop)
