@@ -648,7 +648,9 @@ class LlmClient:
 
     async def _post(self, payload: Mapping[str, Any]) -> Any:
         client = await self._ensure_client()
-        return await client.post("/chat/completions", json=dict(payload))
+        return await client.post(
+            self._settings.llm_chat_completions_path, json=dict(payload)
+        )
 
     @staticmethod
     def _backoff_seconds(attempt_no: int) -> float:

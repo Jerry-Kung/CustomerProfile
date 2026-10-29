@@ -1,7 +1,7 @@
 """运行配置。
 
-端点和凭据来自环境变量（仓库根目录 `.env`，已被忽略）；节点的模型参数、提示词、
-重试次数属工作流定义，随代码维护，不进这里（见 `.env.example` 的分工说明）。
+端点、凭据、模型选择与 ASR 识别选项来自环境变量（仓库根目录 `.env`，已被忽略）；
+提示词、统一 temperature 与重试策略随工作流代码维护（见 `.env.example`）。
 """
 
 from __future__ import annotations
@@ -9,8 +9,9 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +40,7 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
+    llm_chat_completions_path: str = "/chat/completions"
     llm_rpm_limit: int | None = None
     """每分钟请求数上限（RPM）。置空表示不限。**每个进程**的限额，见 worker_replicas。"""
 
@@ -132,7 +134,60 @@ class Settings(BaseSettings):
     """
 
     auc_resource_id: str = "volc.seedasr.auc"
-    """火山引擎的 ``X-Api-Resource-Id``。不是密钥，随代码维护。"""
+    """火山引擎的 ``X-Api-Resource-Id``，可随部署环境配置。"""
+
+    auc_submit_path: str = "/submit"
+    auc_query_path: str = "/query"
+    """相对于 ``auc_base_url`` 的外部接口路径；对内节点契约保持不变。"""
+
+    auc_model_name: str = "bigmodel"
+    auc_model_version: str | None = "400"
+    auc_ssd_version: str | None = "200"
+    """版本留空时不发送对应字段，采用服务端默认版本。"""
+
+    auc_enable_channel_split: bool = True
+    auc_enable_ddc: bool = True
+    auc_enable_speaker_info: bool = True
+    auc_enable_punc: bool = True
+    auc_enable_itn: bool = True
+    auc_show_speech_rate: bool = True
+    auc_show_volume: bool = True
+    auc_enable_emotion_detection: bool = True
+    auc_enable_gender_detection: bool = True
+    auc_corpus_correct_table_name: str = ""
+    auc_corpus_context: str = ""
+
+    @field_validator("llm_chat_completions_path", "auc_submit_path", "auc_query_path")
+    @classmethod
+    def _relative_service_path(cls, value: str) -> str:
+        """只允许同一服务基地址下的路径，防止把鉴权信息发到配置外的主机。"""
+        value = value.strip()
+        parts = urlsplit(value)
+        if (
+            not value.startswith("/")
+            or value.startswith("//")
+            or parts.scheme
+            or parts.netloc
+            or parts.query
+            or parts.fragment
+        ):
+            raise ValueError("接口路径必须以 / 开头，且不能包含主机、查询参数或片段")
+        return value
+
+    @field_validator("auc_model_name")
+    @classmethod
+    def _auc_model_name_required(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("AUC_MODEL_NAME 不能为空")
+        return value
+
+    @field_validator("auc_model_version", "auc_ssd_version", mode="before")
+    @classmethod
+    def _optional_auc_version(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
 
     auc_poll_interval_s: float = 1.0
     """轮询间隔。云服务的处理在服务端进行，与本机读超时无关。"""
