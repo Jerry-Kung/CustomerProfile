@@ -3523,6 +3523,11 @@ WORKFLOW = WorkflowDef(
                 # 表达层的 section 产物（resistances / emotion_state / overall_tag 从这里取）。
                 # ``result1`` 是**字符串**：由 callback_build 内部二次解析。
                 "express_json": (PRODUCTION, "result1"),
+                # L1 定稿的断言账本：画像卡上大量字段（心理画像三项、当前用车、换车动因）
+                # 不在 Notes 契约内、或被 thin 档清空，Notes 里没有它们的条目。这里把它们的
+                # ``reasoning_chain`` 与 ``basis_of_inference`` 送到出口，卡片才写得出
+                # 销售读得懂的推导链（2026-10-29 可读性整改）。
+                "claims_json": (L1_INJECT, "claims_json"),
             },
             outputs=("callback_json",),
             # 指向 ``main`` 而不是 ``build_analysis_result``：后者返回的是 JSON **字符串**，

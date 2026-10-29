@@ -449,7 +449,7 @@ def _level_reasoning_detail(facts: dict) -> dict[str, Any]:
     level = proj.normalize_level(facts.get("deal_level")) or ""
     return {
         "summary": f"综合客户数据判定商机等级为{level}",
-        "steps": ["由商机定级环节依客户全部记录与已定稿事实得出"],
+        "steps": ["综合客户的沟通记录与已知信息判定"],
         "evidence": [],
         "confidence": 0.6,
     }

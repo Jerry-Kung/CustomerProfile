@@ -34,6 +34,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import internal_fields as inf
 from . import notes_contract as nc
+from . import projection as proj
 from . import text_utils as tut
 
 # ====================================================================
@@ -172,9 +173,22 @@ class _FactView:
     经过校验、面向销售的措辞**（``projection._to_notes_updates`` 产出）。四个区块若各自
     另写一套，同一事实在卡片与 Notes 上就会有两种说法——那正是 production 图
     「卡片说 A、Notes 说 B」的老毛病换了个地方出现。
+
+    **Notes 里没有条目时退到断言账本，而不是退到一句审计话**（2026-10-29 整改）：
+    Notes 只装契约字段，且 ``thin`` 档还会把无登记档支撑的字段整批清空；而画像卡的
+    ``decision_psychology`` / 「当前用车」/ 「换车动因」恰恰主要由**编外字段**支撑
+    （``emotion`` / ``personality_and_preferences`` / ``old_car_model`` /
+    ``purchase_nature`` …），这些字段在 Notes 里永远没有条目。它们的推导链其实一直
+    存在于 L1 的 ``reasoning_chain`` 里，只是从前没有传到出口。``claims`` 就是把它接
+    进来的通道，渲染规则与 Notes 出口同源（:func:`projection.detail_from_claims`）。
     """
 
-    def __init__(self, facts: Mapping[str, Any], notes: Sequence[Any]) -> None:
+    def __init__(
+        self,
+        facts: Mapping[str, Any],
+        notes: Sequence[Any],
+        claims: Sequence[Any] = (),
+    ) -> None:
         self.facts: Mapping[str, Any] = facts
         self._notes: dict[str, dict[str, Any]] = {}
         for entry in notes:
@@ -183,6 +197,16 @@ class _FactView:
             key = _as_text(entry.get("attribute_key"))
             if key:
                 self._notes[key] = entry
+        # 断言按字段分组，保留原始顺序：同一字段的多条断言里，谁先给出推导链就用谁
+        # （排序交给 ``projection.detail_from_claims``，这里只分组）。
+        self._claims: dict[str, list[proj.Claim]] = {}
+        for entry in claims:
+            if not isinstance(entry, dict):
+                continue
+            attribute = _as_text(entry.get("attribute"))
+            if not attribute:
+                continue
+            self._claims.setdefault(attribute, []).append(_claim_from_payload(entry))
 
     def has(self, attribute: str) -> bool:
         value = self.facts.get(attribute)
@@ -225,13 +249,27 @@ class _FactView:
             if isinstance(detail, dict):
                 return _normalize_detail(detail)
 
+        # —— 第二级：断言账本。编外字段与 thin 档被清空的字段都从这里拿到推导链。
+        sources: list[proj.Claim] = []
+        for attribute in attributes:
+            sources.extend(self._claims.get(attribute) or ())
+        rendered = proj.detail_from_claims(
+            attributes[0] if attributes else "",
+            sources,
+            summary=summary,
+        )
+        if rendered["steps"] or rendered["evidence"]:
+            return _normalize_detail(rendered)
+
         parts = [self.text(a) for a in attributes if self.has(a)]
         parts = [p for p in parts if p]
         if not parts:
             return _empty_detail()
+        # 既没有 Notes 条目、也没有对应断言：只能说清「这条信息已经在客户资料里」。
+        # 不写「上游已定稿」「未作二次推断」这类内部口径——那是给审计看的，销售读不懂。
         return {
-            "summary": summary or ("已定稿事实：" + "、".join(parts)),
-            "steps": ["由上游已定稿的事实直接给出，未作二次推断"],
+            "summary": summary or ("客户资料中记录为：" + "、".join(parts)),
+            "steps": ["客户资料中已有这条信息，直接采用"],
             "evidence": [],
             "confidence": _DEFAULT_CONFIDENCE,
         }
@@ -245,15 +283,122 @@ _DEFAULT_CONFIDENCE = 0.7
 """
 
 
+def _claims(payload: Any) -> list[dict[str, Any]]:
+    """从 ``claims_json`` 解出断言列表。
+
+    形状兼容两代产物：v2 起 L1 输出 ``{"fields": [...]}``，v1 与既有批次是
+    ``{"claims": [...]}``。两者条目同构——**都要认**，否则离线回放既有批次时卡片与
+    新跑批次长得不一样，而那正是排查「改了没改」时最需要的一致性。
+    """
+    if isinstance(payload, dict):
+        payload = payload.get("fields", payload.get("claims"))
+    if not isinstance(payload, (list, tuple)):
+        return []
+    return [entry for entry in payload if isinstance(entry, dict)]
+
+
+def _claim_from_payload(raw: Mapping[str, Any]) -> proj.Claim:
+    """把 ``claims_json`` 里的一条原始断言转成 :class:`projection.Claim`。
+
+    **与 ``pipeline_l1_inject`` 构造账本的口径逐条对齐**（同样的默认值、同样的
+    v1 兼容推导）：出口层只读不判，因此这里不做任何取舍，只负责搬运——取舍规则
+    已经在 L1/L2 跑过一遍，出口再判一次会让卡片与事实表不一致。
+    """
+    value = raw.get("basis_of_inference") or ()
+    if isinstance(value, str):
+        hints = (value,) if value.strip() else ()
+    else:
+        hints = tuple(str(item) for item in value if str(item).strip())
+
+    steps_raw = raw.get("reasoning_chain") or ()
+    if isinstance(steps_raw, str):
+        steps = (steps_raw,) if steps_raw.strip() else ()
+    else:
+        steps = tuple(str(item) for item in steps_raw if str(item).strip())
+
+    confidence = raw.get("confidence")
+    try:
+        number = float(confidence)
+    except (TypeError, ValueError):
+        number = None
+    if number is not None:
+        number = max(0.0, min(1.0, number))
+
+    channel = str(raw.get("record_channel") or "").strip()
+    basis = str(raw.get("basis") or "").strip()
+    if not basis:
+        # v1 产物没有 ``basis``：按 ``claim_type`` 与来源档推（与管线侧同口径）。
+        claim_type = str(raw.get("claim_type") or "").strip()
+        if proj.CHANNEL_TIER.get(channel, proj.SOCIAL) == proj.PREDICTION:
+            basis = proj.INFERRED_HIGH
+        elif claim_type in ("prediction", "observation"):
+            basis = proj.INFERRED_HIGH
+        else:
+            basis = proj.FACT
+
+    return proj.Claim(
+        attribute=str(raw.get("attribute") or "").strip(),
+        value=raw.get("value"),
+        channel=channel,
+        subject=str(raw.get("subject") or "").strip(),
+        claim_type=str(raw.get("claim_type") or "").strip() or "fact",
+        claim_id=str(raw.get("claim_id") or ""),
+        basis=basis,
+        basis_of_inference=hints,
+        quote=str(raw.get("quote") or "").strip(),
+        anchor_kind=str(raw.get("anchor_kind") or "").strip(),
+        source_quote=str(raw.get("source_quote") or "").strip(),
+        speaker_role=str(raw.get("speaker_role") or "").strip(),
+        reasoning_steps=steps,
+        confidence=number,
+    )
+
+
+PIPELINE_VOCABULARY: tuple[tuple[str, str], ...] = (
+    # 长串在前：先整体换掉整句，再换词组，否则「已定稿事实显示」会被拆成两截。
+    ("已定稿事实显示", "客户资料显示"),
+    ("已定稿事实与原始记录均未出现", "客户资料与沟通记录中均未出现"),
+    ("已定稿事实与原始记录均", "客户资料与沟通记录均"),
+    ("已定稿事实中未见", "客户资料中未见"),
+    ("已定稿事实", "客户资料"),
+    # 下面几句是投影层 2026-10-29 之前的旧兜底语。新代码不再产出，但**离线回放
+    # 既有批次**时 Notes 里存的仍是这些句子（产物不会重算），出口一并换掉，
+    # 新旧产物在销售眼里才是同一种说法。
+    ("据现有记录归纳得出", "根据客户资料中已有信息归纳得出"),
+    ("据现有记录归纳", "根据客户资料中已有信息归纳"),
+    ("综合上述线索归纳得出该结论", "综合上述几条线索归纳得出"),
+    # **不能映射成「客户本人有明确表述」**：旧 Notes 里这句的 ``quote`` 可能来自登记档
+    # 或销售原话（实测 382 条中 187 条不是客户说的）。映射成断言说话人，就把
+    # 「系统里记着客户开一辆现代」变成「客户本人说的」。用不指定说话人的说法。
+    ("由客户原话直接得出该结论", "客户资料中有明确依据，据此直接确定"),
+    ("经语义纠错归一并核对后得出该结论", "客户原话经口误与品牌名核对后确定"),
+)
+"""**管线口径 → 销售口径**的兜底替换表（出口自净，不依赖上游守约）。
+
+「已定稿事实」是本管线的内部说法，销售不知道那是什么。提示词与代码都已逐处改写，
+但仍要留这一道：表达层（L3）是模型自由生成的，实测会写「已定稿事实显示客户处于买车中」
+这类句子，而它是**模型产出**，代码改不到源头。这一层只做同义替换，不改语义，
+因此即使命中也不会让证据与原文对不上（「已定稿事实」不可能出现在客户原话里）。
+"""
+
+
+def _sales_text(text: Any) -> str:
+    """把一段文案里的管线口径换成销售能读的说法。"""
+    out = str(text or "")
+    for internal, customer in PIPELINE_VOCABULARY:
+        out = out.replace(internal, customer)
+    return out
+
+
 def _normalize_detail(detail: Mapping[str, Any]) -> dict[str, Any]:
-    """把任意 ``reasoning_detail`` 补齐成契约要求的四键。"""
-    steps = [str(s) for s in (detail.get("steps") or []) if str(s).strip()]
-    evidence = [str(s) for s in (detail.get("evidence") or []) if str(s).strip()]
+    """把任意 ``reasoning_detail`` 补齐成契约要求的四键，并清掉管线口径。"""
+    steps = [_sales_text(s) for s in (detail.get("steps") or []) if str(s).strip()]
+    evidence = [_sales_text(s) for s in (detail.get("evidence") or []) if str(s).strip()]
     confidence = detail.get("confidence")
     if not isinstance(confidence, (int, float)):
         confidence = _DEFAULT_CONFIDENCE
     return {
-        "summary": str(detail.get("summary") or "").strip(),
+        "summary": _sales_text(detail.get("summary") or "").strip(),
         "steps": steps,
         "evidence": evidence,
         "confidence": max(0.0, min(1.0, float(confidence))),
@@ -531,8 +676,6 @@ def build_ai_insight(view: _FactView, express: Mapping[str, Any]) -> dict[str, A
       （L-001，待业务方给人群标签字典），但**必须**带 ``reasoning_detail``——
       没有它的值在前端就是个不可点击的死值。
     """
-    from . import projection as proj
-
     insight: dict[str, Any] = {}
     level = proj.normalize_level(view.raw("deal_level"))
     if level:
@@ -541,7 +684,7 @@ def build_ai_insight(view: _FactView, express: Mapping[str, Any]) -> dict[str, A
             "reasoning_detail": _level_detail(view),
         }
 
-    segment = _as_text(_section_text(express, "overall_tag"))
+    segment = _sales_text(_as_text(_section_text(express, "overall_tag")))
     if segment:
         insight["customer_segment"] = {
             "value": segment,
@@ -578,14 +721,14 @@ def _segment_detail(express: Mapping[str, Any]) -> dict[str, Any]:
             text = _as_text(summary.get(key))
             if text:
                 return {
-                    "summary": text,
-                    "steps": ["由表达层依同一份已定稿事实归纳"],
+                    "summary": _sales_text(text),
+                    "steps": ["根据客户在沟通中表现出的整体特点归纳"],
                     "evidence": [],
                     "confidence": _DEFAULT_CONFIDENCE,
                 }
     return {
-        "summary": "依已定稿事实归纳的客户群标签",
-        "steps": ["由表达层依同一份已定稿事实归纳"],
+        "summary": "根据客户整体表现归纳的客户群标签",
+        "steps": ["根据客户在沟通中表现出的整体特点归纳"],
         "evidence": [],
         "confidence": _DEFAULT_CONFIDENCE,
     }
@@ -637,6 +780,24 @@ FILLER_LABELS: Mapping[str, str] = {
 """
 
 
+FILLER_DETAILS: Mapping[str, tuple[str, str]] = {
+    CATEGORY_CHANGE: (
+        "客户资料与沟通记录中未提及换车原因",
+        "客户资料与沟通记录中都没有换车的相关线索",
+    ),
+    CATEGORY_COMPARE: (
+        "客户资料与沟通记录中未提及其他对比车型",
+        "客户资料与沟通记录中都没有对比车型的相关线索",
+    ),
+}
+"""空态填充项的说明文案（``summary`` / ``steps``）。
+
+**不写「已定稿事实中未见…」**：那是管线内部的说法，销售不知道「已定稿事实」指什么。
+这里只说销售能直接判断的事——资料里没有这类信息。``steps`` 是契约必填项，因此
+不能留空；给的是一句说明「为什么没有」，而不是一句读不懂的审计话。
+"""
+
+
 def _filler_item(category: str) -> dict[str, Any] | None:
     """给指定分类造一条填充项；不在 :data:`FILLER_LABELS` 里的分类返回 ``None``。
 
@@ -647,13 +808,14 @@ def _filler_item(category: str) -> dict[str, Any] | None:
     if not label:
         return None
     prefix = "change" if category == CATEGORY_CHANGE else "compare"
+    summary, step = FILLER_DETAILS[category]
     return _item(
         prefix,
         category,
         label,
         {
-            "summary": f"已定稿事实中未见{category}相关信息",
-            "steps": ["检视已定稿事实，未找到与该分类对应的事实"],
+            "summary": summary,
+            "steps": [step],
             "evidence": [],
             "confidence": 0.3,
         },
@@ -732,7 +894,7 @@ def _category_change(view: _FactView) -> list[dict[str, Any]]:
     label = _label("purchase_nature", nature) or "换购"
     items.append(
         _item("change", "purchase_nature", f"购车性质：{label}",
-              view.detail("purchase_nature", summary="由旧车证据判定为换购"),
+              view.detail("purchase_nature", summary="客户名下有正在使用的旧车，本次属于换购"),
               len(items) + 1, extra_digest=nature)
     )
     for pain in _as_list(view.raw("pain_points")):
@@ -800,7 +962,7 @@ def _category_barrier(
             desc = _as_text(entry.get("description"))
             detail = {
                 "summary": desc or f"客户顾虑：{name}",
-                "steps": ["由表达层依已定稿事实归纳"],
+                "steps": ["根据客户在沟通中表现出的顾虑归纳"],
                 "evidence": [],
                 "confidence": _DEFAULT_CONFIDENCE,
             }
@@ -924,7 +1086,7 @@ def _loss_conditions(
         if not isinstance(detail, dict):
             detail = {
                 "summary": _as_text(entry.get("description")) or f"客户顾虑：{name}",
-                "steps": ["由表达层依已定稿事实归纳"],
+                "steps": ["根据客户在沟通中表现出的顾虑归纳"],
                 "evidence": [],
                 "confidence": _DEFAULT_CONFIDENCE,
             }
@@ -1021,7 +1183,7 @@ def _psychology_value(
     if not detail["summary"] and state:
         detail = {
             "summary": f"当前情绪状态：{state}",
-            "steps": ["由表达层依已定稿事实归纳"],
+            "steps": ["根据客户在沟通中的语气与反应归纳"],
             "evidence": [],
             "confidence": _DEFAULT_CONFIDENCE,
         }
@@ -1055,6 +1217,7 @@ def build_analysis_result(
     facts_json: Any = "{}",
     notes_updates_json: Any = "[]",
     express_json: Any = "{}",
+    claims_json: Any = "{}",
 ) -> str:
     """把一份已定稿的事实装成回传请求体（顶层三键），返回 **JSON 字符串**。
 
@@ -1068,7 +1231,11 @@ def build_analysis_result(
     - ``notes_updates_json``：L2 审查后的 Notes 更新项（``basic_notes_updates`` 的来源，
       同时是四个区块 ``reasoning_detail`` 的措辞来源）；
     - ``express_json``：L3 表达层的 section 产物（``resistances`` / ``emotion_state`` /
-      ``overall_tag`` 从这里取）。
+      ``overall_tag`` 从这里取）；
+    - ``claims_json``：L1 定稿的断言账本。画像卡上大量字段（心理画像的三项、当前用车、
+      换车动因）不在 Notes 契约内，或会被 ``thin`` 档清空，Notes 里因此没有它们的条目。
+      这一项让出口能取到那些字段的 ``reasoning_chain`` 与 ``basis_of_inference``，
+      渲染出销售读得懂的推导链，而不是退到一句内部审计话。缺省为空——旧调用方不受影响。
 
     **本函数不发任何请求**：它只造请求体。真实回传由带 ``@writeback`` 的节点负责，
     默认开关关闭（``WRITEBACK_ENABLED=false``）。
@@ -1087,7 +1254,8 @@ def build_analysis_result(
     if not isinstance(express, dict):
         express = {}
 
-    view = _FactView(facts, notes)
+    claims = _claims(_payload(claims_json))
+    view = _FactView(facts, notes, claims)
 
     analysis_result: dict[str, Any] = {
         "profile_summary": build_profile_summary(view),
@@ -1136,6 +1304,7 @@ def main(
     facts_json: Any = "{}",
     notes_updates_json: Any = "[]",
     express_json: Any = "{}",
+    claims_json: Any = "{}",
 ) -> dict[str, Any]:
     """工作流 ``code`` 节点的入口（返回 ``{出参名: 值}``，由执行器逐字段取出）。
 
@@ -1146,7 +1315,7 @@ def main(
     """
     return {
         "callback_json": build_analysis_result(
-            phone, batch_id, facts_json, notes_updates_json, express_json
+            phone, batch_id, facts_json, notes_updates_json, express_json, claims_json
         )
     }
 

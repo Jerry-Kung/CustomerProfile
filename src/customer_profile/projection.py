@@ -1332,6 +1332,29 @@ def _prediction_tag_text(claim: Claim) -> str:
     return f"第三方画像标签“{tag}”给出“{value}”"
 
 
+def _quote_basis_step(sources: Sequence[Claim]) -> str:
+    """有原文切片、但没有模型给的推导链时，说清**这条切片是谁说的**。
+
+    取第一条带 ``quote`` 的断言作代表（与 ``_readable_evidence`` 同一取料顺序）。
+    三种归属各有说法，**不能合并成一句**：
+
+    - 录音里的客户方 → 客户本人说的；
+    - 录音里的销售方 → 销售说的，不是客户表态；
+    - 登记档 / 截图 / 第三方标签（``speaker_role`` 为空）→ 系统里记着的，无所谓「谁说的」。
+    """
+    for claim in sources:
+        if not claim.quote:
+            continue
+        if claim.speaker_role == SPEAKER_CUSTOMER:
+            return "客户本人有明确表述，据此直接确定"
+        if claim.speaker_role == SPEAKER_SALES:
+            return "销售在沟通中提及，据此确定"
+        if claim.tier == REGISTRY:
+            return "客户资料中有明确记录，据此直接确定"
+        return "客户资料中有明确原文，据此直接确定"
+    return "客户资料中有明确原文，据此直接确定"
+
+
 def _readable_steps(sources: Sequence[Claim]) -> list[str]:
     """推理步骤：由依据推到结论的**思维路径**（v3.1 改造一，1–4 条中文短句）。
 
@@ -1358,14 +1381,21 @@ def _readable_steps(sources: Sequence[Claim]) -> list[str]:
             return lines[:4]
 
     # —— 退路：一句**不复述材料**的说明。旧的「原始依据：<锚点>」正是雷同的来源。
+    # 措辞一律用销售听得懂的说法：不写「据现有记录归纳」「未作二次推断」这类
+    # 管线口径（2026-10-29 出口可读性整改，见 ``PIPELINE_VOCABULARY`` 同批）。
+    #
+    # **必须按来源分说**（2026-10-29 A/B 复核发现）：``quote`` 来自哪个渠道不决定
+    # 「谁说的」——登记档的 ``quote`` 是系统里的字段值，录音的 ``quote`` 可能是销售
+    # 说的话。一律写「客户本人有明确表述」会把「系统里记着客户开一辆现代」说成
+    # 「客户自己讲了这句话」。实测 382 条里 187 条并非客户原话（登记 136 / 销售 51）。
     if any(claim.quote for claim in sources):
-        return ["由客户原话直接得出该结论"]
+        return [_quote_basis_step(sources)]
     if any(claim.source_quote for claim in sources):
-        return ["经语义纠错归一并核对后得出该结论"]
+        return ["客户原话经口误与品牌名核对后确定"]
     if any(claim.basis_of_inference for claim in sources):
-        return ["综合上述线索归纳得出该结论"]
+        return ["综合上述几条线索归纳得出"]
     # **不再输出「来自{渠道}」**（2026-10-19 可读性整改）：它只复述了出处，没给出推导。
-    return ["据现有记录归纳"]
+    return ["根据客户资料中已有信息归纳"]
 
 
 def _readable_summary(sources: Sequence[Claim]) -> str:
@@ -1376,7 +1406,50 @@ def _readable_summary(sources: Sequence[Claim]) -> str:
     hint = next((_strip_conclusion(h) for c in sources for h in c.basis_of_inference if _strip_conclusion(h)), "")
     if hint:
         return f"由多条线索推断：{hint}"
-    return "据现有记录归纳得出"
+    return "根据客户资料中已有信息归纳得出"
+
+
+def detail_from_claims(
+    attribute: str,
+    sources: Sequence[Claim],
+    *,
+    summary: str = "",
+) -> dict[str, Any]:
+    """由断言渲染 ``reasoning_detail`` 四键——**出口层复用 Notes 那同一套渲染**。
+
+    为什么要在这里开一个公开入口：``callback_build`` 构造画像卡时，字段大多不在
+    Notes 契约里（``emotion`` / ``personality_and_preferences`` / ``purchase_nature`` /
+    ``old_car_model`` …），Notes 里因此从来没有它们的条目，出口只能退到一句
+    「由上游已定稿的事实直接给出，未作二次推断」——那句话是内部审计口径，销售读不懂。
+
+    但 L1 的断言账本里这些字段**本来就带着完整推导链**（``reasoning_steps``）与推断
+    依据（``basis_of_inference``），只是从前没有一路传到出口。本函数把那份原料按
+    Notes 出口的同一套规则渲染（:func:`_readable_steps` / :func:`_readable_evidence`），
+    于是同一事实在 Notes 与画像卡上仍是同一种说法——这正是 ``_FactView`` 存在的理由。
+
+    ``sources`` 为空、或渲染后 ``steps`` 与 ``evidence`` 都为空时返回空四键，由调用方
+    继续往下一级退，**不得**在这里编造推导链。
+    """
+    ordered = sorted(sources, key=lambda c: (c.basis_rank, c.rank))
+    if not ordered:
+        return {"summary": "", "steps": [], "evidence": [], "confidence": None}
+
+    steps = _readable_steps(ordered)
+    evidence = _readable_evidence(ordered)
+    if not steps and not evidence:
+        return {"summary": "", "steps": [], "evidence": [], "confidence": None}
+
+    # 置信度走 Notes 出口同一个函数：按档位对 L1 自报分做校准，不另给一个值。
+    view = Projection(
+        facts={attribute: ordered[0].value},
+        basis={attribute: ordered[0].effective_basis},
+    )
+    return {
+        "summary": summary or _readable_summary(ordered),
+        "steps": steps,
+        "evidence": evidence,
+        "confidence": _confidence_for(view, attribute, ordered),
+    }
 
 
 def _to_notes_updates(
