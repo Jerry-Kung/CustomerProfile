@@ -3,7 +3,7 @@
 ## Current service
 
 Customer-profile task API plus configurable asynchronous Workers sharing a MySQL queue.
-Current production adapters are `qingtian` and `runner`; `dify` is legacy compatibility.
+Current adapters are `qingtian`, profile `runner`, and opt-in `invitation_runner`; `dify` is legacy compatibility.
 Start documentation at `docs/README.md`; `docs/worker-configuration.md` is authoritative for
 worker scopes, replicas, credentials, configuration precedence and upgrade/rollback.
 Historical documents under `docs/archive/` are reference material, not current instructions.
@@ -49,6 +49,9 @@ contracts and tests consistent rather than claiming strict validation of arbitra
   database guards when refactoring; the readable state-machine map does not replace transaction guards.
 - Submission identity is (phone, task_type), with generation/optional execution_id protecting resubmission.
   Invitation delivery additionally confirms business batch/execution identity before marking success.
+- Native invitations use authenticated `/api/v1/invitation-tasks`, not the profile `/runs` protocol.
+  Their execution ID is required and their terminal run is immutable: known pre-writeback failure is
+  final, while uncertain delivery/identity is reconciliation-only and must not notify business failure.
 - Once a remote run ID is durable, resume that run. Unknown submissions/uncertain side effects must not
   be blindly retried on another target.
 - Never reset elapsed-time metrics with lease heartbeats. Use queued_at / run start / started_at for ages.

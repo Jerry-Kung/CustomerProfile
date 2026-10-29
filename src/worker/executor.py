@@ -139,6 +139,7 @@ class WorkerExecutor:
                 task_types=self._worker_task_types,
                 work_envs=self._worker_work_envs,
                 require_profile_identity=self._platform_name == "runner",
+                **({"require_invitation_identity": True} if self._platform_name == "invitation_runner" else {}),
             )
         except Exception:
             self._logger.exception(
@@ -264,7 +265,7 @@ class WorkerExecutor:
 
     def _supports_resumable_workflow(self) -> bool:
         if (
-            self._platform_name not in {"qingtian", "runner"}
+            self._platform_name not in {"qingtian", "runner", "invitation_runner"}
         ):
             return False
         return all(
@@ -293,11 +294,13 @@ class WorkerExecutor:
             task_type=claimed.task_type,
             on_poll=heartbeat,
         )
-        if self._platform_name == "runner":
+        if self._platform_name in {"runner", "invitation_runner"}:
             kwargs.update(
                 customer_phonenumber=claimed.customer_phonenumber,
                 batch_id=claimed.batch_id,
             )
+        if self._platform_name == "invitation_runner":
+            kwargs["execution_id"] = claimed.execution_id
         return self._workflow_client.poll_workflow(**kwargs)
 
     def recover_once(self) -> None:
@@ -317,7 +320,7 @@ class WorkerExecutor:
                 limit=100, workflow_target_id=self._workflow_target_id,
                 workflow_target_revision=self._workflow_target_revision,
             )
-            if self._platform_name != "runner":
+            if self._platform_name not in {"runner", "invitation_runner"}:
                 self._task_service.requeue_stale_processing(
                     timeout_seconds=self._legacy_processing_timeout_seconds,
                     limit=100,
@@ -493,6 +496,11 @@ class WorkerExecutor:
             )
         except WorkflowTerminated as exc:
             self._record_target_success()
+            if not exc.retryable:
+                return self._finish_retry_failure(
+                    task_id=task_id, generation=generation, claim_token=claim_token,
+                    attempt_no=attempt_no, error_code=exc.code, error_stage="workflow", error_message=str(exc),
+                )
             return self._retry_new_run_or_fail(
                 claimed=claimed,
                 task_id=task_id,

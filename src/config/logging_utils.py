@@ -55,6 +55,15 @@ def redact_config(config: AppConfig) -> dict[str, Any]:
             "poll_interval_ms": config.runner.poll_interval_ms,
             "poll_timeout_ms": config.runner.poll_timeout_ms,
         },
+        "invitation_runner": {
+            "base_url_test": config.invitation_runner.base_url_test,
+            "base_url_production": config.invitation_runner.base_url_production,
+            "api_key_test": "***",
+            "api_key_production": "***",
+            "request_timeout_ms": config.invitation_runner.request_timeout_ms,
+            "poll_interval_ms": config.invitation_runner.poll_interval_ms,
+            "poll_timeout_ms": config.invitation_runner.poll_timeout_ms,
+        },
         "mysql": {
             "host": config.mysql.host,
             "port": config.mysql.port,

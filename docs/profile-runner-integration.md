@@ -1,5 +1,8 @@
 # Runner 接入与部署
 
+本文的 `runner` 仍只负责画像。CustomerProfile 高代码邀约使用独立的 `invitation_runner`
+适配器和鉴权入站协议，见[原生邀约服务接入](native-invitation-runner.md)。
+
 Runner 与擎天使用同一 Worker 合约。当前默认 Compose 支持两种平台共同消费画像，配置、
 扩容、分离邀约、多目标及升级步骤统一见[Worker 配置指南](worker-configuration.md)。
 

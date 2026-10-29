@@ -1,6 +1,7 @@
 # 统一 Worker 配置与灰度迁移
 
-当前生产主线使用两种适配器：`qingtian`、`runner`。同一镜像可启动任意数量的 Worker 组，
+当前默认主线使用 `qingtian`、画像 `runner`，另提供可选的原生邀约 `invitation_runner`。
+同一镜像可启动任意数量的 Worker 组，
 每组声明具体工作流目标、任务范围、环境、每进程并发及运行模式。商用是一个擎天目标，
 不再有专属队列门槛、权重或跨平台优先级。`dify` 仅保留为历史部署兼容适配器。
 
@@ -10,7 +11,7 @@
 
 | 运行时字段 | 含义 |
 |---|---|
-| `WORKFLOW_PLATFORM` | qingtian / runner，选择 HTTP 适配器 |
+| `WORKFLOW_PLATFORM` | qingtian / runner / invitation_runner，选择 HTTP 适配器 |
 | `WORKER_TASK_TYPES` | customer_profile / invitation_strategy 的非空逗号列表 |
 | `WORKER_WORK_ENVS` | test / production 的非空逗号列表 |
 | `WORKER_CONCURRENCY` | 每个进程的执行槽位数，默认 1，必须 >= 1 |
@@ -26,6 +27,8 @@
 总容量 = 副本数 × 每进程并发；实际流量占比随耗时和可用容量变化，不保证固定比例。
 Runner 当前只支持画像，错误配置 invitation_strategy 会在启动时拒绝。生产画像需要有效
 中国手机号及 1–50 字符 batch_id；API 的历史通用提交契约仍允许更宽的字段范围。
+`invitation_runner` 只支持邀约，要求有效手机号、1–50 字符批次和 execution_id；领取 SQL
+会跳过缺执行标识的历史邀约，保留给旧目标处理。原生邀约的终态不能通过重复 POST 重跑。
 
 ## 配置来源只维护一条链路
 
@@ -43,17 +46,22 @@ scripts/compose.sh --env-file /absolute/path/to/env up -d --build
 
 省略 --env-file 时使用根目录 .env。普通 `docker compose` 也支持原有根目录 .env 用法。
 
-## 默认 Compose 的三个组
+## 默认 Compose 的三个组与可选邀约组
 
 | 服务 | 平台 | 默认任务范围 | 环境 | 并发 | 目标 |
 |---|---|---|---|---:|---|
 | worker | qingtian | 画像、邀约 | test,production | 1 | local-default |
 | commercial-worker | qingtian | 画像 | test,production | 1 | commercial-default |
 | profile-runner-worker | runner | 画像 | production | 1 | profile-runner-production |
+| invitation-runner-worker（需启用 profile） | invitation_runner | 邀约 | test | 1 | invitation-runner-test |
 
 每个组独立设置 TASK_TYPES、WORK_ENVS、CONCURRENCY、TARGET_MODE、TARGET_ID、TARGET_REVISION。
 模板中的前缀分别是 `QINGTIAN_WORKER_*`、`COMMERCIAL_WORKER_*`、`PROFILE_RUNNER_*`；这些由
 Compose 映射到上述统一运行时字段，Python 不猜测服务名或消费职责。
+
+可选邀约组使用 `INVITATION_RUNNER_*` 前缀，默认不启动。通过 `--profile invitation-runner`
+启用时，只校验所消费环境的独立入站 URL/Key，并要求业务回调已启用。完整接入、终态语义及
+配置示例见[原生邀约服务接入](native-invitation-runner.md)。它复用现有 008 结构，不增加 SQL 迁移。
 
 例如分离邀约：设置 QINGTIAN_WORKER_TASK_TYPES=invitation_strategy，再参考额外目标示例增加
 一个只消费画像的擎天组。这样邀请与画像分别调并发，不需要新增 Python 执行逻辑。

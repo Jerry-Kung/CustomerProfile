@@ -327,6 +327,7 @@ class MySQLTaskRepository:
         task_types: tuple[str, ...],
         work_envs: tuple[str, ...],
         require_profile_identity: bool = False,
+        require_invitation_identity: bool = False,
     ) -> TaskRecord | None:
         """Claim either a new task or a due retry using a fenced worker lease.
 
@@ -353,6 +354,7 @@ class MySQLTaskRepository:
                 task_types=task_types,
                 work_envs=work_envs,
                 require_profile_identity=require_profile_identity,
+                require_invitation_identity=require_invitation_identity,
             )
             cursor.execute(
                 select_sql,
@@ -1922,6 +1924,7 @@ def _select_next_eligible_sql(
     task_types: tuple[str, ...],
     work_envs: tuple[str, ...],
     require_profile_identity: bool = False,
+    require_invitation_identity: bool = False,
 ) -> tuple[str, tuple[object, ...]]:
     work_env_expr = "task.work_env" if has_work_env else "'test' AS work_env"
     batch_id_expr = "task.batch_id" if has_batch_id else "NULL AS batch_id"
@@ -1932,12 +1935,14 @@ def _select_next_eligible_sql(
     )
     capability_clauses: list[str] = []
     capability_params: list[object] = []
-    if require_profile_identity:
+    if require_profile_identity or require_invitation_identity:
         if not has_batch_id:
             capability_clauses.append("1 = 0")
         else:
             capability_clauses.append("task.customer_phonenumber REGEXP '^1[3-9][0-9]{9}$'")
             capability_clauses.append("CHAR_LENGTH(task.batch_id) BETWEEN 1 AND 50")
+    if require_invitation_identity:
+        capability_clauses.append("task.execution_id REGEXP '^[A-Za-z0-9_-]{1,64}$'")
     # A scoped worker must never infer another environment/type on an old schema.
     if not has_task_type or not has_work_env or not task_types or not work_envs:
         capability_clauses.append("1 = 0")

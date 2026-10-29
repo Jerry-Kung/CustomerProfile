@@ -62,6 +62,7 @@ class TaskService:
         task_types: tuple[str, ...] = ("customer_profile", "invitation_strategy"),
         work_envs: tuple[str, ...] = ("test", "production"),
         require_profile_identity: bool = False,
+        require_invitation_identity: bool = False,
     ) -> TaskRecord | None:
         claim_eligible = getattr(self.repository, "claim_next_eligible", None)
         if retry_enabled and lease_seconds is not None and callable(claim_eligible):
@@ -75,6 +76,7 @@ class TaskService:
                 task_types=task_types,
                 work_envs=work_envs,
                 **({"require_profile_identity": True} if require_profile_identity else {}),
+                **({"require_invitation_identity": True} if require_invitation_identity else {}),
             )
         else:
             # A non-resumable target cannot drain bound work or claim outside

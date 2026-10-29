@@ -1,5 +1,8 @@
 # 邀约最终状态与回写确认
 
+CustomerProfile 高代码邀约现已通过 `invitation_runner` 复用本文的执行标识、业务核对和
+失败 outbox；协议、终态去重及启用说明见[原生邀约服务接入](native-invitation-runner.md)。
+
 适用分支 `main`；同时部署 customer-profile-api 的 `master` 或已整合的 `develop`。Web 和独立画像生成服务无需改动。
 
 - API 为每次邀约生成独立 `execution_id`，原业务 `batch_id` 不变；backend 入队、青天输入、回调全程透传。

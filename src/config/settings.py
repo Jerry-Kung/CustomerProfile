@@ -81,6 +81,17 @@ class ProfileRunnerConfig:
 
 
 @dataclass(frozen=True)
+class InvitationRunnerConfig:
+    base_url_test: str = ""
+    base_url_production: str = ""
+    api_key_test: str = field(default="", repr=False)
+    api_key_production: str = field(default="", repr=False)
+    request_timeout_ms: int = 15000
+    poll_interval_ms: int = 2000
+    poll_timeout_ms: int = 2400000
+
+
+@dataclass(frozen=True)
 class FailureCallbackConfig:
     enabled: bool = False
     base_url_test: str = ""
@@ -184,9 +195,10 @@ class AppConfig:
     runner: ProfileRunnerConfig = field(default_factory=ProfileRunnerConfig)
     failure_callback: FailureCallbackConfig = field(default_factory=FailureCallbackConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
+    invitation_runner: InvitationRunnerConfig = field(default_factory=InvitationRunnerConfig)
 
 
-_SUPPORTED_PLATFORMS = ("dify", "qingtian", "runner")
+_SUPPORTED_PLATFORMS = ("dify", "qingtian", "runner", "invitation_runner")
 
 
 def load_mysql_config() -> MySQLConfig:
@@ -219,19 +231,22 @@ def load_config(*, component: str = "worker") -> AppConfig:
     is_worker = component == "worker"
     platform = _env_str("WORKFLOW_PLATFORM", "qingtian").lower()
     if is_worker and platform not in _SUPPORTED_PLATFORMS:
-        raise ValueError("WORKFLOW_PLATFORM must be qingtian or runner (dify is legacy compatibility)")
+        raise ValueError("WORKFLOW_PLATFORM must be qingtian, runner or invitation_runner (dify is legacy compatibility)")
     role = _worker_role() if is_worker else "local"
     task_types = _worker_task_types(workflow_platform=platform) if is_worker else WorkerConfig.task_types
     work_envs = _worker_work_envs(workflow_platform=platform) if is_worker else WorkerConfig.work_envs
     target_id = _worker_target_id(role) if is_worker else "local-default"
-    if is_worker and platform == "runner":
+    if is_worker and platform in {"runner", "invitation_runner"}:
         target_id = _require_env("WORKFLOW_TARGET_ID")
         if target_id in {"local-default", "commercial-default"}:
-            raise ValueError("runner requires an independent WORKFLOW_TARGET_ID")
+            raise ValueError(f"{platform} requires an independent WORKFLOW_TARGET_ID")
     origins = tuple(v.strip() for v in _env_str("CORS_ALLOW_ORIGINS", "*").split(",") if v.strip())
     api_port = _positive_env_int("API_PORT", 18008) if component == "api" else 18008
     if api_port > 65535:
         raise ValueError("API_PORT must be <= 65535")
+    failure_callback = _failure_callback_config() if is_worker else FailureCallbackConfig()
+    if is_worker and platform == "invitation_runner" and not failure_callback.enabled:
+        raise ValueError("invitation_runner requires PROFILE_FAILURE_CALLBACK_ENABLED=true for delivery verification")
     return AppConfig(
         app_env=_env_str("APP_ENV", "local") or "local",
         log_level=_env_str("LOG_LEVEL", "INFO") or "INFO",
@@ -241,7 +256,9 @@ def load_config(*, component: str = "worker") -> AppConfig:
         qingtian=_qingtian_config(selected=is_worker and platform == "qingtian", task_types=task_types, work_envs=work_envs),
         runner=(_runner_config(workflow_platform=platform, work_envs=work_envs)
                 if is_worker and platform == "runner" else ProfileRunnerConfig()),
-        failure_callback=_failure_callback_config() if is_worker else FailureCallbackConfig(),
+        failure_callback=failure_callback,
+        invitation_runner=(_invitation_runner_config(work_envs=work_envs)
+                           if is_worker and platform == "invitation_runner" else InvitationRunnerConfig()),
         worker=WorkerConfig(
             concurrency=_worker_concurrency() if is_worker else 1,
             poll_interval_seconds=_positive_env_int("WORKER_POLL_INTERVAL_MS", 2000) / 1000 if is_worker else 2,
@@ -364,18 +381,21 @@ def _csv_values(key: str, default: str) -> tuple[str, ...]:
 
 
 def _worker_task_types(*, workflow_platform: str = "dify") -> tuple[str, ...]:
-    default = "customer_profile" if workflow_platform == "runner" else "customer_profile,invitation_strategy"
+    default = {"runner": "customer_profile", "invitation_runner": "invitation_strategy"}.get(
+        workflow_platform, "customer_profile,invitation_strategy")
     values = _csv_values("WORKER_TASK_TYPES", default)
     unsupported = sorted(set(values) - {"customer_profile", "invitation_strategy"})
     if unsupported:
         raise ValueError(f"WORKER_TASK_TYPES contains unsupported values: {', '.join(unsupported)}")
     if workflow_platform == "runner" and "invitation_strategy" in values:
         raise ValueError("runner does not support WORKER_TASK_TYPES=invitation_strategy")
+    if workflow_platform == "invitation_runner" and values != ("invitation_strategy",):
+        raise ValueError("invitation_runner requires WORKER_TASK_TYPES=invitation_strategy")
     return values
 
 
 def _worker_work_envs(*, workflow_platform: str = "dify") -> tuple[str, ...]:
-    values = _csv_values("WORKER_WORK_ENVS", "test" if workflow_platform == "runner" else "test,production")
+    values = _csv_values("WORKER_WORK_ENVS", "test" if workflow_platform in {"runner", "invitation_runner"} else "test,production")
     unsupported = sorted(set(values) - {"test", "production"})
     if unsupported:
         raise ValueError(f"WORKER_WORK_ENVS contains unsupported values: {', '.join(unsupported)}")
@@ -462,6 +482,18 @@ def _runner_config(*, workflow_platform: str, work_envs: tuple[str, ...]) -> Pro
         request_timeout_ms=_positive_env_int("PROFILE_RUNNER_REQUEST_TIMEOUT_MS", 15000),
         poll_interval_ms=_positive_env_int("PROFILE_RUNNER_POLL_INTERVAL_MS", 2000),
         poll_timeout_ms=_positive_env_int("PROFILE_RUNNER_POLL_TIMEOUT_MS", 2400000),
+    )
+
+
+def _invitation_runner_config(*, work_envs: tuple[str, ...]) -> InvitationRunnerConfig:
+    return InvitationRunnerConfig(
+        base_url_test=_validated_url("INVITATION_RUNNER_BASE_URL_TEST", required="test" in work_envs),
+        base_url_production=_validated_url("INVITATION_RUNNER_BASE_URL_PRODUCTION", required="production" in work_envs),
+        api_key_test=_require_or_empty("INVITATION_RUNNER_API_KEY_TEST", "test" in work_envs),
+        api_key_production=_require_or_empty("INVITATION_RUNNER_API_KEY_PRODUCTION", "production" in work_envs),
+        request_timeout_ms=_positive_env_int("INVITATION_RUNNER_REQUEST_TIMEOUT_MS", 15000),
+        poll_interval_ms=_positive_env_int("INVITATION_RUNNER_POLL_INTERVAL_MS", 2000),
+        poll_timeout_ms=_positive_env_int("INVITATION_RUNNER_POLL_TIMEOUT_MS", 2400000),
     )
 
 

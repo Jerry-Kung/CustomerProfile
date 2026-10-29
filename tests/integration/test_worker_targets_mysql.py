@@ -59,6 +59,18 @@ def submit(repo, index, task_type="customer_profile", work_env="production"):
                               batch_id=f"isolated-{index}")
 
 
+def test_native_invitation_claim_requires_execution_and_preserves_it(repository):
+    repo, _ = repository
+    legacy = submit(repo, 101, task_type="invitation_strategy")
+    native = repo.upsert_queued("13800000102", task_type="invitation_strategy", work_env="production",
+                               batch_id="call-native", execution_id="execution-native")
+    task = repo.claim_next_eligible(lease_seconds=180, execution_pool="local", workflow_target_id="native-invitation",
+        workflow_target_revision="v1", allow_new_tasks=True, allow_unbound_retries=True,
+        task_types=("invitation_strategy",), work_envs=("production",), require_invitation_identity=True)
+    assert task.id == native.id and task.execution_id == "execution-native"
+    assert claim(repo, "qingtian-invitation", types=("invitation_strategy",)).id == legacy.id
+
+
 def test_parallel_targets_and_replicas_claim_each_task_once(repository):
     repo, _ = repository
     tasks = [submit(repo, i) for i in range(1, 13)]

@@ -1,7 +1,8 @@
 # 当前架构
 
 API 接收任务并持久化 MySQL；若干 Worker 通过同一 TaskService/Repository 原子领取，
-按 WORKFLOW_PLATFORM 选择 qingtian 或 runner 适配器。API 与 Worker 是独立进程，同一个镜像。
+按 WORKFLOW_PLATFORM 选择 qingtian、画像 runner 或原生邀约 invitation_runner 适配器。
+API 与 Worker 是独立进程，同一个镜像；原生邀约协议与启用边界见[接入说明](native-invitation-runner.md)。
 Dify 保留历史兼容入口。没有额外 broker、权重、分桶或商用队列门槛。
 
 ## 进程边界

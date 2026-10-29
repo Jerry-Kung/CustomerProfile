@@ -1,6 +1,6 @@
 # Docker Compose 快速启动
 
-当前 Worker 配置统一使用 qingtian / runner 两类平台。完整字段、旧 env 迁移和多目标示例见
+当前默认 Worker 使用 qingtian / runner，另提供可选的 invitation_runner 邀约组。完整字段、旧 env 迁移和多目标示例见
 [统一 Worker 配置](worker-configuration.md)。
 
 ```bash

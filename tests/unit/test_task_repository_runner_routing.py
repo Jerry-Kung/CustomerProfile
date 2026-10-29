@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, fields
+import re
 import sqlite3
 
 import pytest
@@ -213,3 +214,26 @@ def test_filters_remain_parameters_and_binding_guard_is_in_select_and_update(rep
     sql, params = _select_next_queued_sql(True, True, True, task_types=("x' OR 1=1 --",))
     assert "x' OR 1=1" not in sql
     assert params == ("x' OR 1=1 --",)
+
+
+@pytest.mark.parametrize("native,expected", [(False, 1), (True, 4)])
+def test_native_invitation_claim_filters_legacy_missing_execution_and_invalid_identity(native, expected):
+    rows = [task(1, task_type="invitation_strategy", batch_id="audio"),
+            task(2, task_type="invitation_strategy", batch_id="audio", execution_id="bad/identity"),
+            task(3, task_type="invitation_strategy", batch_id=None, execution_id="valid-3"),
+            task(4, task_type="invitation_strategy", batch_id="audio", execution_id="valid-4")]
+    connection = _ClaimConnection(rows)
+    try:
+        connection.database.create_function("REGEXP", 2, lambda pattern, value: bool(value is not None and re.search(pattern, str(value))))
+        connection.database.create_function("CHAR_LENGTH", 1, lambda value: len(value) if value is not None else None)
+        sql, params = _select_next_eligible_sql(True, True, True, workflow_target_id="native-invitation",
+            workflow_target_revision="v1", execution_pool="local", allow_new_tasks=True, allow_unbound_retries=True,
+            task_types=("invitation_strategy",), work_envs=("production",), require_invitation_identity=native)
+        columns = sorted(set(re.findall(r"(?:last_attempt|local_attempt|commercial_attempt)\.(\w+)", sql)))
+        connection.database.execute("CREATE TABLE customer_profile_task_attempts (" + ",".join(name + " TEXT" for name in columns) + ")")
+        sqlite_sql = re.sub(r"DATE_SUB\(\s*CURRENT_TIMESTAMP,\s*INTERVAL %s SECOND\s*\)",
+                            "datetime(CURRENT_TIMESTAMP, '-' || %s || ' seconds')", sql)
+        selected = connection.database.execute(sqlite_sql.replace("FOR UPDATE SKIP LOCKED", "").replace("%s", "?"), params).fetchone()
+        assert selected["id"] == expected
+    finally:
+        connection.database.close()

@@ -77,3 +77,16 @@ services:
       WORKER_WORK_ENVS: "${PROFILE_RUNNER_WORK_ENVS:-production}"
       WORKER_TARGET_MODE: "${PROFILE_RUNNER_TARGET_MODE:-active}"
       WORKER_CONCURRENCY: "${PROFILE_RUNNER_CONCURRENCY:-1}"
+
+  invitation-runner-worker:
+    <<: *worker
+    profiles: ["invitation-runner"]
+    environment:
+      WORKFLOW_PLATFORM: invitation_runner
+      WORKER_ROLE: local
+      WORKFLOW_TARGET_ID: "${INVITATION_RUNNER_TARGET_ID:-invitation-runner-test}"
+      WORKFLOW_TARGET_REVISION: "${INVITATION_RUNNER_TARGET_REVISION:-v1}"
+      WORKER_TASK_TYPES: invitation_strategy
+      WORKER_WORK_ENVS: "${INVITATION_RUNNER_WORK_ENVS:-test}"
+      WORKER_TARGET_MODE: "${INVITATION_RUNNER_TARGET_MODE:-active}"
+      WORKER_CONCURRENCY: "${INVITATION_RUNNER_CONCURRENCY:-1}"

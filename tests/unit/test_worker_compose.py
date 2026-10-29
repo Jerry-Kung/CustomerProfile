@@ -19,18 +19,20 @@ BASE = {
 }
 
 
-def render(tmp_path, overrides=None, *, additional=False):
+def render(tmp_path, overrides=None, *, additional=False, native_invitation=False):
     if not shutil.which("docker"):
         pytest.skip("Docker Compose CLI is not installed; no daemon is needed")
     env_file = tmp_path / "worker env"
     env_file.write_text("\n".join(k + "=" + v for k, v in (BASE | (overrides or {})).items()))
     runtime = {k: v for k, v in os.environ.items() if not k.startswith((
-        "COMPOSE_", "QINGTIAN_", "PROFILE_", "COMMERCIAL_", "WORKER_", "LOCAL_", "API_", "HOST_API_"))}
+        "COMPOSE_", "QINGTIAN_", "PROFILE_", "INVITATION_RUNNER_", "COMMERCIAL_", "WORKER_", "LOCAL_", "API_", "HOST_API_"))}
     runtime["APP_ENV_FILE"] = str(env_file)
     command = ["docker", "compose", "--project-directory", str(ROOT), "--env-file", str(env_file),
                "-f", str(ROOT / "docker-compose.yml")]
     if additional:
         command += ["-f", str(ROOT / "deploy/examples/additional-worker.compose.yaml")]
+    if native_invitation:
+        command += ["--profile", "invitation-runner"]
     result = subprocess.run(command + ["config", "--format", "json"], env=runtime,
                             text=True, capture_output=True)
     assert result.returncode == 0, "Compose rendering failed (output withheld to protect env credentials)"
@@ -91,3 +93,16 @@ def test_wrapper_uses_one_env_file_for_interpolation_and_injection(tmp_path):
     arguments, injected_path = json.loads(result.stdout)
     assert arguments[arguments.index("--env-file") + 1] == injected_path == str(env_file)
     assert arguments[-2:] == ["config", "--services"]
+
+
+def test_native_invitation_group_is_opt_in_and_has_an_independent_target(tmp_path):
+    assert "invitation-runner-worker" not in render(tmp_path)
+    services = render(tmp_path, {"INVITATION_RUNNER_CONCURRENCY": "4", "INVITATION_RUNNER_WORK_ENVS": "test",
+        "INVITATION_RUNNER_BASE_URL_TEST": "http://native-invitation:8099", "INVITATION_RUNNER_API_KEY_TEST": "offline-only"},
+        native_invitation=True)
+    worker = services["invitation-runner-worker"]["environment"]
+    assert worker["WORKFLOW_PLATFORM"] == "invitation_runner"
+    assert worker["WORKER_TASK_TYPES"] == "invitation_strategy"
+    assert worker["WORKER_WORK_ENVS"] == "test" and worker["WORKER_CONCURRENCY"] == "4"
+    assert worker["WORKFLOW_TARGET_ID"] != services["profile-runner-worker"]["environment"]["WORKFLOW_TARGET_ID"]
+    assert worker["INVITATION_RUNNER_API_KEY_TEST"] == "offline-only"

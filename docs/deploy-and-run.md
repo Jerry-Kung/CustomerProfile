@@ -51,6 +51,7 @@ Runner 只支持 customer_profile；多种任务必须在适配器能力内声�
 PROFILE_API_BASE_URL/KEY 及其 TEST/PRODUCTION 覆盖项负责业务回调和邀请核验；生产可显式拆分
 环境，默认不做地址/密钥隔离。最终失败 outbox 由各 Worker 竞争投递，有界租约保护；原有业务
 execution_id 与回写语义见[邀约状态同步](invitation-delivery.md)。
+CustomerProfile 高代码邀约的可选 Worker、独立入站密钥及升级步骤见[原生邀约服务接入](native-invitation-runner.md)。
 
 ## 接口与结果
 

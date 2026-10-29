@@ -37,6 +37,7 @@ class TaskRepository(Protocol):
         task_types: tuple[str, ...],
         work_envs: tuple[str, ...],
         require_profile_identity: bool = False,
+        require_invitation_identity: bool = False,
     ) -> TaskRecord | None:
         ...
 

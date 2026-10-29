@@ -45,6 +45,6 @@ class WorkflowTerminated(ResumableWorkflowRequestFailed):
 
     code = "WORKFLOW_FAILED"
 
-    def __init__(self, message: str, *, terminal_status: str):
+    def __init__(self, message: str, *, terminal_status: str, retryable: bool = True):
         self.terminal_status = terminal_status
-        super().__init__(message, stage="workflow", retryable=True)
+        super().__init__(message, stage="workflow", retryable=retryable)

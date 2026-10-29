@@ -16,6 +16,7 @@ from src.infrastructure.db.task_repository import MySQLTaskRepository
 from src.infrastructure.dify.client import DifyClient
 from src.infrastructure.qingtian.client import QingTianClient
 from src.infrastructure.runner.client import RunnerClient
+from src.infrastructure.invitation_runner.client import InvitationRunnerClient
 from src.infrastructure.workflow.output_parser import WorkflowOutputParser
 from src.infrastructure.workflow.protocol import WorkflowClient
 from src.infrastructure.workflow.invitation_writeback import InvitationWritebackVerifier
@@ -79,6 +80,9 @@ def bootstrap(component: str = "worker") -> tuple[AppConfig, MySQLClient, TaskSe
 
 
 def _build_workflow_client(config: AppConfig, logger: logging.Logger) -> WorkflowClient:
+    if config.workflow_platform == "invitation_runner":
+        logger.info("workflow_client_selected platform=invitation_runner")
+        return InvitationRunnerClient(config=config.invitation_runner)
     if config.workflow_platform == "runner":
         logger.info("workflow_client_selected platform=runner 说明=使用独立画像生成服务")
         return RunnerClient(config=config.runner)
@@ -90,6 +94,8 @@ def _build_workflow_client(config: AppConfig, logger: logging.Logger) -> Workflo
 
 
 def _workflow_poll_timeout_ms(config: AppConfig) -> int:
+    if config.workflow_platform == "invitation_runner":
+        return config.invitation_runner.poll_timeout_ms
     if config.workflow_platform == "runner":
         return config.runner.poll_timeout_ms
     if config.workflow_platform == "qingtian":
