@@ -48,12 +48,21 @@ scripts/compose.sh --env-file /absolute/path/to/env up -d --build
 
 ## 默认 Compose 的三个组与可选邀约组
 
-| 服务 | 平台 | 默认任务范围 | 环境 | 并发 | 目标 |
-|---|---|---|---|---:|---|
-| worker | qingtian | 画像、邀约 | test,production | 1 | local-default |
-| commercial-worker | qingtian | 画像 | test,production | 1 | commercial-default |
-| profile-runner-worker | runner | 画像 | production | 1 | profile-runner-production |
-| invitation-runner-worker（需启用 profile） | invitation_runner | 邀约 | test | 1 | invitation-runner-test |
+| 服务 | 平台 | 声明任务范围 | 环境 | 并发 | 模式 | 目标 |
+|---|---|---|---|---:|---|---|
+| worker | qingtian | 画像 | test,production | 1 | draining | local-default |
+| commercial-worker | qingtian | 画像 | test,production | 1 | draining | commercial-default |
+| profile-runner-worker | runner | 画像 | production | 5 | active | profile-runner-production |
+| invitation-runner-worker（需启用 profile） | invitation_runner | 邀约 | test | 5 | active | invitation-runner-test |
+
+两个擎天目标默认只恢复已绑定的存量任务，不接新任务。保留其原凭据、目标 ID 和 revision，
+普通组仍能恢复此前绑定给它的旧邀约，即使声明的新任务范围已缩小。原生组分别提供 5 个
+后端槽位；CustomerProfile 单进程队列 worker 同时配置 `WORKER_CONCURRENCY=10`，避免
+任务只是在远端串行排队。执行服务仍共用既有模型请求并发和限流。
+
+当前 UAT 文件让原生画像和邀约都覆盖 `test,production`，每组的两个环境共用 5 个槽位。
+画像需同时填写 `PROFILE_RUNNER_BASE_URL_TEST / _PRODUCTION`；两个标签在本次部署都
+指向原有执行服务。保持目标 `profile-runner-production / v1`，不因扩展环境而改变存量归属。
 
 每个组独立设置 TASK_TYPES、WORK_ENVS、CONCURRENCY、TARGET_MODE、TARGET_ID、TARGET_REVISION。
 模板中的前缀分别是 `QINGTIAN_WORKER_*`、`COMMERCIAL_WORKER_*`、`PROFILE_RUNNER_*`；这些由
@@ -125,8 +134,8 @@ attempts/远端状态，不能任意指向 Runner 或从头重跑。
    scripts/compose.sh up -d --build --no-deps api worker commercial-worker profile-runner-worker
    ```
 
-4. 启用各组 active；保留相同的旧 ID/revision 恢复存量。
-5. 先以小并发启动 Runner，比较按目标统计的成功、耗时、业务回写和样本质量，再调整容量。
+4. 原生画像与邀约组 active；擎天两组保持 draining，使用原 ID/revision 恢复存量。
+5. 核对后端各 5 个槽位和执行服务总并发 10，观察成功、耗时、业务回写及模型限流。
 
 首次建库仍使用已有 migrate 服务执行 001–008；本次功能不增加其 SQL 文件。回滚时恢复
 上一个已验证的镜像/配置并保留原数据库和尝试历史，不需要本次功能的数据库回滚。

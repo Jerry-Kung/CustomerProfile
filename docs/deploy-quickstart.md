@@ -15,8 +15,10 @@ scripts/compose.sh logs -f worker commercial-worker profile-runner-worker
 默认 API 端口 18008；可独立设置
 HOST_API_PORT（宿主机）、API_PORT（容器/本地监听）。/ready 检查数据库，失败返回 503。
 
-默认普通擎天组接画像和邀约，商用组接画像，Runner 接生产画像；由空闲并发共同领取，不按权重。
-并发是每个进程的数量，多个副本需要合计。单独邀请 Worker 可通过缩小某组任务范围配置。
+默认普通和商用擎天组均只排空旧任务；原生画像组并发 5，可选的原生邀约组并发也为 5。
+启用邀约时使用 `--profile invitation-runner`，完整联合更新顺序见
+[原生邀约服务接入](native-invitation-runner.md#两层-compose-联合更新)。
+并发是每个进程的数量，多个副本需要合计；执行服务本次采用单进程总并发 10。
 
 更新已有 008 环境前先阅读[升级顺序](worker-configuration.md#重试与升级顺序)，保留旧目标身份，
 统一替换消费者。--no-deps 跳过迁移服务；配置变更后需重建容器，restart 不会重新注入环境变量：

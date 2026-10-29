@@ -69,6 +69,22 @@ def test_legacy_concurrency_and_mode_inputs_remain_explicitly_compatible(tmp_pat
     assert services["commercial-worker"]["environment"]["WORKER_TARGET_MODE"] == "recovery_only"
 
 
+def test_native_cutover_defaults_drain_old_targets_and_allocate_five_slots(tmp_path):
+    services = render(tmp_path, {
+        "INVITATION_RUNNER_BASE_URL_TEST": "http://native-invitation:8099",
+        "INVITATION_RUNNER_API_KEY_TEST": "offline-only",
+    }, native_invitation=True)
+    for name, target in (("worker", "local-default"), ("commercial-worker", "commercial-default")):
+        env = services[name]["environment"]
+        assert env["WORKER_TARGET_MODE"] == "draining"
+        assert env["WORKFLOW_TARGET_ID"] == target
+        assert env["WORKFLOW_TARGET_REVISION"] == "v1"
+    assert services["worker"]["environment"]["WORKER_TASK_TYPES"] == "customer_profile"
+    for name in ("profile-runner-worker", "invitation-runner-worker"):
+        assert services[name]["environment"]["WORKER_CONCURRENCY"] == "5"
+        assert services[name]["environment"]["WORKER_TARGET_MODE"] == "active"
+
+
 def test_distinct_qingtian_target_can_be_added_without_new_runtime_code(tmp_path):
     services = render(tmp_path, {"QINGTIAN_B_CONCURRENCY": "4", "QINGTIAN_B_API_KEY_PRODUCTION": "b-test-only"}, additional=True)
     worker = services["qingtian-b"]["environment"]

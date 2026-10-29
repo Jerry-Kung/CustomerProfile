@@ -2,7 +2,8 @@
 
 本次基于 `codex/unified-workflow-workers` 的 `b5f890e`，复用该分支已有的统一 Worker、
 `execution_id`、失败通知 outbox 和业务回写核对。新增适配器 `invitation_runner`，
-对应 CustomerProfile 的 `codex/invitation-workflow`（`c3e5c3e`）。未修改生产配置或切换流量。
+对应 CustomerProfile 的 `codex/invitation-workflow`，部署时使用两个分支的最新提交。
+本地配置与离线验证已完成，服务器部署和真实业务质量验证由部署阶段完成。
 
 ## 分工与契约
 
@@ -67,7 +68,7 @@ sequenceDiagram
 | `INVITATION_RUNNER_API_KEY_TEST / _PRODUCTION` | 对应环境的原生入站密钥；无环境间回退 |
 | `INVITATION_RUNNER_WORK_ENVS` | 默认 test；生产必须显式配置 URL、Key 和环境 |
 | `INVITATION_RUNNER_TARGET_ID / _REVISION` | 新目标身份，不能复用画像 Runner 或旧邀约擎天的身份 |
-| `INVITATION_RUNNER_CONCURRENCY / _TARGET_MODE` | 映射到统一 Worker 的每进程并发与 active/draining 模式 |
+| `INVITATION_RUNNER_CONCURRENCY / _TARGET_MODE` | 默认并发 5、active；映射到统一 Worker 的运行时字段 |
 | `INVITATION_RUNNER_REQUEST_TIMEOUT_MS / _POLL_INTERVAL_MS / _POLL_TIMEOUT_MS` | 请求超时、查询间隔和每轮查询时限；默认 15000 / 2000 / 2400000 |
 
 `PROFILE_FAILURE_CALLBACK_ENABLED=true` 以及业务 `PROFILE_API_BASE_URL / PROFILE_API_KEY`
@@ -97,15 +98,49 @@ scripts/compose.sh --profile invitation-runner up -d --build --no-deps api invit
 scripts/compose.sh --profile invitation-runner up -d --no-deps --scale invitation-runner-worker=2 invitation-runner-worker
 ```
 
-默认擎天组仍声明消费邀约，因此启用新组并不代表全部邀约自动切换。先在测试环境验证；
-准备全量切换时停止旧目标接新邀约并保留其在途恢复能力，新目标开始消费未绑定任务。
-在途运行及其失败通知排空之前，保留旧目标原凭据与 ID/revision。具体模式迁移见配置指南，
-不要把旧邀约目标直接改为原生 URL 却保留相同目标身份。
+当前两个擎天组默认 draining，仅排空原目标的已绑定任务；原生画像与邀约各接 5 个新任务。
+在途运行及其失败通知排空之前保留旧目标原凭据与 ID/revision，不把原目标 URL 改成新协议。
+业务 API 必须启用 execution_id；原生邀约组不会领取没有标识的旧任务。回滚时让原生组
+draining，保留在途恢复，再恢复原擎天组的新任务范围；本次没有新增迁移。
 
-如果邀约全量切向原生服务，可让 active 擎天组只声明 `customer_profile`；如仍有旧目标邀约
-在途任务，用原平台/原身份的 draining 组排空。业务 API 必须启用 execution_id；原生组不会
-领取没有标识的旧任务。回滚时让原生组 draining，保留在途恢复，再恢复原邀约目标的新任务
-范围；无需撤销本次数据库迁移，因为本次没有新增迁移。
+## 两层 Compose 联合更新
+
+适用于已完成 001–008 的现有部署。先将更新后的两份私有配置分别放到对应仓库根目录
+`.env`；保留 CustomerProfile 的 Compose 项目名、数据卷及后端各原目标身份。两个任务标签
+仍使用原 UAT 服务地址，原生画像与邀约各 5，执行服务 `WORKER_CONCURRENCY=10`。
+
+先在任务后端更新到 `codex/unified-workflow-workers`，检查配置并暂停四组消费者。
+任务 API 可以继续把新请求持久化到队列；在途执行的运行标识和目标归属保留，重建后恢复：
+
+```bash
+scripts/compose.sh --profile invitation-runner config -q
+scripts/compose.sh --profile invitation-runner stop \
+  worker commercial-worker profile-runner-worker invitation-runner-worker
+```
+
+再在 CustomerProfile 仓库更新到 `codex/invitation-workflow`，重建三个进程：
+
+```bash
+docker compose --env-file .env config -q
+docker compose --env-file .env up -d --build --force-recreate \
+  --wait --wait-timeout 120 api worker inbound
+curl -fsS http://127.0.0.1:18000/health
+curl -fsS http://127.0.0.1:8099/health
+```
+
+worker 停机时等待已领取任务完成，可能超过两分钟；启动健康等待不缩短原有停机宽限。
+确认执行服务健康后，回到任务后端统一重建 API 与消费者，跳过迁移服务：
+
+```bash
+scripts/compose.sh --profile invitation-runner up -d --build --force-recreate --no-deps \
+  --wait --wait-timeout 120 \
+  api worker commercial-worker profile-runner-worker invitation-runner-worker
+scripts/compose.sh --profile invitation-runner ps
+curl -fsS http://127.0.0.1:18007/ready
+```
+
+上面健康端口按当前 UAT 配置给出；其他部署以实际端口为准。健康检查不代替真实业务质量
+验证，不通过发送真实工作流来验证配置文件。旧擎天目标排空前继续运行其 draining 容器。
 
 ## 验证
 
@@ -127,7 +162,8 @@ CUSTOMERPROFILE_SOURCE_ROOT=/absolute/path/to/CustomerProfile \
 真实 MySQL 的身份筛选用例随现有 `worker_mysql_integration` 测试提供，仍仅允许显式指定的
 本地隔离测试实例。本次没有启动 Docker、运行真实模型、迁移业务数据库或调整线上配置。
 
-2026-10-29 验证：单元测试 **395 项通过**（修改前基线 322 项）；真实原生路由的跨仓库
+2026-10-29 验证：单元测试 **396 项通过**（修改前基线 322 项）；真实原生路由的跨仓库
 离线契约测试 **2 项通过**，覆盖无录音首邀和两份录音二邀。OpenAPI、输出和迁移契约检查通过；
-Compose 的默认组和可选组渲染均通过。真实 MySQL 用例因本机 Docker daemon 未运行而未执行，
+联调使用真实执行 worker 的 10 个并发槽位，验证正常完成和停机排空。Compose 的默认组
+和可选组渲染均通过。真实 MySQL 用例未在本轮执行，
 不以离线 SQL 筛选测试替代数据库锁与并发验收。

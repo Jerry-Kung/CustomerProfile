@@ -50,6 +50,8 @@ def test_backend_adapter_against_real_customerprofile_inbound_and_worker(
             inbound_api_key="offline-inbound",
             inline_worker=False,
             interrupt_on_start=False,
+            worker_concurrency=10,
+            worker_poll_interval_ms=5,
             writeback_enabled=True,
             llm_base_url="https://llm.invalid/v1",
             llm_model="offline",
@@ -72,14 +74,8 @@ def test_backend_adapter_against_real_customerprofile_inbound_and_worker(
 
         app = create_inbound_app(service_factory=factory)
         loop = asyncio.get_running_loop()
-        stopped = asyncio.Event()
         requests_seen = []
-
-        async def consume():
-            worker = Worker(service, settings)
-            while not stopped.is_set():
-                if not await worker.run_once():
-                    await asyncio.sleep(0.005)
+        worker = Worker(service, settings)
 
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(
@@ -117,7 +113,7 @@ def test_backend_adapter_against_real_customerprofile_inbound_and_worker(
                     ),
                     SyncBridge(),
                 )
-                consumer = asyncio.create_task(consume())
+                consumer = asyncio.create_task(worker.run_forever())
                 try:
                     result = json.loads(
                         await asyncio.to_thread(
@@ -137,7 +133,7 @@ def test_backend_adapter_against_real_customerprofile_inbound_and_worker(
                         for r in requests_seen
                     )
                 finally:
-                    stopped.set()
+                    worker.request_stop()
                     await asyncio.wait_for(consumer, timeout=10)
 
     asyncio.run(scenario())
