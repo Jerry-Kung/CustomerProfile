@@ -39,7 +39,7 @@ class Worker:
         self.settings = settings
         self.worker_id = settings.resolved_worker_id
         self._stopping = asyncio.Event()
-        self._inflight: dict[str, asyncio.Task[Any]] = {}
+        self._consumers: list[asyncio.Task[None]] = []
 
     # ------------------------------------------------------------ 生命周期
 
@@ -74,9 +74,24 @@ class Worker:
                 logger.warning("启动恢复：{} 个残留任务已标为中断（interrupted），待人工处理", marked)
 
         logger.info(
-            "执行进程已启动，标识={}，回写启用={}，回放模式={}",
-            self.worker_id, settings.writeback_enabled, settings.replay_mode,
+            "执行进程已启动，标识={}，主任务并发={}，回写启用={}，回放模式={}",
+            self.worker_id, settings.worker_concurrency,
+            settings.writeback_enabled, settings.replay_mode,
         )
+        self._consumers = [
+            asyncio.create_task(self._consume(), name=f"queue-consumer-{index}")
+            for index in range(settings.worker_concurrency)
+        ]
+        try:
+            await asyncio.gather(*self._consumers)
+        finally:
+            # 任一槽位异常时停止其他槽位的新领取，等已领取的运行收敛后再退出。
+            self.request_stop()
+            await self._drain()
+        logger.info("执行进程已停止，标识={}", self.worker_id)
+
+    async def _consume(self) -> None:
+        """一个固定消费槽位：每次等待当前运行完成后再领取下一个。"""
         while not self._stopping.is_set():
             ran = await self.run_once()
             if not ran:
@@ -84,20 +99,18 @@ class Worker:
                 try:
                     await asyncio.wait_for(
                         self._stopping.wait(),
-                        timeout=settings.worker_poll_interval_ms / 1000,
+                        timeout=self.settings.worker_poll_interval_ms / 1000,
                     )
                 except asyncio.TimeoutError:
                     pass
 
-        await self._drain()
-        logger.info("执行进程已停止，标识={}", self.worker_id)
-
     async def _drain(self) -> None:
-        """等在飞运行结束。"""
-        if not self._inflight:
-            return
-        logger.info("执行进程正在关停，等待 {} 个运行中的任务结束", len(self._inflight))
-        await asyncio.gather(*self._inflight.values(), return_exceptions=True)
+        """等各消费槽位完成已领取的运行，不取消正在执行的工作流。"""
+        pending = [task for task in self._consumers if not task.done()]
+        if pending:
+            logger.info("执行进程正在关停，等待 {} 个消费槽位结束", len(pending))
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._consumers.clear()
 
     async def aclose(self) -> None:
         await self.service.aclose()
@@ -109,10 +122,11 @@ class Worker:
     async def run_once(self) -> bool:
         """领取并执行一个任务。领取到并执行完成返回 ``True``，队列空返回 ``False``。
 
-        执行是**内联等待**的（不派生后台任务）：单 worker 串行消费，
+        每个槽位内联等待执行完成；槽位数量由 ``WORKER_CONCURRENCY`` 限制。
         ``MAX_ACTIVE_RUNS`` 只约束服务的进程内提交路径。
-        需要并行时把并发闸门接在这一层，而不是靠在这里派生多个 task。
         """
+        if self._stopping.is_set():
+            return False
         store = self.service.store
         if store is None:
             return False
@@ -133,6 +147,7 @@ class Worker:
                 await self._execute(run_id, workflow_id, inputs, business_ref)
             finally:
                 heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
         return True
 
     async def _execute(

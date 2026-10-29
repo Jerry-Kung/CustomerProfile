@@ -51,6 +51,8 @@ services:
     environment:
       <<: *environment
       INTERRUPT_ON_START: "true"
+      # One process owns recovery and the shared rate limit; scale its slots here.
+      WORKER_CONCURRENCY: "${WORKER_CONCURRENCY:-1}"
     # Workflows can take more than 30 minutes. SIGTERM stops new claims and
     # lets the current workflow finish before Docker may force termination.
     stop_grace_period: 60m

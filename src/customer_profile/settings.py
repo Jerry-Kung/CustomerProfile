@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -228,6 +228,9 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------ 执行器
     database_url: str = "sqlite:///./data/customer_profile.db"
+    worker_concurrency: int = Field(default=1, ge=1)
+    """单个队列 worker 进程同时执行的主任务上限；与进程副本数、出网请求上限分开。"""
+
     max_active_runs: int | None = 4
     max_concurrent_requests: int | None = 8
 
