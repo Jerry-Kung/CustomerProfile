@@ -240,6 +240,78 @@ export interface StandardTable {
   rows: StandardRow[]
 }
 
+/** 知识库里的一个档位型号（`GET /knowledge`）。 */
+export interface KnowledgeConfigEntry {
+  name: string
+  price_wan: number
+  promo_price_wan: number | null
+  powertrain_labels: string[]
+  drive: string
+  range_km: number | null
+  note: string
+}
+
+/** 知识库里的一款在售车型。 */
+export interface KnowledgeModel {
+  model_id: string
+  canonical_name: string
+  aliases: string[]
+  asr_variants: string[]
+  series: string
+  status: string
+  status_label: string
+  tier: string
+  price: {
+    min_wan: number
+    /** 主力价格带上限（对客默认口径）。 */
+    core_max_wan: number
+    /** 全系包络上限（含定制/限量版）。 */
+    max_wan: number
+    as_of: string
+    note: string
+    /** 全系上限是否高于主力带——为真时页面要单独提示「含特别/定制版」。 */
+    has_extended: boolean
+  }
+  powertrain: string[]
+  powertrain_labels: string[]
+  body: string
+  seats: number
+  audience: string[]
+  scenarios: string[]
+  positioning: string
+  highlights: { title: string; text: string }[]
+  speech: string
+  configs: KnowledgeConfigEntry[]
+}
+
+export interface KnowledgeTier {
+  tier: string
+  label: string
+  models: string[]
+  budget_min_wan: number | null
+  budget_max_wan: number | null
+}
+
+/** 当前生效的知识库（`GET /knowledge`）。只读。 */
+export interface KnowledgeConfig {
+  available: boolean
+  reason: string
+  pack_id: string
+  display_name: string
+  vendor?: string
+  effective_from?: string
+  effective_to?: string | null
+  days_since_effective?: number | null
+  note?: string
+  content_signature?: string
+  brands?: { canonical: string; aliases: string[] }[]
+  competitors?: string[]
+  tiers?: KnowledgeTier[]
+  models: KnowledgeModel[]
+  total_models?: number
+  total_configs?: number
+}
+
 export interface WorkflowBrief {
   workflow_id: string
   display_name: string
@@ -305,6 +377,13 @@ export const api = {
 
   /** 参考标准表：每个回传字段的准入模式、输出模式与挂在上面的规则。只读。 */
   standards: () => getJson<StandardTable>('/standards'),
+
+  /**
+   * 当前生效的知识库：在售车型、价格、档位与卖点。只读。
+   *
+   * 没有写接口——知识内容写入即冻结，要改就改知识包文件并重启服务。
+   */
+  knowledge: () => getJson<KnowledgeConfig>('/knowledge'),
 
   /** 当前运行态（回放模式、回写开关、并发上限）。 */
   runtime: () => getJson<RuntimeInfo>('/runtime'),

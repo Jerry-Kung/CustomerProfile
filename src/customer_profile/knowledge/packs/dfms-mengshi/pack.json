@@ -1,0 +1,42 @@
+{
+  "pack_id": "dfms-mengshi",
+  "display_name": "东风猛士",
+  "vendor": "东风猛士科技",
+  "brands": [
+    "东风猛士"
+  ],
+  "models_file": "models.json",
+  "brand_file": "brand.json",
+  "effective_from": "2026-10-29",
+  "effective_to": null,
+  "tiers": [
+    {
+      "tier": "entry",
+      "label": "走量·轻户外",
+      "models": [
+        "dfms-x700"
+      ],
+      "budget_min_wan": 18,
+      "budget_max_wan": 30
+    },
+    {
+      "tier": "main",
+      "label": "主销·硬核",
+      "models": [
+        "dfms-m817"
+      ],
+      "budget_min_wan": 28,
+      "budget_max_wan": 45
+    },
+    {
+      "tier": "flagship",
+      "label": "旗舰标杆",
+      "models": [
+        "dfms-917"
+      ],
+      "budget_min_wan": 55,
+      "budget_max_wan": null
+    }
+  ],
+  "note": "三款在售车型 X700 / M817 / 917，均分档位。X700 以 2026-10-25 上市版为准。"
+}

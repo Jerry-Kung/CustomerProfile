@@ -73,12 +73,18 @@ PRODUCTION_ASSET = SHARED_ASSET
 
 EXPRESS_TEMPLATE = template_name(EXPRESS)
 
-# ---- 6 个预置资产（节点 ID 与生产图逐字相同，模板文案指向同一份文件）
+# ---- 预置资产（节点 ID 与生产图逐字相同，模板文案指向同一份文件）
 TAG_LIBRARY = "1776755019648"
 EVIDENCE_FORMAT = "1776828906716"
 PROFILE_FORMAT = "1776829070283"
 PRODUCT_INFO = "1776853902103"
+"""**已停用**：产品信息详版。正文原是别家品牌（广汽埃安）的车型矩阵，与当前在售
+品牌不符——保留节点只为图结构稳定，正文已换成中性占位。产品资料改由知识库 K4
+按本案筛选后经 ``VALIDATE.product_brief`` 注入。"""
+
 PRODUCT_INFO_SHORT = "1776855531118"
+"""**已停用**：产品信息速查版。同上。"""
+
 INVITE_STRATEGY = "1776934470389"
 
 PRESET_ASSETS: tuple[tuple[str, str], ...] = (
@@ -89,6 +95,19 @@ PRESET_ASSETS: tuple[tuple[str, str], ...] = (
     (PRODUCT_INFO_SHORT, "产品信息及卖点预置（速查简化版）"),
     (INVITE_STRATEGY, "邀约策略&话术预置"),
 )
+"""图上仍保留 6 个资产节点。
+
+**为什么停用了还留着节点**：删节点会让 ``definition_hash`` 漂移，既有批次的 A/B
+可比性判据随之失效；而这两份正文已换成中性占位（不含任何车型资料），留着不产生
+错误输出。要彻底移除，放到第 2 期与其他结构改动一起做、一次性接受 hash 变化。
+见 ``docs/feature-knowledge-base/02-待修改项清单.md`` C5。"""
+
+BOUND_ASSETS: frozenset[str] = frozenset({TAG_LIBRARY, PROFILE_FORMAT, INVITE_STRATEGY})
+"""真正接进表达层的资产：标签库、画像格式、邀约策略。
+
+- 两份产品资产（详版 / 速查）**不在**其中——内容由知识库 K4 的 ``product_brief`` 取代；
+- 证据格式也不在其中——那份格式是给「整理证据线索」用的，v2 里那一步已由 L1 承担，
+  塞进表达层只会诱导模型按证据格式输出而非画像格式（见 ``test_l3`` 的既有用例）。"""
 
 SECTION_KEYS: tuple[str, ...] = (
     "profile_summary",
@@ -246,11 +265,24 @@ def validate_l3(claims_json, facts_json, notes_updates_json, basis_json="{}") ->
         )
 
     blocking = any(item["severity"] == "error" for item in issues)
+    # K4：本案相关的在售车型简报。在**校验之后**生成——它按已定稿的 facts 筛候选，
+    # 拿未校验的 facts 去筛等于让「哪个字段被修过」影响车型推荐。
+    # 空包时为空串，表达层模板随之退回「没有产品资料」的形态（与第 0 期止血后的
+    # 状态一致），不会引入新的失败面。
+    from .. import knowledge
+
+    _pack = knowledge.current_pack()
+    product_brief = (
+        knowledge.views.render_product_brief(facts, _pack)
+        if not _pack.is_empty
+        else ""
+    )
     return {
         "facts_json": json.dumps(facts, ensure_ascii=False, default=str),
         # 表达层读的是这一份：事实喂给模型时必须翻成中文名与非英文取值，
         # 否则模型会把 ``payment_method=loan`` 这类内部形态照抄进画像卡正文。
         "facts_readable": rdb.readable_facts(facts),
+        "product_brief": product_brief,
         "issue_json": json.dumps(issues, ensure_ascii=False, default=str),
         "issue_count": len(issues),
         "fact_count": facts_n,
@@ -537,6 +569,7 @@ WORKFLOW: WorkflowDef = WorkflowDef(
             outputs=(
                 "facts_json",
                 "facts_readable",
+                "product_brief",
                 "issue_json",
                 "issue_count",
                 "fact_count",
@@ -555,8 +588,9 @@ WORKFLOW: WorkflowDef = WorkflowDef(
                 "facts_output": (VALIDATE, "facts_readable"),
                 "tag_library": (TAG_LIBRARY, "output"),
                 "profile_format": (PROFILE_FORMAT, "output"),
-                "product_info": (PRODUCT_INFO, "output"),
-                "product_info_short": (PRODUCT_INFO_SHORT, "output"),
+                # 产品资料改由知识库按本案筛出（K4）。两份静态产品资产已停用：
+                # 它们的内容是别家品牌的车型矩阵，保留节点只为图结构稳定与历史可复现。
+                "product_brief": (VALIDATE, "product_brief"),
                 "invite_strategy": (INVITE_STRATEGY, "output"),
             },
             outputs=("result",),

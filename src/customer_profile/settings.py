@@ -234,6 +234,25 @@ class Settings(BaseSettings):
     不判），成本模型与风险面都不同，用一个开关会把「想省钱」与「想救字段」绑死。
     """
 
+    # ------------------------------------------------------------ 知识库
+    knowledge_pack: str = "dfms-mengshi"
+    """当前生效的知识包 ID（``KNOWLEDGE_PACK``）。
+
+    **换合作伙伴只改这一处**（外加把新包放进 ``knowledge/packs/``）。包里的品牌、
+    在售车型、价格与卖点全部随包切换，代码与提示词不动。
+
+    置空串表示**不启用知识**：视图输出空串、意向车型闭集校验跳过，管线行为与接入
+    知识前逐字节一致。这是刻意留的回滚口——比代码开关可靠，开关会腐烂，数据不会。
+    """
+
+    knowledge_packs_dir: str = ""
+    """知识包根目录（``KNOWLEDGE_PACKS_DIR``）。空表示用包内缺省目录
+    ``src/customer_profile/knowledge/packs/``。
+
+    存在的意义是测试注入临时包：无需改动仓库内的正式知识文件，也避免两个测试
+    共用同一个 ``pack_id`` 时互相污染。
+    """
+
     @property
     def disabled_rule_ids(self) -> tuple[str, ...]:
         """``rules_disabled`` 的解析结果（去空白、去空项）。"""

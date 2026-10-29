@@ -22,11 +22,8 @@
 ### 画像数据格式
 {{ profile_format }}
 
-### 产品信息及卖点（详版）
-{{ product_info }}
-
-### 产品信息及卖点（速查版）
-{{ product_info_short }}
+### 本案相关车型
+{{ product_brief }}
 
 ### 邀约策略与话术库
 {{ invite_strategy }}

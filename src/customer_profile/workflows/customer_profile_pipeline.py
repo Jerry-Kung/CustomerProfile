@@ -114,6 +114,12 @@ L4_TRIAGE = "pipeline_l4_triage"
 
 # —— L1 取证层（v3 三分层：事实 → 人设 → 分析投影）/ L2 投影层
 L1_INPUT = "pipeline_l1_input"
+KB_BRIEF = "pipeline_kb_brief"
+"""知识库·取证侧视图（K3，0 token）。
+
+单独成节点而不是在 ``build_l1_input`` 里直接读知识包：节点产物里能看到它生成了什么、
+有多长、用的是哪个包。排查「客户说要买 X 却没进 Notes」时，这是第一处要看的地方。
+空包时输出空串，``build_l1_input`` 随之逐字节回到接入知识前的形态。"""
 L1_FACTS = "pipeline_l1_facts"
 L1_PERSONA = "pipeline_l1_persona"
 L1_FIELDS = "pipeline_l1_fields"
@@ -1360,8 +1366,11 @@ def l1_guide() -> str:
     return field_inference_guide() + "\n\n" + enum_key_guide()
 
 
-def build_l1_input(records_json) -> dict:
+def build_l1_input(records_json, kb_brief: str = "") -> dict:
     """L1 取证层的输入装配：把有内容的渠道排成分节文本。
+
+    ``kb_brief`` 是知识库渲染的《本方品牌与在售车型》（K3）。**缺省空串**——
+    未接知识包时输出与接入前逐字节相同，既有用例与直接调用都不受影响。
 
     与 ``build_evidence_input`` 的分工：那个交给既有「证据线索整理」提示词（A-E 五级
     证据口径），本函数交给 L1 断言账本提示词，因此要多带两样东西——
@@ -1412,12 +1421,34 @@ def build_l1_input(records_json) -> dict:
     # Ms=女士`）会诱导模型把 anchor 也写成同样短的裸串（R0 中位锚长 16 → R1 的 6），
     # 导致大量正确断言被长度门丢弃。改置开头，让**记录原文仍是最后读到的内容**。
     guide = l1_guide()
+    if kb_brief:
+        # 《本方品牌与在售车型》紧跟在字段清单之后、记录正文之前：
+        # 它是「取值域」的约束，与《合法取值清单》同一性质，因此排在同类位置。
+        guide = f"{guide}\n\n{kb_brief}"
     output = f"{guide}\n\n---\n\n{body}" if body else guide
     return {
         "output": output,
         "section_count": len(sections),
         "chars": len(output),
         "guide_chars": len(guide),
+    }
+
+
+def build_kb_brief() -> dict:
+    """K3：把知识包渲染成《本方品牌与在售车型》，供 L1 做归属判断与意向车型闭集。
+
+    **空包时输出空串**，``build_l1_input`` 随之逐字节回到接入知识前的形态——
+    这是刻意的回滚口（``KNOWLEDGE_PACK`` 置空即完全退出知识能力）。
+    """
+    from .. import knowledge
+
+    pack = knowledge.current_pack()
+    text = knowledge.views.render_brand_brief(pack) if not pack.is_empty else ""
+    return {
+        "output": text,
+        "chars": len(text),
+        "model_count": len(pack.models),
+        "pack_id": pack.pack_id,
     }
 
 
@@ -1930,11 +1961,40 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
                 confidence=_num(raw.get("confidence")),
             )
         )
+    # rule: KB-02 意向车型必须取自本方在售清单
+    # ---- K5 意向车型闭集（在**投影之前**校正归属）
+    #      放在这里而不是投影层内部：分流要改的是「这条断言该归到哪个字段」，
+    #      投影层只看得到已落定的字段值，看不到客户到底说了什么。放这里还有一个
+    #      副作用是好的——``projection.py`` 完全不知道知识库存在，它的单测也不受
+    #      知识配置影响。
+    intent_outcome = None
+    if "KB-02" not in _disabled_rule_ids():
+        from .. import knowledge
+
+        pack = knowledge.current_pack()
+        if not pack.is_empty:
+            intent_outcome = knowledge.intent.reroute_claims(ledger, pack)
+            ledger = list(intent_outcome.claims)
+
     result = proj.project(
         ledger,
         context=_projection_context(ledger),
         disabled_rules=_disabled_rule_ids(),
     )
+
+    if intent_outcome is not None and intent_outcome.touched:
+        # 留痕与转确认都**追加**，不替换：投影层自己的 rejected/to_confirm 照旧保留。
+        result.rule_trace.extend(intent_outcome.as_trace())
+        result.to_confirm.extend(intent_outcome.to_confirm)
+        for item in intent_outcome.dropped:
+            result.rejected.append(
+                {
+                    "attribute": knowledge.intent.INTENDED,
+                    "value": item.get("value"),
+                    "rule": "kb_not_on_sale",
+                    "reason": item.get("reason", ""),
+                }
+            )
 
     updates = result.notes_updates
     # 姓名条目在任何档位都保留：「未知」或白名单来源的真名都必须交代给销售，
@@ -3126,12 +3186,27 @@ WORKFLOW = WorkflowDef(
         # 1a 事实提取 → 1b 人设画像 → 1c 分析投影 → 代码定坐标（设计稿 §3）。
         # 三层直接用绑定组装输入（``{{ arg1 }} {{ arg2 }} {{ arg3 }}``），不再插装配代码节点：
         # LLM 执行器本就支持多入参模板渲染，多插一层只是多一处失败点。
+        # ---------------------------------------------------------- 知识库视图（K3，0 token）
+        # 在 L1 之前生成，供输入装配拼进《本方品牌与在售车型》。单独成节点而不是在
+        # ``build_l1_input`` 里直接读知识包，是为了让「知识用没用上」在节点产物里可见：
+        # 排查「客户说要买 X 却没进 Notes」时，首先要确认的就是这一段有没有生成。
+        make_node(
+            KB_BRIEF,
+            "知识库·本方品牌与在售车型",
+            "code",
+            after=(L0_RECORDS,),
+            outputs=("output", "chars", "model_count", "pack_id"),
+            function=f"customer_profile.workflows.{SLUG}:build_kb_brief",
+        ),
         make_node(
             L1_INPUT,
             "L1 取证输入装配",
             "code",
-            after=(L0_RECORDS,),
-            inputs={"records_json": (L0_RECORDS, "records_json")},
+            after=(L0_RECORDS, KB_BRIEF),
+            inputs={
+                "records_json": (L0_RECORDS, "records_json"),
+                "kb_brief": (KB_BRIEF, "output"),
+            },
             outputs=("output", "section_count", "chars", "guide_chars"),
             function=f"customer_profile.workflows.{SLUG}:build_l1_input",
         ),
@@ -3592,6 +3667,7 @@ CODE_SPECS: dict[str, dict] = {
     CHANNEL_BUNDLE: {"main": "bundle_channels", "renames": {}},
     L0_RECORDS: {"main": "build_records", "renames": {}},
     L4_TRIAGE: {"main": "triage", "renames": {}},
+    KB_BRIEF: {"main": "build_kb_brief", "renames": {}},
     L1_INPUT: {"main": "build_l1_input", "renames": {}},
     L1_MERGE: {"main": "merge_l1_layers", "renames": {}},
     L1_LOCALIZE: {"main": "localize_claims", "renames": {}},

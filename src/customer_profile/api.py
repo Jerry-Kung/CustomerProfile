@@ -347,6 +347,23 @@ def create_app(service_factory: Any = None) -> FastAPI:
 
         return build_payload()
 
+    @app.get("/knowledge", tags=["meta"])
+    async def get_knowledge() -> dict[str, Any]:
+        """当前生效的知识库（运行台「知识库」页用）。
+
+        与 ``/rules``、``/standards`` 同一定位：只读、不依赖服务实例、进程常量现拼。
+        知识包是启动期装载的常量，与运行、数据库都无关，因此这里不调 ``get_service()``
+        ——服务尚未就绪时也能回答「当前系统认的在售车型是哪几款」。
+
+        **没有写接口，这是定论不是第一版。** 知识内容写入即冻结，要改就改文件重启。
+
+        价格刻意给两段：``core_max_wan`` 是主力价格带上限（对客默认口径），
+        ``max_wan`` 是全系包络（含定制/限量版）。只给包络会让人以为 917 卖 110 万。
+        """
+        from .knowledge.report import build_payload as build_knowledge
+
+        return build_knowledge()
+
     # ------------------------------------------------------------ 运行
 
     @app.post("/runs", response_model=SubmitResponse, tags=["runs"])
