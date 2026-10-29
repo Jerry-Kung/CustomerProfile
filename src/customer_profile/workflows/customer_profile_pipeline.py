@@ -2230,8 +2230,8 @@ def _illegal_enum_values(facts, notes) -> dict[str, list[str]]:
             # 与送检前的过滤**同判据**（`_needs_mapping`）：本地能翻的、占位串、
             # 换字段能救的、废弃键形态都不该报「无法归入可选范围」——它们各自有归属，
             # 报了只会让销售去核对一基本就正确的字段（2026-10-28 实测：`本科`、
-            # `首购`、`暂无置换需求` 都被误报）。契约缺口例外：本地也翻不了，且业务方
-            # 需要知道缺键，必须报。
+            # `首购`、`暂无置换需求` 都被误报）。契约缺口例外：本地也翻不了，必须报。
+            # 微信不加键已由业务方 2026-10-29 定论，销售侧仍需知道这一格有值待补。
             if not enum_mapping._is_contract_gap(attribute, item):
                 if not enum_mapping._needs_mapping(attribute, item):
                     continue
