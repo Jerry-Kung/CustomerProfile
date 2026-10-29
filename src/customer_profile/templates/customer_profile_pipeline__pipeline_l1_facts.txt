@@ -22,9 +22,9 @@
 - **锚定型事实**：值能在原文里**逐字找到**。在 `anchor` 里**逐字复制**那段原文（不少于 6 个字），并写 `"anchor_kind": "verbatim"`。
   - 锚点必须是原文中**连续的一段**，整段复制。**不要**拼接两句话、**不要**加字段名前缀（如「性别显示」）、**不要**抄记录编号或 `##` 标题、**不要**抄 `**` 等 Markdown 标记。
   - 抄不出连续原文时，**宁可不给 `anchor`**，改在 `basis_of_inference` 里写清依据——凭空拼一个锚点会让下游定位失败，证据位反而空掉。
-- **当归型事实**：值是你**纠错或归一**后得到的，原文里没有字面匹配。典型是 ASR 转写错误（「领跑」实为「零跑」、「幺三九」实为「139」）与品牌/车型别名归一。**必须**同时给出：
+- **当归型事实**：值是你**纠错或归一**后得到的，原文里没有字面匹配。典型是 ASR 转写错误（同音近音字纠回本来写法、「幺三九」实为「139」）与品牌/车型别名归一。**必须**同时给出：
   - `"anchor_kind": "normalized"`
-  - `"source_quote"`：**原文原样串**（如「领跑C10」）
+  - `"source_quote"`：**原文原样串**（客户说的那句，含错字本身）
   - `"normalize_reason"`：一句为什么这么改（如「ASR 音近纠错」）
 
 **为什么要记 `source_quote`**：它是一个诚实的标记——告诉下游「这个值不是客户原话，是模型改过的」。漏了它，销售就分不清「客户说的」和「模型改的」。
@@ -62,12 +62,12 @@
 记录里一旦出现品牌或车型，**必须单独挑出来判断它属于哪一类**——这是销售最看重的线索，漏掉或放错字段都会误导跟进策略。Notes 为这几类各留了字段，**不要**只写进 `intended_model` 了事：
 
 1. **意向车型（`intended_model`）**：客户表达**自己在考虑购买**的车型，或**主动问销售**的那台。「我在看幺零」「这个怎么样」→ 意向车型。
-2. **对比品牌 / 对比车型（`competing_brand` / `competing_model`）**：客户**拿来与目标车比较**的其它品牌与车型，无论褒贬。「我也看了坦克700」「比豹8便宜点」「XX 那款太贵了」→ 对比。**两个例外不得进这一类**：① 客户自己**持有、租赁或正在开**的车——那是自用车，写 `old_car_model` / `owned_brand_model`，**哪怕它被拿来跟目标车比也不写竞品位**；② 与**本方品牌相同**的品牌（本方品牌＝试驾的那台、顾问推销的那台所属品牌），同品牌车型不构成「竞品品牌」，`competing_brand` 留空。
+2. **对比品牌 / 对比车型（`competing_brand` / `competing_model`）**：客户**拿来与目标车比较**的其它品牌与车型，无论褒贬。「我也看了那台的竞品」「比另一家的同级车便宜点」「XX 那款太贵了」→ 对比。**两个例外不得进这一类**：① 客户自己**持有、租赁或正在开**的车——那是自用车，写 `old_car_model` / `owned_brand_model`，**哪怕它被拿来跟目标车比也不写竞品位**；② 与**本方品牌相同**的品牌（本方品牌＝试驾的那台、顾问推销的那台所属品牌），同品牌车型不构成「竞品品牌」，`competing_brand` 留空。
 3. **试驾过的车型（`test_driven_models`）**：客户明确说**已经试驾/开过**的车型（本方的或别家的都算）。
 4. **本品牌顾虑（`brand_concerns`）**：客户对**本方品牌**（试驾的那台、顾问推销的那台）明确说出的担忧——保值率、质量、售后、续航虚标等。
 5. **客户自有旧车 / 自用车**：客户**持有、租赁或正在使用**的车，本身写 `old_car_model` / `owned_brand_model`。**不要**因为它被拿来跟目标车比较就同时写进 `competing_brand` / `competing_model`——竞品位只放客户在**其它品牌**之间横向比较的车。实测踩过：客户说「我租那三千多的就是那台本方的入门款」，那是他在用的车（且与本方同品牌），却被写成了 `competing_model`，是错的。
 
-**品牌与车型的知识先以你自己的原生知识为准**：判断一个词是品牌（如「长城坦克」）还是车型（如「坦克700」），以及纠正 ASR 音近错字（「领跑」实为「零跑」、「比压迪」实为「比亚迪」），都用你已有的汽车知识做，并按 §三 带上 `source_quote`。品牌知识库尚在建设中，建成后会被接入——**当前不要**因为拿不准品牌名就整条不写。
+**品牌与车型的知识先以你自己的原生知识为准**：判断一个词是品牌（厂商名，如「某某汽车」）还是车型（它旗下的具体产品，如「某某 700」），以及纠正 ASR 音近错字（把同音近音的字纠回车名本来的写法），都用你已有的汽车知识做，并按 §三 带上 `source_quote`。**判断「是不是本方品牌」时以下发的《本方品牌与在售车型》为准**，不要凭印象认定——**但也当前不要**因为拿不准品牌名就整条不写。
 
 **归属拿不准时**：写进 `competing_brand` / `competing_model`（对比）比漏掉好——一份看不出确切归属的竞品清单仍有用；但**不要**把客户随口路过的品牌硬塞成 `intended_model`。**自用车与本方品牌是这条的例外**（见第 2、5 条）：这两类宁可留空，也不要写进竞品位。
 
@@ -87,12 +87,12 @@
 只输出若干行，**每行一个 JSON 对象**，不要数组、不要围栏、不要说明文字：
 
 ```
-{"attribute": "old_car_model", "value": "2019款别克君威", "basis": "fact", "anchor_kind": "verbatim", "subject": "customer", "record_channel": "外呼录音信息", "anchor": "我现在开的是一九年的君威", "confidence": 0.9}
+{"attribute": "old_car_model", "value": "2019款中型轿车", "basis": "fact", "anchor_kind": "verbatim", "subject": "customer", "record_channel": "外呼录音信息", "anchor": "我现在开的是一九年的那台轿车", "confidence": 0.9}
 {"attribute": "title", "value": "Mr", "basis": "fact", "anchor_kind": "verbatim", "subject": "customer", "record_channel": "外呼录音信息", "anchor": "李先生说下周来", "value_signal": "先生", "confidence": 0.8}
 {"attribute": "annual_income", "value": "30-50万", "basis": "inferred_high", "subject": "customer", "basis_of_inference": ["职业为互联网中层", "关注 30 万以上车型"], "reasoning_chain": ["职业属互联网中层，收入区间偏高", "关注的车型集中在 30 万以上", "两条线索同向，故收敛到 30-50 万"], "confidence": 0.7}
 {"attribute": "age", "value": "50岁及以上", "basis": "inferred_high", "subject": "customer", "record_channel": "第三方画像数据", "anchor": "预测年龄段", "anchor_kind": "verbatim", "basis_of_inference": ["第三方画像标签“预测年龄段”给出“50岁及以上”（置信度 0.985）"], "reasoning_chain": ["第三方画像直接给出年龄段预测，故按其取值"], "confidence": 0.75}
-{"attribute": "competing_model", "value": "零跑C10", "basis": "fact", "anchor_kind": "normalized", "subject": "customer", "record_channel": "试驾录音信息", "anchor": "领跑", "source_quote": "我也看了领跑C10", "normalize_reason": "ASR 音近纠错（领跑→零跑）", "confidence": 0.85}
-{"attribute": "competing_model", "value": "零跑C11", "basis": "fact", "anchor_kind": "normalized", "subject": "customer", "record_channel": "试驾录音信息", "anchor": "领跑C11", "source_quote": "我也看了领跑C11", "normalize_reason": "ASR 音近纠错（领跑→零跑）", "confidence": 0.85}
+{"attribute": "competing_model", "value": "某某 C10", "basis": "fact", "anchor_kind": "normalized", "subject": "customer", "record_channel": "试驾录音信息", "anchor": "某某 C 幺零", "source_quote": "我也看了某某 C 幺零", "normalize_reason": "ASR 音近纠错（同音字纠回本来写法）", "confidence": 0.85}
+{"attribute": "competing_model", "value": "某某 C11", "basis": "fact", "anchor_kind": "normalized", "subject": "customer", "record_channel": "试驾录音信息", "anchor": "某某 C 幺幺", "source_quote": "我也看了某某 C 幺幺", "normalize_reason": "ASR 音近纠错（同音字纠回本来写法）", "confidence": 0.85}
 ```
 
 - 一行一个字段；同一字段**至多一行**（多选字段的多个取值写在同一个 `value` 里，用 `||` 连接）。

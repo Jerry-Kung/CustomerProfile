@@ -48,7 +48,7 @@
 <!-- rule: SPEC-12 end -->
 
 <!-- rule: SPEC-13 begin -->
-与 `competing_brand` 同口径，落到**具体车型**（如「豹8」「坦克700」）。品牌与车型分不清时，两个字段可同时给值，不要硬拆。
+与 `competing_brand` 同口径，落到**具体车型**（客户说的那台车的正式车名）。品牌与车型分不清时，两个字段可同时给值，不要硬拆。
 <!-- rule: SPEC-13 end -->
 
 <!-- rule: SPEC-14 begin -->

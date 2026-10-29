@@ -19,9 +19,11 @@ L2 facts（代码投影，已定稿）
    共享输入，冲突只能靠事后「Notes 审核」补救——那是治不好的。
 2. **表达不新增事实**（§7.4）。LLM 只做组织与措辞；装配层逐条核对它引用的取值能否在
    ``facts`` 里找到出处，找不到即剔除并留痕。
-3. **复用预置资产，不复制**。6 个业务资产按**原名**引用公共资产模板
+3. **复用预置资产，不复制**。``templates/`` 下 5 个业务资产按**原名**引用公共资产模板
    （见 :func:`SHARED_ASSET`，前缀 ``customer_profile_shared__``），仓库里只有一份正文。
-   复制到本模块的 slug 下会造出第二份副本，日后必然漂移。
+   复制到本模块的 slug 下会造出第二份副本，日后必然漂移。第 6 份（邀约策略）第 2 期
+   已迁入 ``knowledge/common/``，改由 code 节点提供——
+   模板资产与知识资产**按「随合作方变不变」分组**，这才是可长期维持的边界。
 """
 
 from __future__ import annotations
@@ -55,11 +57,14 @@ def template_name(node_id: str) -> str:
 def SHARED_ASSET(node_id: str) -> str:
     """按**原名**取公共业务资产模板。
 
-    「必须原样保留的业务资产」共 6 份（设计稿 §7.5），它们属于**业务资产**而非
-    某张图的私有物。本模块直接引用那 6 个文件，不在 ``customer_profile_l3__*``
+    「必须原样保留的业务资产」原本 6 份（设计稿 §7.5），它们属于**业务资产**而非
+    某张图的私有物。本模块直接引用那些文件，不在 ``customer_profile_l3__*``
     下另存副本——一份正文、一处维护，才是「一字不改」能被验证的前提。
 
-    **2026-10-27 改名**：这 6 份原叫 ``customer_profile_production__*``，随生产臂
+    **2026-10-29 起只剩 5 份**：邀约策略去品牌化后跨合作方成立，迁入
+    ``knowledge/common/invite_strategy.json``（见 :data:`INVITE_STRATEGY`）。
+
+    **2026-10-27 改名**：这些文件原叫 ``customer_profile_production__*``，随生产臂
     整臂退役一并改成 ``customer_profile_shared__*``。改名不是改正文——文件内容是业务
     资产，逐字未动；改的只是前缀，免得「production」这个名字在仓库里继续指着一个
     已删除的工作流。见 ``docs/history/旧版枚举键与production臂整改方案.md`` §4.4。
@@ -85,7 +90,17 @@ PRODUCT_INFO = "1776853902103"
 PRODUCT_INFO_SHORT = "1776855531118"
 """**已停用**：产品信息速查版。同上。"""
 
-INVITE_STRATEGY = "1776934470389"
+INVITE_STRATEGY = "l3_invite_strategy"
+"""通用邀约策略（第 2 期迁入知识库）。
+
+**不再是预置资产节点，也不再指向 ``templates/`` 下那份文件。** 正文已搬到
+``knowledge/common/invite_strategy.json``，由 :func:`build_invite_strategy` 现读渲染。
+
+迁走的理由：这份正文讲的是「怎么邀约」的方法，去品牌化之后跨合作方成立，属于**通用
+知识**而非本图私有资产；留在模板目录会与 ``common/`` 形成两处真源（``07`` R9）。
+代价是 L3 图少一个 ``template-transform`` 节点、多一个 code 节点，``definition_hash``
+随之漂移——这是第 2 期一次性接受的成本（``03`` T2-1）。
+"""
 
 PRESET_ASSETS: tuple[tuple[str, str], ...] = (
     (TAG_LIBRARY, "标签库预置"),
@@ -93,19 +108,23 @@ PRESET_ASSETS: tuple[tuple[str, str], ...] = (
     (PROFILE_FORMAT, "特征画像数据格式预置"),
     (PRODUCT_INFO, "产品信息及卖点预置"),
     (PRODUCT_INFO_SHORT, "产品信息及卖点预置（速查简化版）"),
-    (INVITE_STRATEGY, "邀约策略&话术预置"),
 )
-"""图上仍保留 6 个资产节点。
+"""图上保留 5 个资产节点。
 
 **为什么停用了还留着节点**：删节点会让 ``definition_hash`` 漂移，既有批次的 A/B
 可比性判据随之失效；而这两份正文已换成中性占位（不含任何车型资料），留着不产生
-错误输出。要彻底移除，放到第 2 期与其他结构改动一起做、一次性接受 hash 变化。
-见 ``docs/feature-knowledge-base/02-待修改项清单.md`` C5。"""
+错误输出。要彻底移除，另行一次性接受 hash 变化。
+见 ``docs/feature-knowledge-base/02-待修改项清单.md`` C5。
 
-BOUND_ASSETS: frozenset[str] = frozenset({TAG_LIBRARY, PROFILE_FORMAT, INVITE_STRATEGY})
-"""真正接进表达层的资产：标签库、画像格式、邀约策略。
+邀约策略**不在**此列：它已迁到知识库（见 :data:`INVITE_STRATEGY`），图节点由
+``template-transform`` 换成 ``code``。"""
+
+BOUND_ASSETS: frozenset[str] = frozenset({TAG_LIBRARY, PROFILE_FORMAT})
+"""真正接进表达层的 ``templates/`` 资产：标签库、画像格式。
 
 - 两份产品资产（详版 / 速查）**不在**其中——内容由知识库 K4 的 ``product_brief`` 取代；
+- 邀约策略也**不在**其中——已迁到 ``knowledge/common/``，由 code 节点提供（同属
+  「知识库提供的资产」，但不再来自 ``templates/``，故不计入本集合）；
 - 证据格式也不在其中——那份格式是给「整理证据线索」用的，v2 里那一步已由 L1 承担，
   塞进表达层只会诱导模型按证据格式输出而非画像格式（见 ``test_l3`` 的既有用例）。"""
 
@@ -487,6 +506,27 @@ def _level_reasoning_detail(facts: dict) -> dict[str, Any]:
     }
 
 
+def build_invite_strategy() -> dict:
+    """通用知识·邀约策略与话术：从知识库现读，渲染成给表达层的文本。
+
+    **第 2 期从 ``templates/`` 迁出**（见 :data:`INVITE_STRATEGY`）。这一层只做
+    「取回 + 转文本」，不做筛选：七条策略是方法论，按画像标签挑哪几条应由模型结合
+    事实判断，代码替它决定反而会漏掉合理的匹配。
+
+    装载失败时返回空串，模板渲染成「无邀约策略」——卡片少一层建议，仍能生成。
+    与知识包同一取向：请求路径上只退化，硬失败留给预检。
+    """
+    from .. import knowledge
+
+    strategy = knowledge.common.current_invite_strategy()
+    text = strategy.as_text()
+    return {
+        "output": text,
+        "count": len(strategy.items),
+        "chars": len(text),
+    }
+
+
 def _scan_new_facts(analysis_result: dict, facts: dict) -> list[dict]:
     """扫出卡片里「facts 中无出处」的数字型取值，仅留痕不拦截。"""
     haystack = " ".join(_as_text(value) for value in facts.values())
@@ -552,8 +592,20 @@ WORKFLOW: WorkflowDef = WorkflowDef(
             required_facts_json=True,
             required_notes_updates_json=True,
         ),
-        # ---- 6 个预置资产（业务资产，正文一字不改）
+        # ---- 5 个预置资产（业务资产，正文一字不改）
         *(_preset(node_id, title) for node_id, title in PRESET_ASSETS),
+        # ---- 通用知识（邀约策略）：第 2 期起由知识库提供，不再是模板资产
+        #
+        # 单独成节点而不是在 validate_l3 里顺手渲染，与 KB_BRIEF 同理：让「策略用没用上」
+        # 在节点产物里可见。排查「卡片没给邀约建议」时，先看这个节点有没有输出正文。
+        make_node(
+            INVITE_STRATEGY,
+            "通用知识·邀约策略与话术",
+            "code",
+            after=(START,),
+            outputs=("output", "count", "chars"),
+            function=f"customer_profile.workflows.{SLUG}:build_invite_strategy",
+        ),
         # ---- 代码校验
         make_node(
             VALIDATE,
@@ -583,7 +635,7 @@ WORKFLOW: WorkflowDef = WorkflowDef(
             EXPRESS,
             "L3 表达（9 个 section）",
             "llm",
-            after=(VALIDATE, *(node_id for node_id, _ in PRESET_ASSETS)),
+            after=(VALIDATE, INVITE_STRATEGY, *(node_id for node_id, _ in PRESET_ASSETS)),
             inputs={
                 "facts_output": (VALIDATE, "facts_readable"),
                 "tag_library": (TAG_LIBRARY, "output"),
@@ -634,6 +686,7 @@ WORKFLOW: WorkflowDef = WorkflowDef(
 
 CODE_SPECS: dict[str, dict] = {
     VALIDATE: {"main": "validate_l3", "renames": {}},
+    INVITE_STRATEGY: {"main": "build_invite_strategy", "renames": {}},
     ASSEMBLE: {"main": "assemble_l3", "renames": {}},
 }
 

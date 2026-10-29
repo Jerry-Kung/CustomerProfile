@@ -39,6 +39,7 @@ __all__ = [
     "EMPTY_PACK",
     "Pack",
     "PackError",
+    "common",
     "current_pack",
     "load_pack",
     "normalize_name",
@@ -110,4 +111,4 @@ def reset_cache() -> None:
 
 # 子模块在**文件末尾**导入：``report`` 依赖上面定义的 ``current_pack``，
 # 置顶会形成包内循环导入。放在这里之后，调用点可直接写 ``knowledge.views.xxx``。
-from . import intent, report, resolve, views  # noqa: E402,F401
+from . import common, intent, report, resolve, views  # noqa: E402,F401

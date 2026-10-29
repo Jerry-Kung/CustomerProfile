@@ -45,7 +45,7 @@
    `phone_number` 若给了 `anchor`，须另给「锚点里支撑该取值的**最小片段**」，
    下游会核对它是锚点的子串。例：`title=Mr` 的锚点为「李先生说下周来」→ `value_signal="先生"`。
 6. **不得编造具体取值。** 金额、年限、车型、品牌、地名、姓名，凡事实清单里没有的，宁可写区间、写类型，也不要杜撰一个精确值。
-7. **汽车品牌与车型要判断归属**：Brand/车型名出现时，分清客户是**自己在考虑买**（`intended_model`）、**拿来对比**（`competing_brand` / `competing_model`）、还是**已经试驾过**（`test_driven_models`）；对本方品牌的担忧写 `brand_concerns`。品牌/车型的辨识与 ASR 音近纠错（「领跑」→「零跑」、「比压迪」→「比亚迪」）**先以你自己的原生汽车知识为准**，并按 §三 给 `source_quote`。归属实在拿不准，写进对比类字段比漏掉好——**不要**把客户随口一提的品牌塞成 `intended_model`。**但竞品位有两个例外不得写进去**：① 客户自己**持有、租赁或正在开**的车（自用车，写 `old_car_model` / `owned_brand_model`）；② 与**本方品牌相同**的品牌。这两类宁可留空。
+7. **汽车品牌与车型要判断归属**：Brand/车型名出现时，分清客户是**自己在考虑买**（`intended_model`）、**拿来对比**（`competing_brand` / `competing_model`）、还是**已经试驾过**（`test_driven_models`）；对本方品牌的担忧写 `brand_concerns`。品牌/车型的辨识与 ASR 音近纠错（把同音近音的字纠回车名本来的写法）**先以你自己的原生汽车知识为准**，并按 §三 给 `source_quote`。**判断「是不是本方品牌」以下发的《本方品牌与在售车型》为准。**归属实在拿不准，写进对比类字段比漏掉好——**不要**把客户随口一提的品牌塞成 `intended_model`。**但竞品位有两个例外不得写进去**：① 客户自己**持有、租赁或正在开**的车（自用车，写 `old_car_model` / `owned_brand_model`）；② 与**本方品牌相同**的品牌。这两类宁可留空。
 8. **性别不要武断**：只有登记信息或明确自述才算硬依据。
 9. **不得把销售顾问的信息写成客户的。** 我方销售顾问的自述（自我介绍、报自己的名字与职务、说自己的车、说我们店的事）**不是**客户信息：
    - 「我姓郑，是这边的销售顾问」→ **不得**写成 `customer_name` / `occupation`；
@@ -63,9 +63,9 @@
 
 ```json
 {"fields": [
-  {"attribute": "old_car_model", "value": "2019款别克君威", "basis": "fact",
+  {"attribute": "old_car_model", "value": "2019款中型轿车", "basis": "fact",
    "subject": "customer", "record_channel": "外呼录音信息",
-   "anchor": "我现在开的是一九年的君威", "anchor_kind": "verbatim", "confidence": 0.9},
+   "anchor": "我现在开的是一九年的那台轿车", "anchor_kind": "verbatim", "confidence": 0.9},
   {"attribute": "age", "value": "40-49岁", "basis": "inferred_high",
    "subject": "customer", "record_channel": "",
    "basis_of_inference": ["工作年限描述指向中年", "有上中学的孩子"],

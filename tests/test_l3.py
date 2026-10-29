@@ -364,16 +364,19 @@ def test_assemble_accepts_bare_sections_without_wrapper():
 def test_l3_graph_shape():
     """1 个 LLM 节点（表达），其余全是代码与预置资产。
 
-    节点账：start + end 各 1、预置资产 6、代码节点 3（校验 / 装配）与 LLM 1。
+    节点账：start + end 各 1、预置资产 5、代码节点 3（校验 / 邀约策略 / 装配）与 LLM 1。
 
-    **预置资产仍是 6 个，但只有 4 个被绑定**：两份产品资产的内容由知识库 K4 取代，
+    **预置资产 5 个，只有 2 个被绑定**：两份产品资产的内容由知识库 K4 取代，
     节点留着不删是为了 ``definition_hash`` 不漂移（删节点会让既有批次的 AB 可比性
     判据失效）。见 ``docs/feature-knowledge-base/02-待修改项清单.md`` C5。
+
+    第 2 期起邀约策略迁入 ``knowledge/common/``，图上由 ``template-transform`` 换成
+    ``code`` 节点——预置资产从 6 降到 5，代码节点从 3 增到 4。
     """
     llm = [n for n in l3.WORKFLOW.nodes if n.node_type == "llm"]
     assert [n.node_id for n in llm] == [l3.EXPRESS]
-    assert len(l3.WORKFLOW.nodes) == len(l3.PRESET_ASSETS) + 5
-    assert len(l3.BOUND_ASSETS) == 3
+    assert len(l3.WORKFLOW.nodes) == len(l3.PRESET_ASSETS) + 6
+    assert len(l3.BOUND_ASSETS) == 2
     kinds = {n.node_type for n in l3.WORKFLOW.nodes}
     assert kinds == {"start", "end", "code", "llm", "template-transform"}
 
@@ -413,9 +416,13 @@ def test_expression_node_binds_only_facts_and_assets():
     node = next(n for n in l3.WORKFLOW.nodes if n.node_id == l3.EXPRESS)
     sources = {b.source[0] for b in node.bindings}
     asset_ids = {node_id for node_id, _ in l3.PRESET_ASSETS}
-    assert sources <= asset_ids | {l3.VALIDATE}, f"混入了资产与事实之外的来源：{sources - asset_ids - {l3.VALIDATE}}"
+    # 第 2 期起邀约策略不再是模板资产，改由 code 节点从知识库现读——它同属
+    # 「知识提供的业务资产」，但来源不是 ``templates/``，因此单列。
+    knowledge_ids = {l3.INVITE_STRATEGY}
+    allowed = asset_ids | knowledge_ids | {l3.VALIDATE}
+    assert sources <= allowed, f"混入了资产与事实之外的来源：{sources - allowed}"
     assert l3.VALIDATE in sources, "必须吃到已定稿事实"
-    # 真正接进表达的资产就是 ``BOUND_ASSETS``：标签库、画像格式、邀约策略。
+    # 真正接进表达的 ``templates/`` 资产就是 ``BOUND_ASSETS``：标签库、画像格式。
     # 两份产品资产（详版 / 速查）已由知识库 K4 的 ``product_brief`` 取代，
     # 节点仍在图上但**不绑定**——它们的内容是别家品牌的车型矩阵。
     assert sources & asset_ids == set(l3.BOUND_ASSETS), (
@@ -423,6 +430,8 @@ def test_expression_node_binds_only_facts_and_assets():
         f"少 {set(l3.BOUND_ASSETS) - sources}"
     )
     assert l3.PRODUCT_INFO not in sources and l3.PRODUCT_INFO_SHORT not in sources
+    # 邀约策略必须仍然喂给表达层——迁走不等于停用，这条防的是「迁完忘绑」
+    assert l3.INVITE_STRATEGY in sources
     # 结构保证本身：原始证据的入口（L1 三层）不得出现在这里
     assert pipe.L1_INPUT not in sources and pipe.L1_FACTS not in sources
     assert pipe.L1_PERSONA not in sources and pipe.L1_FIELDS not in sources

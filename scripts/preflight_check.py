@@ -181,6 +181,18 @@ def main() -> int:
                     False,
                     f"KNOWLEDGE_PACK={configured!r} 装载失败，管线将退化为不启用知识",
                 )
+        # 通用知识：邀约策略。第 2 期从 templates/ 迁入 knowledge/common/，
+        # 迁走后那份模板已删除——装载失败就没有第二份兜底，必须在这里看见。
+        from customer_profile.knowledge import common as kb_common
+
+        invite = kb_common.current_invite_strategy()
+        check(
+            "通用邀约策略",
+            not invite.is_empty,
+            f"{len(invite.items)} 条策略"
+            if not invite.is_empty
+            else "装载失败或为空——表达层将不注入邀约策略",
+        )
     except Exception as exc:
         check("知识库", False, f"{type(exc).__name__}: {exc}")
     print()
