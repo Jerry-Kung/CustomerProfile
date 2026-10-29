@@ -95,7 +95,7 @@ ANCHOR_VERBATIM = "verbatim"
 
 ANCHOR_NORMALIZED = "normalized"
 """坐标形态·当归：值经 ASR 纠错 / 归一产生，原文里无字面匹配，``source_quote`` 记原文
-（v3 接口一，如「安安I60」→「埃安」）。"""
+（v3 接口一，如把同音错写的车名纠回本来的写法）。"""
 
 INJECTED_PHONE_CHANNEL = "客户留资手机号"
 """``phone_number`` 的注入来源名（登记档）。取值就是入参手机号，不来自任何渠道原文。"""
@@ -355,7 +355,7 @@ class Claim:
     """这条断言的来源坐标形态（v3 接口一）：
 
     - ``verbatim``：值能在原文里**字面定位**，``quote`` 就是切出来的原文（模型不许誊抄）；
-    - ``normalized``：值经 ASR 纠错 / 品牌归一产生，原文里**无字面匹配**（安安 → 埃安），
+    - ``normalized``：值经 ASR 纠错 / 品牌归一产生，原文里**无字面匹配**（同音错写 → 正确写法），
       此时 ``source_quote`` 记原文、理由记在 ``basis_of_inference``。
 
     空的按 ``verbatim`` 处理（离线回放的旧产物没有这个字段）。
@@ -1255,7 +1255,7 @@ def _readable_evidence(sources: Sequence[Claim]) -> list[str]:
     在此基础上再分两类：
 
     - ``verbatim``：``quote`` 是切出的原文，直接呈现；
-    - ``normalized``：值经纠错/归一（安安 → 埃安），呈「原文『安安I60』」（标明是原文，
+    - ``normalized``：值经纠错/归一，呈「原文『某某I60』」（标明是原文，
       值本身是字段取值）——销售一眼能分清「客户说的」与「模型改的」。
 
     **渠道名不再作为证据**（2026-10-19 可读性整改）：裸渠道名只回答了「取自哪里」，

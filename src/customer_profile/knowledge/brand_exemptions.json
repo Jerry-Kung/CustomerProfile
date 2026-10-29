@@ -1,0 +1,75 @@
+{
+  "_comment": "品牌名残留守卫的豁免清单（T3-1）。每条必须是「路径 + 品牌 + 理由」三元组。按路径整体豁免会让该文件里任何新品牌名一并放行，因此一律成对声明。过期豁免同样会被守卫报出来——文件里的品牌名删了、条目留着，日后同位置再写回来就没人拦。",
+  "exemptions": [
+    {
+      "path": "src/customer_profile/knowledge/common/invite_strategy.json",
+      "brand": "比亚迪",
+      "reason": "AI触发标签里的竞品举例。拍板第二条明确要求「去品牌化但保留竞品名」，删掉会让策略的匹配条件失去意义"
+    },
+    {
+      "path": "src/customer_profile/knowledge/common/invite_strategy.json",
+      "brand": "特斯拉",
+      "reason": "同上：竞品名按拍板保留，不是合作方品牌泄漏"
+    },
+    {
+      "path": "src/customer_profile/knowledge/common/invite_strategy.json",
+      "brand": "小鹏",
+      "reason": "同上：竞品名按拍板保留"
+    },
+    {
+      "path": "src/customer_profile/notes_contract.py",
+      "brand": "方程豹",
+      "reason": "competing_brand 字段描述里的举例，来自业务方的字段契约原文，本次不改契约"
+    },
+    {
+      "path": "src/customer_profile/notes_contract.py",
+      "brand": "坦克",
+      "reason": "competing_brand / competing_model 字段描述里的举例，契约原文"
+    },
+    {
+      "path": "src/customer_profile/notes_contract.py",
+      "brand": "豹8",
+      "reason": "competing_model 字段描述里的举例，契约原文"
+    },
+    {
+      "path": "src/customer_profile/notes_contract.py",
+      "brand": "猛士",
+      "reason": "多选字段的对外展示名「了解猛士」取自业务方契约（attribute_name），改了会与回传约定不一致"
+    },
+    {
+      "path": "src/customer_profile/workflows/mengshi_it_system_data.py",
+      "brand": "猛士",
+      "reason": "「猛士IT系统」是内部数据渠道名，工作流标识与 DISPLAY_NAME 都叫这个，改名会动到节点 ID 与回放数据"
+    },
+    {
+      "path": "src/customer_profile/workflows/evidence_subagent.py",
+      "brand": "猛士",
+      "reason": "同上：证据子流程里挂载的「猛士IT系统数据信息」是渠道名，同时出现在流程图注释里"
+    },
+    {
+      "path": "src/customer_profile/workflows/customer_profile_pipeline.py",
+      "brand": "猛士",
+      "reason": "同上：管线里该 tool 节点的显示名是渠道名"
+    },
+    {
+      "path": "src/customer_profile/workflows/shared_code.py",
+      "brand": "猛士",
+      "reason": "同上：注释说明该取值函数服务于哪些渠道，含渠道名"
+    },
+    {
+      "path": "src/customer_profile/templates/audio_content_extract__1773135369428.txt",
+      "brand": "猛士",
+      "reason": "未绑定的历史样本数据（真实转写节选）。属数据而非提示词正文，改写会破坏「样本即原样」的性质"
+    },
+    {
+      "path": "src/customer_profile/templates/audio_content_extract__17732152003520.txt",
+      "brand": "猛士",
+      "reason": "同上：未绑定的历史样本数据"
+    },
+    {
+      "path": "src/customer_profile/templates/chat_history_data__1778809002515.txt",
+      "brand": "猛士",
+      "reason": "同上：未绑定的历史样本数据（客户与销售的真实聊天记录节选）"
+    }
+  ]
+}

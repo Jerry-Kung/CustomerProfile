@@ -115,6 +115,8 @@ CONFIG_ALLOWLIST: tuple[str, ...] = (
     "llm_tpm_limit",
     "llm_enable_thinking",
     "llm_max_tokens",
+    "knowledge_pack",
+    "knowledge_packs_dir",
 )
 """写进 manifest 的配置项白名单。
 
@@ -155,6 +157,44 @@ def config_snapshot(settings: Settings, extra: dict[str, Any]) -> dict[str, Any]
         snapshot[name] = value if isinstance(value, (str, int, float, bool, type(None))) else str(value)
     snapshot.update(extra)
     return snapshot
+
+
+def knowledge_snapshot(settings: Settings) -> dict[str, Any]:
+    """批次实际用到的知识版本。
+
+    **理由与 ``definition_hash`` 完全相同**：换了知识包，两批结果就不可直接对比。
+    没有这一项时，两批差异只能靠「记得当时改过知识」来解释——而记忆不可靠。
+
+    三项都在，才够定位到具体内容：
+
+    - ``pack_id``：哪个合作方的知识；
+    - ``content_signature``：``models.json`` 的 sha256，内容一动就变；
+    - ``effective_from``：这批知识自哪天起生效。
+
+    取不到知识包时记 ``pack_id`` 与 ``available: False``，**不抛**：知识是增强项，
+    缺了它批次照跑，只是产物退回无知识形态（``KNOWLEDGE_PACK`` 置空即回滚）。
+    """
+    from customer_profile.knowledge import current_pack
+
+    configured = str(getattr(settings, "knowledge_pack", "") or "").strip()
+    try:
+        pack = current_pack(settings)
+    except Exception as exc:  # noqa: BLE001 —— 留痕不该让跑批失败
+        return {"pack_id": configured, "available": False, "error": str(exc)}
+
+    if pack.is_empty:
+        return {
+            "pack_id": configured,
+            "available": False,
+            "reason": "未配置知识包或装载失败",
+        }
+    return {
+        "pack_id": pack.pack_id,
+        "available": True,
+        "content_signature": pack.content_signature,
+        "effective_from": pack.manifest.effective_from,
+        "model_count": len(pack.models),
+    }
 
 
 def build_settings(batch_db: Path, *, read_timeout: float) -> Settings:
@@ -562,6 +602,10 @@ async def run_batch(args: argparse.Namespace) -> int:
         "config": config_snapshot(
             settings, {"max_active_nodes": GATE_FOR_CONCURRENCY}
         ),
+        # 知识版本。与 code_commit / definition_hash 同一性质：换了知识，两批结果
+        # 不可直接对比。补跑时继承上一轮的值，不让同一批次出现两个知识版本——
+        # 中途换包会让批内差异失去解释，真要换就开新批次。
+        "knowledge": previous.get("knowledge") or knowledge_snapshot(settings),
         # 转写归档的配置与计数器。命中数持续为 0 是「录音 URL 形态变了、缓存静默失效」
         # 的判据（见 runbook）。
         "transcript_cache": transcript_cache.asdict(),

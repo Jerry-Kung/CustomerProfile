@@ -336,7 +336,7 @@ def is_english_placeholder(attribute_key: str, value: Any) -> bool:
     """``value`` 是不是该字段的**英文占位串**（合法枚举键不算）。
 
     判据是「英文占位串 + 不是本字段的合法键」，不是「含英文字母」——后者会误伤
-    ``Model Y`` / ``BMW`` / ``max版`` 这类品牌与车型名（见英文残留治理方案 §4.1）。
+    品牌名 / 车型名 / ``max版`` 这类专有名词（见英文残留治理方案 §4.1）。
     """
     if not isinstance(value, str):
         return False

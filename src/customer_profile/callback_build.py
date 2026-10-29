@@ -869,7 +869,7 @@ def _category_vehicle(view: _FactView) -> list[dict[str, Any]]:
         # 这两处装的常常是同一台车（L1 从同一句「我现在开的是一九年的君威」里同时抽出
         # 结构化车型与自由文本），照单全收会让销售在卡片上看到两条同内容的「当前用车」。
         # 判据用**包含**而非相等：``current_vehicle_info`` 常写成
-        # 「有车（2019款别克君威，车龄6年）」，而 ``old_car_model`` 只是其中一个片段。
+        # 「有车（2019款中型轿车，车龄6年）」，而 ``old_car_model`` 只是其中一个片段。
         if text in current:
             continue
         items.append(

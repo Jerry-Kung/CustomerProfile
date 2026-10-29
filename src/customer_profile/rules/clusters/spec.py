@@ -166,7 +166,7 @@ RULES: tuple[Rule, ...] = (
     Rule(
         id="SPEC-09",
         version=1,
-        title="了解猛士的取证范围",
+        title="了解本方品牌的取证范围",
         content_kind="spec",
         channels=("prompt",),
         scope=("knowledge_of_mengshi",),
