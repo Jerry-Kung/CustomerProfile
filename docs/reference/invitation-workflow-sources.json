@@ -1,0 +1,84 @@
+{
+  "captured_at": "2026-10-29",
+  "sources": [
+    {
+      "file": "Gemini（异常输出重试版）.yml",
+      "sha256": "1b4f3c3ba471ebd60fb88ac300478a10cd41a559e2d445b35bb5d720bc1b5bbb",
+      "dsl_version": "0.6.0",
+      "nodes": 11,
+      "edges": 10
+    },
+    {
+      "file": "外呼录音原始数据解析.yml",
+      "sha256": "4788e2f9437a624eba9ca5c910f347088cfdbbda2e4a78eb1a63b6a771c1b503",
+      "dsl_version": "0.6.0",
+      "nodes": 19,
+      "edges": 20
+    },
+    {
+      "file": "录音文件内容抽取（纯识别，无加工）.yml",
+      "sha256": "40077a354a7ba715aeacdeb3a95300d893d7f0f5b4ef2bc4f585e0d12cb25536",
+      "dsl_version": "0.6.0",
+      "nodes": 12,
+      "edges": 11
+    },
+    {
+      "file": "客户线索邀约.yml",
+      "sha256": "3271f61781779308f4350c03a6dfece902e37d09dbc27d8465d12125f38a6b09",
+      "dsl_version": "0.6.0",
+      "nodes": 24,
+      "edges": 30
+    }
+  ],
+  "templates": [
+    {
+      "source": "客户线索邀约.yml",
+      "node_id": "1780380703102",
+      "title": "外呼话术考核要点",
+      "template": "invitation__1780380703102",
+      "sha256": "a7b7d2d630534d54c47d6cc85b7acd14c02721e8362ceb7dcae39d6e40d9399a"
+    },
+    {
+      "source": "客户线索邀约.yml",
+      "node_id": "1780453998655",
+      "title": "销售话术检核Prompt",
+      "template": "invitation__1780453998655",
+      "sha256": "d41db24ee85a3a7b1317fc8e74101007ee97719e1ce51fd94579337d57941ee3"
+    },
+    {
+      "source": "客户线索邀约.yml",
+      "node_id": "1780473244130",
+      "title": "策略&话术生成Prompt",
+      "template": "invitation__1780473244130",
+      "sha256": "98d586ba7472e0764f55f3bd73c78d97fe4b855ab6b63af21afbbf882e5e1c7d"
+    },
+    {
+      "source": "客户线索邀约.yml",
+      "node_id": "17821167995750",
+      "title": "待办事项抽取Prompt",
+      "template": "invitation__17821167995750",
+      "sha256": "940c1adf6c083e3893e2f5fdf4dfaa8edbae4298bb04e47e91a8f5e63b85556d"
+    },
+    {
+      "source": "客户线索邀约.yml",
+      "node_id": "17821186748980",
+      "title": "策略&话术生成（二次邀约）",
+      "template": "invitation__17821186748980",
+      "sha256": "19f87f9b7098ce06e6f39266a27dfeefd45a0097a3848f161197485b02e9337e"
+    },
+    {
+      "source": "录音文件内容抽取（纯识别，无加工）.yml",
+      "node_id": "1773135369428",
+      "title": "LLM 识别结果校对",
+      "template": "invitation_audio__1773135369428",
+      "sha256": "fbe43c4e5cc8c8f8c5964e91f49975a4897dcbbfcf5ebb1eb81bd25a7f191c09"
+    },
+    {
+      "source": "录音文件内容抽取（纯识别，无加工）.yml",
+      "node_id": "17732152003520",
+      "title": "LLM 内容有效性判断",
+      "template": "invitation_audio__17732152003520",
+      "sha256": "bdea0fe17cd7a8d8310c833888a2e90ef09f0be1d651b11c96e360ba63511a46"
+    }
+  ]
+}

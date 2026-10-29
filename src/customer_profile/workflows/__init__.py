@@ -47,6 +47,8 @@ WORKFLOW_MODULES: tuple[str, ...] = (
     # 它的末端节点原指生产臂，生产臂退役后改指 ``customer_profile_pipeline``。
     "customer_profile.workflows.customer_profile_pipeline",
     "customer_profile.workflows.customer_profile_l3",
+    "customer_profile.workflows.invitation",
+    "customer_profile.workflows.invitation_audio",
 )
 
 

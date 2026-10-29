@@ -14,7 +14,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .executors import NodeExecutionError
 from .. import text_utils as tut
@@ -446,11 +446,15 @@ class LlmClient:
         node_ref: Any = None,
         max_attempts: int = MAX_ATTEMPTS,
         min_completion_tokens: int | None = None,
+        response_validator: Callable[[Any], Any] | None = None,
     ) -> str | dict[str, Any]:
         """调用模型，最多 ``max_attempts`` 次尝试（§6.4.1 + §6.4.2）。
 
         ``expect_json=True`` 时返回解析后的对象，否则返回文本。判定「是否需要 JSON」
         依据**下游消费方语义**，由调用点显式声明（§6.4.2 的结论）。
+
+        ``response_validator`` 在同一尝试预算内校验 JSON 业务形状；失败也留痕并重试。
+        启用时不抢救截断 JSON，避免把部分邀约内容当成完整结果。
 
         ``expect_jsonl=True`` 时按**逐行 JSON** 解析，返回
         ``{"records": [...], "dropped_lines": [...]}``：一行坏了只丢那一行，不丢整段
@@ -473,6 +477,8 @@ class LlmClient:
         每次尝试都写入 ``node_ref`` 指向的尝试记录，失败时抛 :class:`LlmCallError`
         并把全部尝试带出。
         """
+        if response_validator is not None and not expect_json:
+            raise ValueError("response_validator 须与 expect_json=True 一起使用")
         payload = self.build_payload(prompt, system, images, detail)
         attempts: list[LlmAttempt] = []
 
@@ -481,6 +487,20 @@ class LlmClient:
                 payload, attempt_no, min_completion_tokens
             )
             attempts.append(attempt)
+            if response_validator is not None:
+                # 邀约结果须完整且符合业务契约；截断 JSON 不做补括号抢救。
+                # 在落痕前判断，才能保留每次重试的真实原因。
+                if attempt.succeeded:
+                    try:
+                        result = response_validator(parse_json_output(attempt.response_text or ""))
+                    except ValueError as exc:
+                        attempt.anomaly = f"invalid_output_schema: {exc}"
+                await self._record_attempt(node_ref, attempt, payload)
+                if attempt.succeeded:
+                    return result
+                if attempt_no < max_attempts:
+                    await asyncio.sleep(self._backoff_seconds(attempt_no))
+                continue
             await self._record_attempt(node_ref, attempt, payload)
 
             if attempt.succeeded:

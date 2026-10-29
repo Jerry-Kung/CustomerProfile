@@ -6,6 +6,9 @@
 一个入口，无鉴权、只服务主入口的手机号触发（监听 ``api_port``，缺省 18173）。上线业务测试后，任务由前端任务队列批量
 推送，需要一个**有鉴权、只做接单**的对外面。本模块就是那个面。
 
+邀约迁移在同进程增加专用接单和鉴权状态查询（``invitation_inbound``）；
+下文只接单的定位针对原画像入口。
+
 ## 三条口径
 
 1. **异步、不轮询。** 收到即把运行**持久化入队**（``Service.submit``）并返回 200；
@@ -121,7 +124,7 @@ def create_inbound_app(
     app = FastAPI(
         title="Customer Profile — 对外任务接口",
         version="0.5.5",
-        description="接收前端任务队列推送的单号画像任务（异步接单，不做执行与查询）",
+        description="接收画像与邀约任务，并提供邀约运行状态查询；执行由独立 worker 完成",
         lifespan=lifespan,
     )
 
@@ -220,6 +223,9 @@ def create_inbound_app(
             batch_id=batch_id,
         )
 
+    from .invitation_inbound import register_invitation_routes
+
+    register_invitation_routes(app, get_service, require_key)
     return app
 
 

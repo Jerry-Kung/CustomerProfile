@@ -559,6 +559,25 @@ class Store:
         )
         await self.insert_run(row)
 
+    async def enqueue_run_once(self, run: RunRecordRow) -> bool:
+        """仅首次写入队列；重复请求绝不把 running/终态改回 queued。"""
+        now = _now_ms()
+
+        def work(connection: sqlite3.Connection) -> bool:
+            cursor = connection.execute(
+                "INSERT INTO workflow_runs (run_id, workflow_id, workflow_display_name, "
+                "business_ref, status, inputs_json, is_replay, queued_at_ms, created_at_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (run_id) DO NOTHING",
+                (run.run_id, run.workflow_id, run.workflow_display_name, run.business_ref,
+                 RunStatus.QUEUED, json_dumps(run.inputs), int(run.is_replay), now, now),
+            )
+            inserted = cursor.rowcount == 1
+            cursor.close()
+            connection.commit()
+            return inserted
+
+        return await self._run(work)
+
     async def claim_next_queued_run(
         self, worker_id: str, *, lease_ms: int
     ) -> dict[str, Any] | None:

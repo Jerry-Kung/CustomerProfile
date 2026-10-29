@@ -108,6 +108,11 @@ async def execute_llm(
     output_field = node.config.get("output", "text")
 
     node_ref = _NodeRef(ctx, node)
+    validation_options = {}
+    if node.config.get("response_validator"):
+        from .code_registry import get_code_function
+
+        validation_options["response_validator"] = get_code_function(node.config["response_validator"])
     raw = await rt.llm.llm_call(
         prompt,
         system=system,
@@ -117,6 +122,7 @@ async def execute_llm(
         expect_jsonl=expect_jsonl,
         node_ref=node_ref,
         min_completion_tokens=min_completion_tokens,
+        **validation_options,
     )
 
     if expect_jsonl:

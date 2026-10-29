@@ -15,6 +15,9 @@
 
 系统形态与关键约束见 `docs/architecture.md`；部署与运维见 `docs/runbooks/`。
 
+邀约工作流迁移分支新增 `invitation_strategy`，复用现有执行器生成话术、外呼质检与待办。
+接单、原 Dify 逻辑、迁移差异及跨仓库适配边界见 [邀约工作流高代码迁移](docs/design/邀约工作流高代码迁移.md)。
+
 ## 快速开始
 
 部署配置、日志、原数据卷升级与接口验收见 [部署与运行](docs/runbooks/部署.md)。

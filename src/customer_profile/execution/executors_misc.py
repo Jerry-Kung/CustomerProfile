@@ -53,6 +53,8 @@ async def execute_start(
     for name in declared:
         if name in ctx.inputs:
             outputs[name] = ctx.inputs[name]
+        elif name in node.config.get("defaults", {}):
+            outputs[name] = node.config["defaults"][name]
         elif _is_required_input(node, name):
             missing.append(name)
     if missing:

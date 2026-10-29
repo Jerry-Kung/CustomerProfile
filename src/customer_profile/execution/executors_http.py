@@ -45,6 +45,7 @@ async def execute_http_request(
     - ``@url_field``：URL **整段来自绑定的值**（迁移前的定义里图片直链就是这种写法：
       ``url: '{{#node.image_url#}}'``，没有字面前缀）。指定它时忽略 ``@path``；
     - ``@service``：``auc`` / ``profile`` / ``mhero``，决定 base_url 与凭据；
+    - ``@service_field``：服务名来自已绑定入参，用于按工作环境选择同一套端点和凭据；
     - ``@headers``：非敏感 header 字面量；
     - ``@body``：请求体字面量（写请求用）；
     - ``@body_json_field``：请求体整体取自指定入参；JSON 字符串解析为对象后直接发送，
@@ -65,6 +66,12 @@ async def execute_http_request(
     config = node.config
     method = str(config.get("@method", "get")).upper()
     service = config.get("@service", "profile")
+    if config.get("@service_field"):
+        field = config["@service_field"]
+        binding = next((b for b in node.bindings if b.target == field), None)
+        if binding is None:
+            raise NodeExecutionError(f"http-request 节点 {node.node_id} 未绑定服务入参 {field!r}")
+        service = coerce_to_text(resolve_binding_value(ctx, binding))
     path = _resolve_path(node, ctx, config)
 
     headers = _build_headers(node, rt, config, service)

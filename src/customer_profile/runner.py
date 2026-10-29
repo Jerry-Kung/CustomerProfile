@@ -94,6 +94,7 @@ class Service:
         *,
         business_ref: str | None = None,
         run_id: str | None = None,
+        idempotent: bool = False,
     ) -> str:
         """把一次运行**持久化入队**，立即返回 ``run_id``。不执行。
 
@@ -110,25 +111,51 @@ class Service:
             raise RuntimeError("入队需要留痕存储；请确认 DATABASE_URL 可用")
         workflow = self.require_workflow(workflow_id)
 
+        def same_submission(row: dict[str, Any]) -> bool:
+            return row["workflow_id"] == workflow_id and row["inputs_json"] == dict(inputs)
+
+        if idempotent:
+            if not run_id:
+                raise ValueError("幂等提交必须提供稳定 run_id")
+            existing = await self.store.get_run(run_id)
+            if existing is not None:
+                if not same_submission(existing):
+                    raise ValueError("本次执行标识已用于不同的工作流或输入")
+                return run_id
+
         limit = self.settings.max_queued_runs
         if limit is not None:
             depth = await self.store.queue_depth()
             if depth >= limit:
+                if idempotent:
+                    # 并发投递可能在前一次 get_run 之后才完成首次入队。
+                    existing = await self.store.get_run(run_id)
+                    if existing is not None:
+                        if not same_submission(existing):
+                            raise ValueError("本次执行标识已用于不同的工作流或输入")
+                        return run_id
                 logger.warning("任务提交被拒绝：待跑队列已满，当前深度={}，上限={}", depth, limit)
                 raise QueueFull(limit, depth)
 
         rid = run_id or _new_run_id()
-        await self.store.enqueue_run(
-            RunRecordRow(
-                run_id=rid,
-                workflow_id=workflow_id,
-                workflow_display_name=workflow.display_name,
-                business_ref=business_ref,
-                status=RunStatus.QUEUED,
-                inputs=dict(inputs),
-                is_replay=self.replay is not None,
-            )
+        row = RunRecordRow(
+            run_id=rid,
+            workflow_id=workflow_id,
+            workflow_display_name=workflow.display_name,
+            business_ref=business_ref,
+            status=RunStatus.QUEUED,
+            inputs=dict(inputs),
+            is_replay=self.replay is not None,
         )
+        if idempotent:
+            inserted = await self.store.enqueue_run_once(row)
+            if not inserted:
+                existing = await self.store.get_run(rid)
+                if existing is None or not same_submission(existing):
+                    raise ValueError("本次执行标识已用于不同的工作流或输入")
+                return rid
+        else:
+            await self.store.enqueue_run(row)
         logger.bind(run_id=rid).info("任务已入队，工作流={}", workflow_id)
         return rid
 
@@ -452,6 +479,12 @@ async def build_service(
             "template_repository": TemplateRepository(),
             "code_functions": _checker_functions(llm_client, TemplateRepository()),
         },
+    )
+    from functools import partial
+    from .workflows.invitation import confirm_delivery
+
+    runtime.extra["code_functions"]["customer_profile.workflows.invitation:confirm_delivery"] = partial(
+        confirm_delivery, http=http_client, settings=settings,
     )
     registry = build_default_registry()
 
