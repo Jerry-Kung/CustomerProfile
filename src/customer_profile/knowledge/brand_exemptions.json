@@ -59,17 +59,17 @@
     {
       "path": "src/customer_profile/templates/audio_content_extract__1773135369428.txt",
       "brand": "猛士",
-      "reason": "未绑定的历史样本数据（真实转写节选）。属数据而非提示词正文，改写会破坏「样本即原样」的性质"
+      "reason": "LLM 节点「1773135369428 LLM 识别结果校对」的提示词正文，运行期生效。「猛士」出现在提示词自带的 ASR 示例输入里，是讲解输出格式用的样例，不是客户数据；正文属资源文件，改写会改变模型行为"
     },
     {
       "path": "src/customer_profile/templates/audio_content_extract__17732152003520.txt",
       "brand": "猛士",
-      "reason": "同上：未绑定的历史样本数据"
+      "reason": "LLM 节点「17732152003520 LLM 内容有效性判断」的提示词正文，运行期生效。「猛士」同样只出现在示例转写文本里"
     },
     {
       "path": "src/customer_profile/templates/chat_history_data__1778809002515.txt",
       "brand": "猛士",
-      "reason": "同上：未绑定的历史样本数据（客户与销售的真实聊天记录节选）"
+      "reason": "LLM 节点「1779672287769 数据深度清洗」的提示词正文，缺省业务臂每次带聊天记录都会走到。「猛士」出现在清洗示例里，不是客户数据；删除会让该节点运行期找不到模板"
     }
   ]
 }
