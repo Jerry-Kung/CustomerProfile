@@ -19,7 +19,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 
 @dataclass(slots=True)
@@ -235,9 +235,12 @@ class ReplaySource:
 
 
 def llm_fingerprint(payload: Mapping[str, Any]) -> str:
-    """一个 LLM 请求的指纹：模型 + messages。"""
+    """模型、messages 及显式输出约束；未启用结构化输出的历史指纹保持兼容。"""
+    request = {"model": payload.get("model"), "messages": payload.get("messages")}
+    if "response_format" in payload:
+        request["response_format"] = payload["response_format"]
     material = json.dumps(
-        {"model": payload.get("model"), "messages": payload.get("messages")},
+        request,
         ensure_ascii=False,
         sort_keys=True,
     )

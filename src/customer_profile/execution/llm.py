@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
@@ -276,6 +277,34 @@ MAX_ATTEMPTS = 3
 """最多 3 次尝试（首次 + 2 次重试）。缺省口径见 ``docs/design/执行语义口径.md`` 的 M1，待业务确认。"""
 
 
+def structured_response_format(
+    model: str, schema: Mapping[str, Any], *, has_images: bool = False
+) -> dict[str, Any]:
+    """只对声明了对象契约的节点约束输出，不影响 JSONL、数组和普通文本。
+
+    千问 3.8-Flash 系列已确认支持 strict Schema；DeepSeek 等模型使用 JSON Object。
+    模型仍从 Settings 读取，这里只维护协议能力；未确认的模型不冒用 Schema。
+    """
+    model = model.lower().strip()
+    if not has_images and (
+        model == "qwen3.8-flash" or model.startswith("qwen3.8-flash-")
+    ):
+        return {
+            "type": "json_schema",
+            "json_schema": {**deepcopy(schema), "strict": True},
+        }
+    return {"type": "json_object"}
+
+
+def _schema_mode_unsupported(attempt: LlmAttempt) -> bool:
+    error = (attempt.error or "").lower()
+    return (
+        attempt.error_code in ("http_400", "http_422")
+        and "json_schema" in error
+        and any(word in error for word in ("not support", "unsupported", "不支持"))
+    )
+
+
 @dataclass(slots=True)
 class LlmAttempt:
     """一次 LLM 尝试的留痕数据（对应「请求尝试」层）。"""
@@ -447,6 +476,7 @@ class LlmClient:
         max_attempts: int = MAX_ATTEMPTS,
         min_completion_tokens: int | None = None,
         response_validator: Callable[[Any], Any] | None = None,
+        response_schema: Mapping[str, Any] | None = None,
     ) -> str | dict[str, Any]:
         """调用模型，最多 ``max_attempts`` 次尝试（§6.4.1 + §6.4.2）。
 
@@ -455,6 +485,8 @@ class LlmClient:
 
         ``response_validator`` 在同一尝试预算内校验 JSON 业务形状；失败也留痕并重试。
         启用时不抢救截断 JSON，避免把部分邀约内容当成完整结果。
+        格式或业务校验失败时，下一次请求携带上次原始输出及具体错误，重新生成完整对象。
+        ``response_schema`` 声明对象契约；按模型能力启用 JSON Object 或 strict JSON Schema。
 
         ``expect_jsonl=True`` 时按**逐行 JSON** 解析，返回
         ``{"records": [...], "dropped_lines": [...]}``：一行坏了只丢那一行，不丢整段
@@ -479,7 +511,16 @@ class LlmClient:
         """
         if response_validator is not None and not expect_json:
             raise ValueError("response_validator 须与 expect_json=True 一起使用")
+        if response_schema is not None:
+            if response_validator is None or not expect_json or expect_jsonl:
+                raise ValueError("response_schema 须与 JSON 对象业务校验一起使用")
+            system = (system or "") + "\n请仅输出符合所要求结构的完整 JSON 对象。"
         payload = self.build_payload(prompt, system, images, detail)
+        if response_schema is not None:
+            payload["response_format"] = structured_response_format(
+                self._settings.llm_model, response_schema, has_images=bool(images)
+            )
+        base_payload = payload
         attempts: list[LlmAttempt] = []
 
         for attempt_no in range(1, max_attempts + 1):
@@ -492,13 +533,54 @@ class LlmClient:
                 # 在落痕前判断，才能保留每次重试的真实原因。
                 if attempt.succeeded:
                     try:
-                        result = response_validator(parse_json_output(attempt.response_text or ""))
+                        parsed = parse_json_output(attempt.response_text or "")
                     except ValueError as exc:
-                        attempt.anomaly = f"invalid_output_schema: {exc}"
+                        attempt.anomaly = f"invalid_json: {exc}"
+                    else:
+                        try:
+                            result = response_validator(parsed)
+                        except ValueError as exc:
+                            attempt.anomaly = f"invalid_output_schema: {exc}"
                 await self._record_attempt(node_ref, attempt, payload)
                 if attempt.succeeded:
                     return result
                 if attempt_no < max_attempts:
+                    # 某些代理虽使用相同模型名，却尚未开放 Schema；明确拒绝时在原预算
+                    # 内退到 JSON Object。鉴权、限流和一般请求错误不能触发协议降级。
+                    if (
+                        payload.get("response_format", {}).get("type") == "json_schema"
+                        and _schema_mode_unsupported(attempt)
+                    ):
+                        base_payload = {
+                            **base_payload,
+                            "response_format": {"type": "json_object"},
+                        }
+                        payload = base_payload
+                    elif (attempt.anomaly or "").startswith(
+                        ("invalid_json:", "invalid_output_schema:")
+                    ):
+                        # 每次基于原始资料和最近一次错误，不累计错误答案；创建新列表，
+                        # 避免后续修正污染先前已留痕的请求。
+                        payload = {
+                            **base_payload,
+                            "messages": [
+                                *base_payload["messages"],
+                                {
+                                    "role": "assistant",
+                                    "content": (attempt.response_text or "")[:16000],
+                                },
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "上一次输出未通过校验：\n"
+                                        + (attempt.anomaly or "")[:2000]
+                                        + "\n请依据原始资料及原定字段结构重新生成完整 JSON 对象，"
+                                        "修正字段、类型、层级及业务约束。只返回 JSON，"
+                                        "不要解释、Markdown 或局部补丁，不要虚构缺失事实。"
+                                    ),
+                                },
+                            ],
+                        }
                     await asyncio.sleep(self._backoff_seconds(attempt_no))
                 continue
             await self._record_attempt(node_ref, attempt, payload)

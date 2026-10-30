@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from ..definitions import WorkflowDef, make_node
 from ..invitation_contract import (
     InvitationInputs,
+    output_schema,
     validate_audit,
     validate_follow_up,
     validate_script,
@@ -35,6 +36,8 @@ CONFIRM = "invitation_confirm_delivery"
 END = "invitation_end"
 NO_RECORDING = "该用户不存在外呼录音数据"
 INVALID_RECORDING = "该录音文件无有效内容"
+RECORDING_CHANNEL = "OntologyManualOutboundCallRecordingFile"
+LEGACY_RECORDING_CHANNEL = "AIOutboundCallRecordingFile"
 
 
 def prepare_request(
@@ -65,7 +68,7 @@ def parse_profile(body: str) -> dict:
 
 
 def select_recordings(records: str, batch_id: str) -> dict:
-    """只选本次外呼记录；无批次元数据的旧记录按最新记录降级。"""
+    """按通话匹配本体录音明细；兼容旧渠道，不跨通话合并历史录音包。"""
     data = json.loads(records)
     if not isinstance(data, list):
         raise ValueError("历史资料接口须返回 JSON 数组；取数异常不能当作无录音")
@@ -73,37 +76,63 @@ def select_recordings(records: str, batch_id: str) -> dict:
         row
         for row in data
         if isinstance(row, dict)
-        and row.get("channel") == "AIOutboundCallRecordingFile"
-        and row.get("is_valid", 1) != 0
+        and row.get("channel") in (RECORDING_CHANNEL, LEGACY_RECORDING_CHANNEL)
+        and row.get("is_valid", 1) not in (0, "0")
     ]
     if not candidates:
-        return {"files": [], "updated_at": "", "record_id": None}
+        return {"files": [], "updated_at": "", "record_id": None, "record_ids": []}
 
-    def identities(row):
+    def identity(row):
         payload = row.get("raw_payload") or {}
         if isinstance(payload, str):
             payload = json.loads(payload)
         if not isinstance(payload, dict):
             raise ValueError("录音 raw_payload 须为对象")
-        return {
-            str(v).strip()
-            for v in (row.get("batch_id"), payload.get("manual_outbound_call_id"))
-            if v is not None and str(v).strip()
-        }
+        call_id = payload.get("manual_outbound_call_id") or payload.get(
+            "source_business_id"
+        )
+        return (
+            str(row.get("batch_id") or "").strip(),
+            str(call_id or "").strip(),
+        )
 
-    matching = [row for row in candidates if batch_id in identities(row)]
-    if not matching and any(identities(row) for row in candidates):
+    identified = [(row, *identity(row)) for row in candidates]
+    # 业务 batch_id 优先表示通话 ID；画像批次可能由多通电话共享，不能据此混合。
+    matching = [row for row, _, call in identified if call == batch_id]
+    if not matching:
+        batch_matches = [
+            (row, call) for row, batch, call in identified if batch == batch_id
+        ]
+        matching = [row for row, _ in batch_matches]
+        calls = {call for _, call in batch_matches if call}
+        if len(calls) > 1:
+            raise ValueError("邀约批次对应多通外呼，须使用明确的通话 ID 重新触发")
+        if calls:
+            matching = [row for row, _, call in identified if call in calls]
+    if not matching and any(batch or call for _, batch, call in identified):
         raise ValueError("邀约批次对应的有效外呼录音已不存在，须核对业务批次后重新触发")
+    if not matching and any(row["channel"] == RECORDING_CHANNEL for row in candidates):
+        raise ValueError("本体外呼录音缺少批次和通话 ID，无法确认本次邀约对应的录音")
     # M2M 历史资料按 created_at 升序返回；id 是业务侧选择最新录音的排序键。
     _, selected = max(
         enumerate(matching or candidates),
         key=lambda indexed: (int(indexed[1].get("id") or 0), indexed[0]),
     )
-    urls = selected.get("media_urls") or []
-    if isinstance(urls, str):
-        urls = json.loads(urls) if urls.lstrip().startswith("[") else [urls]
-    if not isinstance(urls, list) or any(not isinstance(url, str) for url in urls):
-        raise ValueError("录音 media_urls 须为 URL 字符串或字符串数组")
+    # 新渠道每条资料只存一个录音；旧渠道可能把多次通话累计到同一个包中。
+    # 同一通话存在正式明细时只用明细，不能把旧包中其它通话的 URL 一并带入。
+    details = [row for row in matching if row["channel"] == RECORDING_CHANNEL]
+    selected_rows = sorted(details, key=lambda row: int(row.get("id") or 0)) or [
+        selected
+    ]
+    selected = selected_rows[-1]
+    urls = []
+    for row in selected_rows:
+        value = row.get("media_urls") or []
+        if isinstance(value, str):
+            value = json.loads(value) if value.lstrip().startswith("[") else [value]
+        if not isinstance(value, list) or any(not isinstance(url, str) for url in value):
+            raise ValueError("录音 media_urls 须为 URL 字符串或字符串数组")
+        urls.extend(value)
     files = list(dict.fromkeys(url.strip() for url in urls if url.strip()))
     if any(not url.startswith(("https://", "http://")) for url in files):
         raise ValueError("录音 URL 须使用 HTTP 或 HTTPS")
@@ -111,6 +140,7 @@ def select_recordings(records: str, batch_id: str) -> dict:
         "files": files,
         "updated_at": str(selected.get("updated_at") or ""),
         "record_id": selected.get("id"),
+        "record_ids": [row["id"] for row in selected_rows if row.get("id") is not None],
     }
 
 
@@ -244,6 +274,7 @@ def _llm(
         template=f"invitation__{template}",
         expect_json=True,
         response_validator=f"customer_profile.invitation_contract:{validator}",
+        response_schema=output_schema(validator),
         system_text="You are a helpful AI assistant.",
         on_branch=on_branch,
     )

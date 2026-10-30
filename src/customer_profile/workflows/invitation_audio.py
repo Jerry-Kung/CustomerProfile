@@ -3,6 +3,7 @@
 from dataclasses import replace
 
 from ..definitions import WorkflowDef, make_node
+from ..invitation_contract import output_schema
 from . import audio_content_extract as extract
 from .invitation import MODULE
 
@@ -23,6 +24,7 @@ def _extract_workflow() -> WorkflowDef:
         if node.node_id in (extract.PROOFREAD_LLM, extract.VALIDITY_LLM):
             config["template"] = f"invitation_audio__{node.node_id}"
         if node.node_id == extract.VALIDITY_LLM:
+            config["response_schema"] = output_schema("validate_audio_validity")
             config["response_validator"] = (
                 "customer_profile.invitation_contract:validate_audio_validity"
             )
@@ -60,7 +62,7 @@ WORKFLOW = WorkflowDef(
                 "records": (START, "customer_data"),
                 "batch_id": (START, "batch_id"),
             },
-            outputs=("files", "updated_at", "record_id"),
+            outputs=("files", "updated_at", "record_id", "record_ids"),
             function=f"{MODULE}:select_recordings",
         ),
         make_node(

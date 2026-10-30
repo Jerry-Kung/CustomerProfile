@@ -113,6 +113,8 @@ async def execute_llm(
         from .code_registry import get_code_function
 
         validation_options["response_validator"] = get_code_function(node.config["response_validator"])
+    if node.config.get("response_schema"):
+        validation_options["response_schema"] = node.config["response_schema"]
     raw = await rt.llm.llm_call(
         prompt,
         system=system,

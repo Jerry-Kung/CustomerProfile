@@ -67,7 +67,7 @@ class PhoneStep(Contract):
 
 class Script(Contract):
     strategy: Strategy
-    phone_steps: list[PhoneStep]
+    phone_steps: list[PhoneStep] = Field(min_length=5, max_length=5)
     wechat_script: Text
 
     @model_validator(mode="after")
@@ -102,7 +102,7 @@ class Audit(Contract):
     rating_description: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)
     ]
-    dimensions: list[AuditDimension]
+    dimensions: list[AuditDimension] = Field(min_length=4, max_length=4)
 
     @model_validator(mode="after")
     def fixed_dimensions(self):
@@ -165,7 +165,8 @@ def _validate(model: type[Contract], value: Any) -> dict[str, Any]:
     except ValidationError as exc:
         # 错误只带字段位置与规则，不把整份客户资料复制进重试错误。
         details = "; ".join(
-            f"{'.'.join(map(str, e['loc']))}: {e['type']}" for e in exc.errors()
+            f"{'.'.join(map(str, e['loc']))}: {e['type']} ({e['msg']})"
+            for e in exc.errors()
         )
         raise ValueError(details) from None
 
@@ -184,3 +185,14 @@ def validate_follow_up(value: Any) -> dict[str, Any]:
 
 def validate_audio_validity(value: Any) -> dict[str, Any]:
     return _validate(AudioValidity, value)
+
+
+def output_schema(validator: str) -> dict[str, Any]:
+    """请求约束与本地校验复用同一份模型，避免各自维护字段结构。"""
+    model = {
+        "validate_script": ScriptOutput,
+        "validate_audit": AuditOutput,
+        "validate_follow_up": FollowUpOutput,
+        "validate_audio_validity": AudioValidity,
+    }[validator]
+    return {"name": model.__name__, "schema": model.model_json_schema()}

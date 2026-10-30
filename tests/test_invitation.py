@@ -81,10 +81,13 @@ def script_output():
     }
 
 
-def recording(*urls, record_id=1, batch=BATCH, updated_at="2026-10-29T09:30:00+08:00"):
+def recording(
+    *urls, record_id=1, batch=BATCH, updated_at="2026-10-29T09:30:00+08:00",
+    channel=flow.LEGACY_RECORDING_CHANNEL,
+):
     return {
         "id": record_id,
-        "channel": "AIOutboundCallRecordingFile",
+        "channel": channel,
         "batch_id": "profile-batch-1",
         "raw_payload": {"manual_outbound_call_id": batch},
         "media_urls": list(urls),
@@ -122,7 +125,7 @@ class OfflineServices:
         path = request.url.path
         if path.endswith("/chat/completions"):
             payload = json.loads(request.content)
-            prompt = payload["messages"][-1]["content"]
+            prompt = next(m["content"] for m in payload["messages"] if m["role"] == "user")
             self.prompts.append(prompt)
             if "判断该段录音是否为无效录音" in prompt:
                 kind = "validity"
@@ -220,13 +223,15 @@ class OfflineServices:
         raise AssertionError(f"出现未预期的请求: {request.method} {request.url}")
 
 
-async def run_offline(tmp_path, services, *, env="test", writeback=True, inputs=None):
+async def run_offline(
+    tmp_path, services, *, env="test", writeback=True, inputs=None, model="offline"
+):
     settings = Settings(
         _env_file=None,
         database_url=f"sqlite:///{tmp_path / 'invitation.db'}",
         data_dir=tmp_path,
         llm_base_url="https://llm.invalid/v1",
-        llm_model="offline",
+        llm_model=model,
         llm_api_key="offline-model-secret",
         profile_api_base_url="https://test-m2m.invalid",
         profile_api_key="offline-test-secret",
@@ -267,9 +272,10 @@ async def run_offline(tmp_path, services, *, env="test", writeback=True, inputs=
 
 @pytest.mark.parametrize("env", ["test", "production"])
 @pytest.mark.parametrize("file_count", [0, 1, 2])
-async def test_full_workflow_branches_and_delivery(tmp_path, env, file_count):
+@pytest.mark.parametrize("channel", [flow.RECORDING_CHANNEL, flow.LEGACY_RECORDING_CHANNEL])
+async def test_full_workflow_branches_and_delivery(tmp_path, env, file_count, channel):
     urls = [f"https://audio.invalid/file-{i}.wav" for i in range(file_count)]
-    services = OfflineServices([recording(*urls)])
+    services = OfflineServices([recording(*urls, channel=channel)])
     outcome, attempts, children = await run_offline(tmp_path, services, env=env)
     assert outcome.succeeded, outcome.error
     assert outcome.outputs["delivery"] == "confirmed"
@@ -339,6 +345,31 @@ async def test_schema_errors_retry_with_reasons_in_database(tmp_path):
     script_attempts = [a for a in attempts if a["node_id"] == flow.FIRST]
     assert len(script_attempts) == 2
     assert "invalid_output_schema" in json.dumps(script_attempts[0])
+    first = script_attempts[0]["request_json"]
+    retry = script_attempts[1]["request_json"]
+    assert len(retry["messages"]) == len(first["messages"]) + 2
+    assert retry["messages"][-2] == {"role": "assistant", "content": "{}"}
+    assert "script: missing" in retry["messages"][-1]["content"]
+
+
+@pytest.mark.parametrize(
+    ("model", "mode"),
+    [("deepseek-v4.1-flash", "json_object"), ("qwen3.8-flash", "json_schema")],
+)
+async def test_only_invitation_object_nodes_enable_structured_output(tmp_path, model, mode):
+    services = OfflineServices([recording("https://audio.invalid/a.wav", channel=flow.RECORDING_CHANNEL)])
+    outcome, *_ = await run_offline(tmp_path, services, model=model)
+    assert outcome.succeeded, outcome.error
+    payloads = [json.loads(r.content) for r in services.requests if r.url.path.endswith("/chat/completions")]
+    assert len(payloads) == 5  # 校对文本 + 有效性、质检、待办、话术四个对象。
+    object_requests = [p for p in payloads if "response_format" in p]
+    assert len(object_requests) == 4
+    assert {p["response_format"]["type"] for p in object_requests} == {mode}
+    if mode == "json_schema":
+        assert {p["response_format"]["json_schema"]["name"] for p in object_requests} == {
+            "AudioValidity", "AuditOutput", "FollowUpOutput", "ScriptOutput",
+        }
+        assert all(p["response_format"]["json_schema"]["strict"] for p in object_requests)
 
 
 async def test_incomplete_json_is_retried_instead_of_repaired(tmp_path):
@@ -412,6 +443,78 @@ def test_recording_selection_prefers_the_requested_call():
     )
     with pytest.raises(ValueError, match="批次"):
         select_recordings(json.dumps([old, new]), "missing")
+
+
+def test_canonical_recordings_merge_only_the_requested_call_and_deduplicate_urls():
+    records = [
+        recording("https://audio.invalid/history.wav", batch="older-call", record_id=100),
+        recording("https://audio.invalid/first.wav", channel=flow.RECORDING_CHANNEL, record_id=2),
+        recording("https://audio.invalid/last.wav", "https://audio.invalid/first.wav",
+                  channel=flow.RECORDING_CHANNEL, record_id=3),
+        recording("https://audio.invalid/other.wav", batch="other-call", channel=flow.RECORDING_CHANNEL, record_id=4),
+        {**recording("https://audio.invalid/invalid.wav", channel=flow.RECORDING_CHANNEL, record_id=5), "is_valid": 0},
+        {**recording("https://audio.invalid/invalid-string.wav", channel=flow.RECORDING_CHANNEL, record_id=6), "is_valid": "0"},
+        recording("https://audio.invalid/not-audio.wav", channel="OntologyManualOutboundCall", record_id=7),
+    ]
+    result = select_recordings(json.dumps(list(reversed(records))), BATCH)
+    assert result["files"] == ["https://audio.invalid/first.wav", "https://audio.invalid/last.wav"]
+    assert result["record_id"] == 3
+    assert result["record_ids"] == [2, 3]
+
+
+def test_canonical_details_take_precedence_over_legacy_cumulative_recording_pack():
+    records = [
+        recording("https://audio.invalid/current.wav", channel=flow.RECORDING_CHANNEL, record_id=1),
+        recording("https://audio.invalid/current.wav", "https://audio.invalid/unrelated.wav", record_id=100),
+    ]
+    assert select_recordings(json.dumps(records), BATCH)["files"] == ["https://audio.invalid/current.wav"]
+
+
+def test_explicit_call_match_takes_precedence_over_a_coinciding_profile_batch():
+    target = recording("https://audio.invalid/target.wav", channel=flow.RECORDING_CHANNEL)
+    other = recording("https://audio.invalid/wrong.wav", batch="other-call", channel=flow.RECORDING_CHANNEL, record_id=2)
+    other["batch_id"] = BATCH
+    assert select_recordings(json.dumps([target, other]), BATCH)["files"] == target["media_urls"]
+
+
+def test_shared_profile_batch_cannot_mix_multiple_calls():
+    rows = [recording("https://audio.invalid/a.wav", batch=call, channel=flow.RECORDING_CHANNEL)
+            for call in ("call-1", "call-2")]
+    with pytest.raises(ValueError, match="多通外呼"):
+        select_recordings(json.dumps(rows), "profile-batch-1")
+
+
+def test_canonical_only_batch_mismatch_is_not_treated_as_no_recording():
+    rows = [recording("https://audio.invalid/a.wav", channel=flow.RECORDING_CHANNEL)]
+    with pytest.raises(ValueError, match="批次"):
+        select_recordings(json.dumps(rows), "missing-call")
+
+
+def test_canonical_recording_without_identity_cannot_use_the_legacy_fallback():
+    row = recording("https://audio.invalid/a.wav", channel=flow.RECORDING_CHANNEL)
+    row.pop("batch_id")
+    row.pop("raw_payload")
+    with pytest.raises(ValueError, match="无法确认"):
+        select_recordings(json.dumps([row]), BATCH)
+
+
+def test_canonical_source_business_id_and_serialized_payload_are_supported():
+    row = recording("https://audio.invalid/a.wav", channel=flow.RECORDING_CHANNEL)
+    row["raw_payload"] = json.dumps({"source_business_id": BATCH})
+    assert select_recordings(json.dumps([row]), BATCH)["files"] == row["media_urls"]
+
+
+def test_single_call_can_be_selected_via_its_legacy_profile_batch():
+    rows = [recording(f"https://audio.invalid/{i}.wav", channel=flow.RECORDING_CHANNEL, record_id=i)
+            for i in (1, 2)]
+    result = select_recordings(json.dumps(rows), "profile-batch-1")
+    assert result["record_ids"] == [1, 2]
+
+
+def test_matching_legacy_call_still_works_when_canonical_rows_belong_to_other_calls():
+    legacy = recording("https://audio.invalid/legacy.wav")
+    other = recording("https://audio.invalid/new.wav", batch="other-call", channel=flow.RECORDING_CHANNEL)
+    assert select_recordings(json.dumps([legacy, other]), BATCH)["files"] == legacy["media_urls"]
 
 
 def test_legacy_recordings_without_identity_use_the_latest_entry():
