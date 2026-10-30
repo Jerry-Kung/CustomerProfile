@@ -191,6 +191,7 @@ def output_schema(validator: str) -> dict[str, Any]:
     """请求约束与本地校验复用同一份模型，避免各自维护字段结构。"""
     model = {
         "validate_script": ScriptOutput,
+        "validate_personalized_script": ScriptOutput,
         "validate_audit": AuditOutput,
         "validate_follow_up": FollowUpOutput,
         "validate_audio_validity": AudioValidity,

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from typing import Any
 
 from ..definitions import NodeDef
@@ -113,6 +114,13 @@ async def execute_llm(
         from .code_registry import get_code_function
 
         validation_options["response_validator"] = get_code_function(node.config["response_validator"])
+    context_field = node.config.get("response_context_field")
+    if context_field:
+        if context_field not in inputs or "response_validator" not in validation_options:
+            raise NodeExecutionError("上下文输出校验须同时声明校验函数及已绑定的上下文字段")
+        validation_options["response_validator"] = partial(
+            validation_options["response_validator"], context=inputs[context_field]
+        )
     if node.config.get("response_schema"):
         validation_options["response_schema"] = node.config["response_schema"]
     raw = await rt.llm.llm_call(

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from ..definitions import WorkflowDef, make_node
 from ..invitation_contract import (
+    AUDIT_ITEMS,
     InvitationInputs,
     output_schema,
     validate_audit,
@@ -23,6 +24,11 @@ PROFILE = "invitation_profile"
 PROFILE_PARSE = "invitation_profile_parse"
 HISTORY = "invitation_history"
 AUDIO = "invitation_audio"
+CONTEXT = "invitation_communication_context"
+ANALYSIS_BRANCH = "invitation_recording_analysis_branch"
+NO_AUDIO_ANALYSIS = "invitation_no_recording_analysis"
+AUDIT_RESULT = "invitation_audit_result"
+FOLLOW_UP_RESULT = "invitation_follow_up_result"
 STANDARD = "invitation_assessment_standard"
 AUDIT = "invitation_audit"
 FOLLOW_UP = "invitation_follow_up"
@@ -57,6 +63,7 @@ def prepare_request(
     return {
         **data,
         "service": "mhero" if data["work_env"] == "production" else "profile",
+        "as_of": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
     }
 
 
@@ -130,7 +137,9 @@ def select_recordings(records: str, batch_id: str) -> dict:
         value = row.get("media_urls") or []
         if isinstance(value, str):
             value = json.loads(value) if value.lstrip().startswith("[") else [value]
-        if not isinstance(value, list) or any(not isinstance(url, str) for url in value):
+        if not isinstance(value, list) or any(
+            not isinstance(url, str) for url in value
+        ):
             raise ValueError("录音 media_urls 须为 URL 字符串或字符串数组")
         urls.extend(value)
     files = list(dict.fromkeys(url.strip() for url in urls if url.strip()))
@@ -151,7 +160,47 @@ def combine_recordings(parts: list[str], files: list[str], updated_at: str) -> d
         raise ValueError("录音转写结果不完整")
     return {
         "result": "\n".join(parts) if files else NO_RECORDING,
-        "update_time": updated_at,
+        "update_time": updated_at if files else "",
+        "has_recording": bool(files),
+    }
+
+
+def no_recording_analysis(has_recording: bool) -> dict:
+    """缺少录音时不调用质检、待办模型；固定结构兼容现有业务展示。"""
+    if has_recording is not False:
+        raise ValueError("有录音时不能跳过录音分析")
+    audit = {
+        "overall_score": 0,
+        "overall_rating": "未质检",
+        "rating_description": "本次无外呼录音，未执行话术质检。",
+        "dimensions": [
+            {
+                "key": key,
+                "name": name,
+                "score": 0,
+                "items": [
+                    {
+                        "order": i,
+                        "name": item,
+                        "result": "partial",
+                        "highlights": [],
+                        "issues": [],
+                    }
+                    for i, item in enumerate(items, 1)
+                ],
+            }
+            for key, (name, items) in AUDIT_ITEMS.items()
+        ],
+    }
+    return {
+        "audit_info": json.dumps({"audit": audit}, ensure_ascii=False),
+        "follow_up_info": json.dumps(
+            {
+                "follow_up_summary": "无外呼录音，未提取通话待办",
+                "follow_up_items": [],
+            },
+            ensure_ascii=False,
+        ),
     }
 
 
@@ -163,10 +212,16 @@ def assemble_result(
     script_info: str,
     follow_up_info: str,
     update_time: str,
+    has_recording: bool = True,
 ) -> dict:
     audit = validate_audit(json.loads(audit_info))["audit"]
     script = validate_script(json.loads(script_info))["script"]
     follow_up = validate_follow_up(json.loads(follow_up_info))
+    if not has_recording:
+        # “无录音”不是销售表现不合格；状态由真实文件分支决定，不接受模型自报跳检。
+        empty = no_recording_analysis(False)
+        audit = json.loads(empty["audit_info"])["audit"]
+        follow_up = json.loads(empty["follow_up_info"])
     # 无录音不虚构上传时间；有时间时按上海时区展示。
     formatted = ""
     if update_time:
@@ -273,8 +328,17 @@ def _llm(
         outputs=("text", "parsed_json"),
         template=f"invitation__{template}",
         expect_json=True,
-        response_validator=f"customer_profile.invitation_contract:{validator}",
+        response_validator=(
+            f"customer_profile.invitation_context:{validator}"
+            if validator == "validate_personalized_script"
+            else f"customer_profile.invitation_contract:{validator}"
+        ),
         response_schema=output_schema(validator),
+        **(
+            {"response_context_field": "communication_context"}
+            if validator == "validate_personalized_script"
+            else {}
+        ),
         system_text="You are a helpful AI assistant.",
         on_branch=on_branch,
     )
@@ -305,7 +369,14 @@ WORKFLOW = WorkflowDef(
                 key: (START, key)
                 for key in ("phone_number", "batch_id", "work_env", "execution_id")
             },
-            outputs=("phone_number", "batch_id", "work_env", "execution_id", "service"),
+            outputs=(
+                "phone_number",
+                "batch_id",
+                "work_env",
+                "execution_id",
+                "service",
+                "as_of",
+            ),
             function=f"{MODULE}:prepare_request",
         ),
         _http(
@@ -338,11 +409,55 @@ WORKFLOW = WorkflowDef(
                 "customer_data": (HISTORY, "body"),
                 "batch_id": (REQUEST, "batch_id"),
             },
-            outputs=("result", "update_time"),
+            outputs=("result", "update_time", "has_recording"),
             **{
                 "@workflow": "invitation_outbound_audio",
                 "@inputs": {"customer_data": "customer_data", "batch_id": "batch_id"},
             },
+        ),
+        make_node(
+            CONTEXT,
+            "整理本轮沟通事实与阶段",
+            "code",
+            after=(AUDIO, PROFILE_PARSE),
+            inputs={
+                "customer_profile": (PROFILE_PARSE, "customer_profile"),
+                "records": (HISTORY, "body"),
+                "transcript": (AUDIO, "result"),
+                "has_recording": (AUDIO, "has_recording"),
+                "batch_id": (REQUEST, "batch_id"),
+                "as_of": (REQUEST, "as_of"),
+            },
+            outputs=("communication_context", "has_previous_contact", "stage_hint"),
+            function="customer_profile.invitation_context:prepare_context",
+        ),
+        make_node(
+            ANALYSIS_BRANCH,
+            "有录音才调用质检与待办模型",
+            "if-else",
+            after=(AUDIO,),
+            inputs={"has_recording": (AUDIO, "has_recording")},
+            branches=(
+                {
+                    "id": "recorded",
+                    "condition": {
+                        "field": "has_recording",
+                        "operator": "eq",
+                        "value": True,
+                    },
+                },
+            ),
+            else_id="missing",
+        ),
+        make_node(
+            NO_AUDIO_ANALYSIS,
+            "无录音：未质检与空待办",
+            "code",
+            after=(ANALYSIS_BRANCH,),
+            inputs={"has_recording": (AUDIO, "has_recording")},
+            outputs=("audit_info", "follow_up_info"),
+            function=f"{MODULE}:no_recording_analysis",
+            on_branch=(ANALYSIS_BRANCH, "missing"),
         ),
         make_node(
             STANDARD,
@@ -357,33 +472,51 @@ WORKFLOW = WorkflowDef(
             "销售话术检核",
             "1780453998655",
             "validate_audit",
-            after=(AUDIO, STANDARD),
+            after=(ANALYSIS_BRANCH, STANDARD),
             inputs={
                 "call_transcript": (AUDIO, "result"),
                 "assessment_standard": (STANDARD, "output"),
             },
+            on_branch=(ANALYSIS_BRANCH, "recorded"),
         ),
         _llm(
             FOLLOW_UP,
             "通话总结与待办抽取",
             "17821167995750",
             "validate_follow_up",
-            after=(AUDIO,),
+            after=(ANALYSIS_BRANCH,),
             inputs={"call_transcript": (AUDIO, "result")},
+            on_branch=(ANALYSIS_BRANCH, "recorded"),
+        ),
+        make_node(
+            AUDIT_RESULT,
+            "质检结果",
+            "variable-aggregator",
+            after=(AUDIT, NO_AUDIO_ANALYSIS),
+            variables=((AUDIT, "text"), (NO_AUDIO_ANALYSIS, "audit_info")),
+            outputs=("output",),
+        ),
+        make_node(
+            FOLLOW_UP_RESULT,
+            "通话待办结果",
+            "variable-aggregator",
+            after=(FOLLOW_UP, NO_AUDIO_ANALYSIS),
+            variables=((FOLLOW_UP, "text"), (NO_AUDIO_ANALYSIS, "follow_up_info")),
+            outputs=("output",),
         ),
         make_node(
             BRANCH,
             "选择首邀或二次邀约",
             "if-else",
-            after=(AUDIO, PROFILE_PARSE),
-            inputs={"transcript": (AUDIO, "result")},
+            after=(CONTEXT,),
+            inputs={"has_previous_contact": (CONTEXT, "has_previous_contact")},
             branches=(
                 {
                     "id": "first",
                     "condition": {
-                        "field": "transcript",
+                        "field": "has_previous_contact",
                         "operator": "eq",
-                        "value": NO_RECORDING,
+                        "value": False,
                     },
                 },
             ),
@@ -393,20 +526,19 @@ WORKFLOW = WorkflowDef(
             FIRST,
             "首次邀约策略与话术",
             "1780473244130",
-            "validate_script",
+            "validate_personalized_script",
             after=(BRANCH,),
-            inputs={"customer_profile": (PROFILE_PARSE, "customer_profile")},
+            inputs={"communication_context": (CONTEXT, "communication_context")},
             on_branch=(BRANCH, "first"),
         ),
         _llm(
             FOLLOWUP,
             "二次邀约策略与话术",
             "17821186748980",
-            "validate_script",
+            "validate_personalized_script",
             after=(BRANCH,),
             inputs={
-                "customer_profile": (PROFILE_PARSE, "customer_profile"),
-                "call_transcript": (AUDIO, "result"),
+                "communication_context": (CONTEXT, "communication_context"),
             },
             on_branch=(BRANCH, "followup"),
         ),
@@ -422,15 +554,16 @@ WORKFLOW = WorkflowDef(
             MERGE,
             "生成邀约回写结果",
             "code",
-            after=(AUDIT, FOLLOW_UP, SCRIPT),
+            after=(AUDIT_RESULT, FOLLOW_UP_RESULT, SCRIPT),
             inputs={
                 "phone_number": (REQUEST, "phone_number"),
                 "batch_id": (REQUEST, "batch_id"),
                 "execution_id": (REQUEST, "execution_id"),
-                "audit_info": (AUDIT, "text"),
+                "audit_info": (AUDIT_RESULT, "output"),
                 "script_info": (SCRIPT, "output"),
-                "follow_up_info": (FOLLOW_UP, "text"),
+                "follow_up_info": (FOLLOW_UP_RESULT, "output"),
                 "update_time": (AUDIO, "update_time"),
+                "has_recording": (AUDIO, "has_recording"),
             },
             outputs=("result",),
             function=f"{MODULE}:assemble_result",

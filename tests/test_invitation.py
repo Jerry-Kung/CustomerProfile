@@ -106,6 +106,7 @@ class OfflineServices:
         invalid_audio=False,
         history_status=200,
         callback_timeout=False,
+        profile=None,
     ):
         self.records = records
         self.bad_script = bad_script
@@ -114,6 +115,7 @@ class OfflineServices:
         self.invalid_audio = invalid_audio
         self.history_status = history_status
         self.callback_timeout = callback_timeout
+        self.profile = profile or {"basic_notes": {"budget": {"value": "15万", "is_locked": True}}}
         self.requests = []
         self.prompts = []
         self.counts = Counter()
@@ -199,7 +201,7 @@ class OfflineServices:
         if path.endswith(f"/data/profile/{PHONE}"):
             return httpx.Response(
                 200,
-                json={"basic_notes": {"budget": {"value": "15万", "is_locked": True}}},
+                json=self.profile,
             )
         if path.endswith("/callback/update-invitation"):
             self.callbacks.append(json.loads(request.content))
@@ -281,12 +283,8 @@ async def test_full_workflow_branches_and_delivery(tmp_path, env, file_count, ch
     assert outcome.outputs["delivery"] == "confirmed"
     assert services.asr_urls == urls
     assert services.counts["proofread"] == services.counts["validity"] == file_count
-    assert (
-        services.counts["script"]
-        == services.counts["audit"]
-        == services.counts["follow_up"]
-        == 1
-    )
+    assert services.counts["script"] == 1
+    assert services.counts["audit"] == services.counts["follow_up"] == bool(file_count)
     assert outcome.node(flow.FIRST).succeeded == (file_count == 0)
     assert outcome.node(flow.FOLLOWUP).succeeded == (file_count != 0)
     assert len(children) == 1
@@ -294,9 +292,14 @@ async def test_full_workflow_branches_and_delivery(tmp_path, env, file_count, ch
     assert result == services.callbacks[0]
     assert result["execution_id"] == EXECUTION
     assert result["phone"] == PHONE and result["batch_id"] == BATCH
-    assert result["audit"]["overall_score"] == 81
-    assert result["audit"]["overall_rating"] == "良好"
-    assert result["audit"]["recording_label"] == "外呼录音 · 2026-10-29 09:30"
+    assert result["audit"]["overall_score"] == (81 if file_count else 0)
+    assert result["audit"]["overall_rating"] == ("良好" if file_count else "未质检")
+    assert result["audit"]["recording_label"] == ("外呼录音 · 2026-10-29 09:30" if file_count else "外呼录音")
+    if not file_count:
+        assert result["follow_up_items"] == []
+        assert "无外呼录音" in result["follow_up_summary"]
+        assert outcome.node(flow.AUDIT).status == outcome.node(flow.FOLLOW_UP).status == "skipped"
+        assert [a["node_id"] for a in attempts if a["kind"] == "llm"] == [flow.FIRST]
     assert result["generated_at"].endswith("+08:00")
     assert "{{customer_profile}}" not in "".join(services.prompts)
     assert "{{ call_transcript }}" not in "".join(services.prompts)

@@ -44,7 +44,11 @@ WORKFLOW = WorkflowDef(
     source_dsl="外呼录音原始数据解析.yml（2026-10-29）",
     entries=(START,),
     exits=(END,),
-    outputs={"result": "result", "update_time": "update_time"},
+    outputs={
+        "result": "result",
+        "update_time": "update_time",
+        "has_recording": "has_recording",
+    },
     nodes=(
         make_node(
             START,
@@ -105,7 +109,7 @@ WORKFLOW = WorkflowDef(
                 "files": (SELECT, "files"),
                 "updated_at": (SELECT, "updated_at"),
             },
-            outputs=("result", "update_time"),
+            outputs=("result", "update_time", "has_recording"),
             function=f"{MODULE}:combine_recordings",
         ),
         make_node(
@@ -116,8 +120,9 @@ WORKFLOW = WorkflowDef(
             inputs={
                 "result": (COMBINE, "result"),
                 "update_time": (COMBINE, "update_time"),
+                "has_recording": (COMBINE, "has_recording"),
             },
-            outputs=("result", "update_time"),
+            outputs=("result", "update_time", "has_recording"),
         ),
     ),
 )
