@@ -18,7 +18,13 @@
 
 import { useEffect, useState } from 'react'
 
-import { api, type KnowledgeConfig, type KnowledgeModel } from '../api/client'
+import {
+  api,
+  type KnowledgeCompetitor,
+  type KnowledgeCompetitorLibrary,
+  type KnowledgeConfig,
+  type KnowledgeModel,
+} from '../api/client'
 
 function ModelCard({ entry }: { entry: KnowledgeModel }) {
   const price = entry.price
@@ -132,6 +138,126 @@ function ModelCard({ entry }: { entry: KnowledgeModel }) {
   )
 }
 
+function PointList({ points }: { points: { title: string; text: string }[] }) {
+  if (points.length === 0) return null
+  return (
+    <ul className="kb-highlights">
+      {points.map((point) => (
+        <li key={point.title}>
+          <strong>{point.title}</strong>
+          {point.text ? <span className="cell-soft">　{point.text}</span> : null}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function CompetitorCard({ entry }: { entry: KnowledgeCompetitor }) {
+  return (
+    <section className="kb-model">
+      <header className="kb-model-head">
+        <h3>{entry.canonical_name}</h3>
+        <span className="chip chip-quiet">{entry.brand}</span>
+        {entry.body ? <span className="cell-soft">{entry.body}</span> : null}
+      </header>
+
+      <p className="kb-positioning">{entry.positioning}</p>
+
+      <dl className="meta-list">
+        <div>
+          <dt>价格带</dt>
+          <dd>
+            {entry.price.min_wan}–{entry.price.max_wan} 万元
+            <span className="cell-soft">（{entry.price.as_of}）</span>
+          </dd>
+        </div>
+        <div>
+          <dt>动力形式</dt>
+          <dd>{entry.powertrain_labels.join(' / ') || '—'}</dd>
+        </div>
+        {entry.aliases.length > 0 ? (
+          <div>
+            <dt>称谓</dt>
+            <dd className="cell-soft">{entry.aliases.join(' / ')}</dd>
+          </div>
+        ) : null}
+        {entry.source ? (
+          <div>
+            <dt>出处</dt>
+            <dd className="cell-soft">{entry.source}</dd>
+          </div>
+        ) : null}
+      </dl>
+
+      {entry.strengths.length > 0 ? (
+        <div className="rule-text">
+          <h4>客观强项</h4>
+          <PointList points={entry.strengths} />
+        </div>
+      ) : null}
+
+      {entry.gaps.length > 0 ? (
+        <div className="rule-text">
+          <h4>客户可能在意的方面</h4>
+          <PointList points={entry.gaps} />
+        </div>
+      ) : null}
+
+      {entry.talking_points.length > 0 ? (
+        <div className="rule-text">
+          <h4>应对要点</h4>
+          <PointList points={entry.talking_points} />
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function CompetitorSection({ library }: { library?: KnowledgeCompetitorLibrary }) {
+  // 缺省不启用是正常状态（业务资料未到位），不是错误——因此安静地说明一句，
+  // 不占用告警样式。真正要看见的是「配了却装载失败」，那种情况 reason 会写明。
+  if (!library || !library.available) {
+    return (
+      <div className="rule-summary">
+        <strong>竞品库</strong>
+        <span className="cell-soft">{library?.reason ?? '未配置'}</span>
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <div className="rule-summary">
+        <strong>竞品库</strong>
+        <span className="cell-soft">{library.library_id}</span>
+        <span className="dot-sep">·</span>
+        <span>{library.total} 款竞品</span>
+        {library.effective_from ? (
+          <>
+            <span className="dot-sep">·</span>
+            <span className="cell-soft">生效于 {library.effective_from}</span>
+          </>
+        ) : null}
+        {library.content_signature ? (
+          <>
+            <span className="dot-sep">·</span>
+            <span className="cell-mono" title="competitors.json 的内容指纹">
+              {library.content_signature.slice(0, 8)}
+            </span>
+          </>
+        ) : null}
+      </div>
+      {library.note ? <p className="cell-soft">{library.note}</p> : null}
+      {library.entries.map((entry) => (
+        <CompetitorCard entry={entry} key={entry.model_id} />
+      ))}
+      <p className="cell-soft">
+        竞品资料属「对外部世界的认识」，与在售车型分开配置：换合作方时它不跟着换。
+      </p>
+    </>
+  )
+}
+
 export function KnowledgeBase() {
   const [payload, setPayload] = useState<KnowledgeConfig | null>(null)
   const [error, setError] = useState('')
@@ -204,6 +330,8 @@ export function KnowledgeBase() {
       {payload?.models.map((entry) => (
         <ModelCard entry={entry} key={entry.model_id} />
       ))}
+
+      <CompetitorSection library={payload?.competitor_library} />
 
       <p className="cell-soft">
         本页只读：知识内容写入即冻结，要改就改知识包文件并重启服务。

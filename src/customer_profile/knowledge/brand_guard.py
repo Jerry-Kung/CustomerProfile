@@ -191,7 +191,9 @@ SELF_FILES: tuple[str, ...] = (
 
 
 def _structurally_skipped(relative: str) -> bool:
-    if "/knowledge/packs/" in f"/{relative}":
+    # 知识包与竞品库都是**知识本身**：那里的品牌名是数据，不是泄漏。
+    slashed = f"/{relative}"
+    if "/knowledge/packs/" in slashed or "/knowledge/competitors/" in slashed:
         return True
     return relative in SELF_FILES
 

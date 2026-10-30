@@ -235,6 +235,70 @@ def _full_entry(entry: ModelEntry, pack: Pack) -> list[str]:
     return lines
 
 
+def render_competitor_brief(
+    facts: Mapping[str, Any] | None = None, library: Any = None
+) -> str:
+    """客户提到的竞品资料。**空库或未命中时返回空串。**
+
+    与 K4 主视图分开成函数而不是塞进 :func:`render_product_brief`：两者的启用开关
+    不同（竞品库 ``KNOWLEDGE_COMPETITORS`` 缺省关、知识包 ``KNOWLEDGE_PACK`` 缺省开），
+    合成一个函数会让「关了竞品库」变成「连本方资料也没有」。
+
+    只讲**客户已经提到**的那几台。不主动列全竞品清单——销售不需要背诵对手目录，
+    需要的是「客户问到这台车时怎么接」。
+    """
+    from . import competitors as kb_competitors
+
+    resolved = library if library is not None else kb_competitors.current_competitors()
+    if resolved.is_empty:
+        return ""
+
+    data = dict(facts or {})
+    hits = kb_competitors.mentioned_competitors(
+        _values_of(data, _TEXT_KEYS), resolved
+    )
+    if not hits:
+        return ""
+
+    lines: list[str] = [
+        "",
+        "### 客户提到的竞品（外部资料，不是客户已表达的事实）",
+        "",
+        "以下为竞品公开资料，供**对比应答**用。**不得**据此贬损竞品，也不得把竞品参数"
+        "写成客户说过的内容；客户对竞品的评价只以事实表为准。",
+    ]
+    for entry in hits:
+        lines.append("")
+        lines.append(f"#### {entry.canonical_name}（{entry.brand}）")
+        lines.append(f"- 定位：{entry.positioning}")
+        lines.append(
+            f"- 价格带：{entry.price.min_wan:g}–{entry.price.max_wan:g} 万元"
+            f"（{entry.price.as_of}）"
+        )
+        if entry.powertrain:
+            labels = {"bev": "纯电", "phev": "插电混动", "erev": "增程",
+                      "ice": "燃油", "unknown": "未知"}
+            lines.append(
+                f"- 动力形式：{' / '.join(labels.get(x, x) for x in entry.powertrain)}"
+            )
+        if entry.strengths:
+            lines.append("- 客观强项：")
+            for point in entry.strengths:
+                suffix = f"——{point.text}" if point.text else ""
+                lines.append(f"  - **{point.title}**{suffix}")
+        if entry.gaps:
+            lines.append("- 客户可能在意的方面：")
+            for point in entry.gaps:
+                suffix = f"——{point.text}" if point.text else ""
+                lines.append(f"  - **{point.title}**{suffix}")
+        if entry.talking_points:
+            lines.append("- 应对要点：")
+            for point in entry.talking_points:
+                suffix = f"——{point.text}" if point.text else ""
+                lines.append(f"  - **{point.title}**{suffix}")
+    return chr(10).join(lines)
+
+
 def mentioned_models(
     facts: Mapping[str, Any] | None = None, pack: Pack | None = None
 ) -> Sequence[str]:

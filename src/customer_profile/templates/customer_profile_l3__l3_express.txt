@@ -25,6 +25,8 @@
 ### 本案相关车型
 {{ product_brief }}
 
+{{ competitor_brief }}
+
 ### 邀约策略与话术库
 {{ invite_strategy }}
 

@@ -284,6 +284,47 @@ export interface KnowledgeModel {
   configs: KnowledgeConfigEntry[]
 }
 
+/** 竞品库里的一个对比要点（强项 / 短板 / 应对要点共用）。 */
+export interface KnowledgePoint {
+  title: string
+  text: string
+}
+
+/** 竞品库里的一个竞品车型。 */
+export interface KnowledgeCompetitor {
+  model_id: string
+  canonical_name: string
+  brand: string
+  aliases: string[]
+  powertrain: string[]
+  powertrain_labels: string[]
+  body: string
+  price: {
+    min_wan: number
+    max_wan: number
+    as_of: string
+    note: string
+  }
+  positioning: string
+  strengths: KnowledgePoint[]
+  gaps: KnowledgePoint[]
+  talking_points: KnowledgePoint[]
+  source: string
+  updated_at: string
+}
+
+/** 竞品库概况。`available: false` 表示没配或装载失败，不是缺字段。 */
+export interface KnowledgeCompetitorLibrary {
+  available: boolean
+  library_id: string
+  reason: string
+  effective_from?: string
+  content_signature?: string
+  note?: string
+  total: number
+  entries: KnowledgeCompetitor[]
+}
+
 export interface KnowledgeTier {
   tier: string
   label: string
@@ -310,6 +351,8 @@ export interface KnowledgeConfig {
   models: KnowledgeModel[]
   total_models?: number
   total_configs?: number
+  /** 竞品库：与在售车型分开配置，缺省不启用。 */
+  competitor_library?: KnowledgeCompetitorLibrary
 }
 
 export interface WorkflowBrief {

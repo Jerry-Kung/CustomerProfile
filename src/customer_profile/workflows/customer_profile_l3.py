@@ -296,12 +296,16 @@ def validate_l3(claims_json, facts_json, notes_updates_json, basis_json="{}") ->
         if not _pack.is_empty
         else ""
     )
+    # 竞品资料：与知识包**分开开关**（``KNOWLEDGE_COMPETITORS`` 缺省关）。
+    # 未启用或本案没提到竞品时为空串，模板那一节随之消失——与没有这个能力时逐字节一致。
+    competitor_brief = knowledge.views.render_competitor_brief(facts)
     return {
         "facts_json": json.dumps(facts, ensure_ascii=False, default=str),
         # 表达层读的是这一份：事实喂给模型时必须翻成中文名与非英文取值，
         # 否则模型会把 ``payment_method=loan`` 这类内部形态照抄进画像卡正文。
         "facts_readable": rdb.readable_facts(facts),
         "product_brief": product_brief,
+        "competitor_brief": competitor_brief,
         "issue_json": json.dumps(issues, ensure_ascii=False, default=str),
         "issue_count": len(issues),
         "fact_count": facts_n,
@@ -622,6 +626,7 @@ WORKFLOW: WorkflowDef = WorkflowDef(
                 "facts_json",
                 "facts_readable",
                 "product_brief",
+                "competitor_brief",
                 "issue_json",
                 "issue_count",
                 "fact_count",
@@ -643,6 +648,8 @@ WORKFLOW: WorkflowDef = WorkflowDef(
                 # 产品资料改由知识库按本案筛出（K4）。两份静态产品资产已停用：
                 # 它们的内容是别家品牌的车型矩阵，保留节点只为图结构稳定与历史可复现。
                 "product_brief": (VALIDATE, "product_brief"),
+                # 客户提到的竞品资料。空串时模板那一节自然消失。
+                "competitor_brief": (VALIDATE, "competitor_brief"),
                 "invite_strategy": (INVITE_STRATEGY, "output"),
             },
             outputs=("result",),

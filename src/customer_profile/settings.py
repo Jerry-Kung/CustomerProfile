@@ -253,6 +253,22 @@ class Settings(BaseSettings):
     共用同一个 ``pack_id`` 时互相污染。
     """
 
+    knowledge_competitors: str = ""
+    """当前生效的竞品库 ID（``KNOWLEDGE_COMPETITORS``）。**缺省空串 = 不启用。**
+
+    缺省为空不是疏漏：竞品情报需要业务方提供资料来源（见
+    ``docs/feature-knowledge-base/07`` Q8），目前尚未到位。空串的产物与「没有这个
+    模块」逐字节一致，因此骨架可以先落地，等资料到了只改这一处配置。
+
+    竞品库与知识包**分开配置**，理由见 :mod:`customer_profile.knowledge.competitors`：
+    它描述「别人家有什么」，变化快于本方资料，且换合作伙伴时不该跟着换。
+    """
+
+    knowledge_competitors_dir: str = ""
+    """竞品库根目录（``KNOWLEDGE_COMPETITORS_DIR``）。空表示用包内缺省目录
+    ``src/customer_profile/knowledge/competitors/``。与 ``knowledge_packs_dir`` 同理，
+    存在的意义是测试注入临时库。"""
+
     @property
     def disabled_rule_ids(self) -> tuple[str, ...]:
         """``rules_disabled`` 的解析结果（去空白、去空项）。"""

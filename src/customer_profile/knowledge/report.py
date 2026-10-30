@@ -68,6 +68,73 @@ def build_payload(pack: Pack | None = None) -> dict[str, Any]:
         "models": [_model_row(item, resolved) for item in resolved.models],
         "total_models": len(resolved.models),
         "total_configs": sum(len(item.configs) for item in resolved.models),
+        "competitor_library": _competitor_section(),
+    }
+
+
+def _competitor_section() -> dict[str, Any]:
+    """竞品库概况。**未启用时返回 ``available: false``，不是缺字段。**
+
+    页面要能回答「有没有竞品资料」这件事本身——缺字段会让人分不清「没配」与
+    「配了但装载失败」。两者都用 ``available`` + ``reason`` 表达。
+    """
+    from . import competitors as kb
+
+    library = kb.current_competitors()
+    if library.is_empty:
+        configured = str(
+            getattr(kb.get_settings(), "knowledge_competitors", "") or ""
+        ).strip()
+        return {
+            "available": False,
+            "library_id": configured,
+            "reason": (
+                "未配置竞品库（KNOWLEDGE_COMPETITORS 为空）"
+                if not configured
+                else f"竞品库 {configured!r} 装载失败"
+            ),
+            "entries": [],
+            "total": 0,
+        }
+    return {
+        "available": True,
+        "library_id": library.library_id,
+        "reason": "",
+        "effective_from": library.manifest.effective_from,
+        "content_signature": library.content_signature,
+        "note": library.manifest.note,
+        "total": len(library.entries),
+        "entries": [
+            {
+                "model_id": item.model_id,
+                "canonical_name": item.canonical_name,
+                "brand": item.brand,
+                "aliases": list(item.aliases),
+                "powertrain": list(item.powertrain),
+                "powertrain_labels": [
+                    POWERTRAIN_LABELS.get(x, x) for x in item.powertrain
+                ],
+                "body": item.body,
+                "price": {
+                    "min_wan": item.price.min_wan,
+                    "max_wan": item.price.max_wan,
+                    "as_of": item.price.as_of,
+                    "note": item.price.note,
+                },
+                "positioning": item.positioning,
+                "strengths": [
+                    {"title": p.title, "text": p.text} for p in item.strengths
+                ],
+                "gaps": [{"title": p.title, "text": p.text} for p in item.gaps],
+                "talking_points": [
+                    {"title": p.title, "text": p.text}
+                    for p in item.talking_points
+                ],
+                "source": item.source,
+                "updated_at": item.updated_at,
+            }
+            for item in library.entries
+        ],
     }
 
 
