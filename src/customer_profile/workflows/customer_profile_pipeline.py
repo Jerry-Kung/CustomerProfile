@@ -1648,14 +1648,27 @@ def _has_test_drive(records: list[dict]) -> bool:
 
 
 def _has_old_car(claims: list[dict]) -> bool:
-    """断言里是否存在「有旧车 / 要置换」的旁证（与 :func:`_projection_context` 同口径）。"""
+    """断言里是否存在「有旧车 / 要置换」的旁证（与 :func:`_projection_context` 同口径）。
+
+    **占位值不算凭据**。此前这里只看 ``_blank_value``（只认空串），于是
+    ``old_car_model="未知"``、``trade_in_requirement="no"`` 都被当成「有旧车」，
+    进而注入 ``driver_license_status=yes``（``basis=fact``、置信 0.95）——凭一个
+    什么都没说的取值，给客户记上一条事实级结论。实测 15972379760 就是这样多出
+    「有驾照」的。
+
+    投影层（:func:`_projection_context`）早已按 :func:`hard_rules.is_placeholder`
+    排除占位值，两处判据必须同形：否则同一张卡上会同时出现「无旧车」与「有驾照」。
+    """
     for claim in claims:
         attribute = str(claim.get("attribute") or "")
-        if attribute in OLD_CAR_ATTRIBUTES and not _blank_value(claim.get("value")):
+        value = claim.get("value")
+        if _blank_value(value) or _is_placeholder_value(value):
+            continue
+        if attribute in OLD_CAR_ATTRIBUTES:
             return True
         if attribute != "trade_in_requirement":
             continue
-        text = json.dumps(claim.get("value"), ensure_ascii=False, default=str).lower()
+        text = json.dumps(value, ensure_ascii=False, default=str).lower()
         if "yes" in text or any(marker in text for marker in TRADE_IN_MARKERS):
             return True
     return False
