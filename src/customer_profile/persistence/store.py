@@ -447,6 +447,107 @@ class Store:
             return None
         return _row_to_dict(rows[0], json_fields=("inputs_json", "outputs_json"))
 
+    async def trace_run_ids(
+        self,
+        *,
+        run_id: str | None = None,
+        workflow_id: str | None = None,
+        status: str | None = None,
+        business_ref: str | None = None,
+        created_after_ms: int | None = None,
+        created_before_ms: int | None = None,
+    ) -> list[str]:
+        """固定本次导出的运行集合；默认只选主任务，不受列表 500 条上限影响。"""
+        where, params = _run_filter_clause(
+            workflow_id=workflow_id,
+            status=status,
+            business_ref=business_ref,
+            include_children=run_id is not None,
+            created_after_ms=created_after_ms,
+            created_before_ms=created_before_ms,
+        )
+        if run_id is not None:
+            where += " AND run_id = ?" if where else "WHERE run_id = ?"
+            params.append(run_id)
+        rows = await asyncio.shield(self._read(
+            f"SELECT run_id FROM workflow_runs {where} "
+            "ORDER BY created_at_ms, run_id", params,
+        ))
+        return [row["run_id"] for row in rows]
+
+    async def execution_trace(self, run_id: str) -> dict[str, Any] | None:
+        """在一次只读事务中获取运行、全部后代、节点、请求尝试及当时的版本快照。"""
+        tree = (
+            "WITH RECURSIVE tree(run_id) AS ("
+            " SELECT run_id FROM workflow_runs WHERE run_id = ?"
+            " UNION SELECT child.run_id FROM workflow_runs AS child"
+            " JOIN tree ON child.parent_run_id = tree.run_id) "
+        )
+
+        def work(connection: sqlite3.Connection) -> dict[str, Any] | None:
+            connection.execute("BEGIN")
+            try:
+                captured_at_ms = _now_ms()
+                rows = connection.execute(
+                    tree + "SELECT run.* FROM workflow_runs AS run "
+                    "JOIN tree ON run.run_id = tree.run_id "
+                    "ORDER BY run.created_at_ms, run.run_id", (run_id,),
+                ).fetchall()
+                if not rows:
+                    return None
+                runs = {}
+                for row in rows:
+                    run = _row_to_dict(row, ("inputs_json", "outputs_json"))
+                    run["inputs"] = run.pop("inputs_json") or {}
+                    run["outputs"] = run.pop("outputs_json") or {}
+                    run["is_replay"] = bool(run["is_replay"])
+                    run.update(nodes=[], attempts=[], child_run_ids=[])
+                    runs[run["run_id"]] = run
+                for run in runs.values():
+                    if run["parent_run_id"] in runs:
+                        runs[run["parent_run_id"]]["child_run_ids"].append(run["run_id"])
+
+                nodes = connection.execute(
+                    tree + "SELECT node.* FROM node_executions AS node "
+                    "JOIN tree ON node.run_id = tree.run_id "
+                    "ORDER BY COALESCE(node.started_at_ms, 0), node.execution_id",
+                    (run_id,),
+                ).fetchall()
+                for row in nodes:
+                    runs[row["run_id"]]["nodes"].append(
+                        _row_to_dict(row, ("inputs_json", "outputs_json"))
+                    )
+                attempts = connection.execute(
+                    tree + "SELECT attempt.* FROM request_attempts AS attempt "
+                    "JOIN tree ON attempt.run_id = tree.run_id ORDER BY attempt.attempt_id",
+                    (run_id,),
+                ).fetchall()
+                for row in attempts:
+                    runs[row["run_id"]]["attempts"].append(
+                        _row_to_dict(row, ("request_json", "usage_json"))
+                    )
+                versions = connection.execute(
+                    tree + "SELECT version.* FROM definition_versions AS version "
+                    "WHERE version.version_id IN (SELECT run.definition_version_id "
+                    "FROM workflow_runs AS run JOIN tree ON run.run_id = tree.run_id)",
+                    (run_id,),
+                ).fetchall()
+                return {
+                    "root_run_id": run_id,
+                    "captured_at_ms": captured_at_ms,
+                    "runs": runs,
+                    "definitions": {
+                        str(row["version_id"]): _row_to_dict(
+                            row, ("definition_json", "template_hashes_json")
+                        ) for row in versions
+                    },
+                }
+            finally:
+                connection.rollback()
+
+        # 下载中断不应取消数据库线程正在完成的 Future。
+        return await asyncio.shield(self._run(work))
+
     async def list_runs(
         self,
         *,

@@ -24,6 +24,7 @@ from .logging_config import configure_logging
 from .runner import QueueFull, RunSlotUnavailable, Service, build_service
 from .workflow_scope import accepts_workflow
 from .settings import get_settings
+from .trace_api import register_trace_routes
 
 
 ENTRY_WORKFLOW_ID = "customer_profile_pipeline"
@@ -591,6 +592,8 @@ def create_app(service_factory: Any = None) -> FastAPI:
                 detail=f"运行 {run_id} 不是 interrupted 状态，无法人工终结",
             )
         return {"run_id": run_id, "abandoned": True}
+
+    register_trace_routes(app, get_service)
 
     # 静态挂载最后加：放在所有 API 路由注册之后，避免 ``/`` 的前缀匹配盖住 API。
     if service_factory is None:
