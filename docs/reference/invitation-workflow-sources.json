@@ -50,7 +50,12 @@
       "node_id": "1780473244130",
       "title": "策略&话术生成Prompt",
       "template": "invitation__1780473244130",
-      "sha256": "98d586ba7472e0764f55f3bd73c78d97fe4b855ab6b63af21afbbf882e5e1c7d"
+      "sha256": "98d586ba7472e0764f55f3bd73c78d97fe4b855ab6b63af21afbbf882e5e1c7d",
+      "runtime_revision": {
+        "date": "2026-10-30",
+        "reason": "用户确认统一猛士品牌；移除埃安及固定价位约束，按实际输入生成话术",
+        "sha256": "d944df1af9f0f0edc8a1441722a315d17ccdcb7178a6a94cbde55c90cb65054a"
+      }
     },
     {
       "source": "客户线索邀约.yml",
@@ -64,7 +69,12 @@
       "node_id": "17821186748980",
       "title": "策略&话术生成（二次邀约）",
       "template": "invitation__17821186748980",
-      "sha256": "19f87f9b7098ce06e6f39266a27dfeefd45a0097a3848f161197485b02e9337e"
+      "sha256": "19f87f9b7098ce06e6f39266a27dfeefd45a0097a3848f161197485b02e9337e",
+      "runtime_revision": {
+        "date": "2026-10-30",
+        "reason": "用户确认统一猛士品牌；移除埃安及固定价位约束，按实际输入生成话术",
+        "sha256": "b11240245d30d65df934184c1bfdf4f06dc09ebe63385a15040b10a61b3ff439"
+      }
     },
     {
       "source": "录音文件内容抽取（纯识别，无加工）.yml",

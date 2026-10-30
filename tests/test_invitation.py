@@ -294,6 +294,18 @@ async def test_full_workflow_branches_and_delivery(tmp_path, env, file_count):
     assert result["generated_at"].endswith("+08:00")
     assert "{{customer_profile}}" not in "".join(services.prompts)
     assert "{{ call_transcript }}" not in "".join(services.prompts)
+    script_prompts = [
+        prompt for prompt in services.prompts
+        if '"phone_steps"' in prompt and '"wechat_script"' in prompt
+    ]
+    assert len(script_prompts) == 1
+    script_prompt = script_prompts[0]
+    assert "猛士" in script_prompt
+    assert "广汽埃安" not in script_prompt
+    assert "10–15 万元" not in script_prompt
+    assert "15万" in script_prompt  # 客户的真实预算仍须传入，不能替换成车辆报价。
+    if file_count:
+        assert "周末微信发我报价" in script_prompt
     for req in services.requests:
         if "m2m.invalid" in req.url.host:
             assert req.url.host == (
@@ -448,7 +460,7 @@ def test_script_contract_rejects_missing_phone_step():
         validate_script(output)
 
 
-def test_prompt_sources_are_frozen_and_available_without_downloads():
+def test_prompt_sources_and_authorized_revisions_are_available_without_downloads():
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads(
         (root / "docs/reference/invitation-workflow-sources.json").read_text()
@@ -456,5 +468,14 @@ def test_prompt_sources_are_frozen_and_available_without_downloads():
     repo = TemplateRepository()
     for entry in manifest["templates"]:
         template = repo.load(entry["template"])
-        assert hashlib.sha256(template.text.encode()).hexdigest() == entry["sha256"]
+        revision = entry.get("runtime_revision", {})
+        expected = revision.get("sha256", entry["sha256"])
+        assert hashlib.sha256(template.text.encode()).hexdigest() == expected
+        if revision:
+            assert revision["date"] and revision["reason"]
+            assert expected != entry["sha256"]  # 保留原导出指纹，修订另记。
     assert len(manifest["sources"]) == 4 and len(manifest["templates"]) == 7
+    assert {
+        entry["template"] for entry in manifest["templates"]
+        if entry.get("runtime_revision")
+    } == {"invitation__1780473244130", "invitation__17821186748980"}

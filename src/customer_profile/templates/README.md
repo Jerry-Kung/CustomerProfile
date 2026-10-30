@@ -5,6 +5,7 @@
 - 命名：`<workflow_slug>__<node_id>.txt`。slug 是模块与模板共用的稳定标识，见各工作流模块。
 - **唯一运行期来源就是本目录**，由 `TemplateRepository` 按名字加载，缺文件即报错。
 - **正文默认不可改**。任何提示词文本改动都属业务优化，须单独提出并获得确认。
+- 邀约模板的原始导出哈希保留在 `docs/reference/invitation-workflow-sources.json`；经确认的正文修订另记 `runtime_revision`，不覆盖来源指纹。
 - 文本里保留 `{{#node_id.field#}}` 引用与 `{{ "字面量" }}` 形态原样；由
   `templates.render_text` 在渲染时把引用映射成本节点的入参名，见该函数的说明。
 - 正文是**运行期事实来源**，不存在第二份副本。改动正文即改运行行为，因此改动需要评审。
