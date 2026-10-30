@@ -40,6 +40,18 @@ def test_owned_car_claim_kept_when_not_a_deposit():
     assert not any(r.get("rule") == "f_deposit" for r in result.rejected)
 
 
+def test_no_car_kept_without_evidence():
+    """CONSIST-05 反例：没有旧车 / 置换凭据时，「无车」是正确结论，不得改写。
+
+    首购客户本来就没车。误改会凭空给客户添一台车，且购车性质会跟着被带成换购。
+    """
+    result = proj.project(
+        [claim("current_vehicle_info", "无车", channel="第三方画像数据")]
+    )
+    assert result.facts.get("current_vehicle_info") == "无车"
+    assert not any(t.get("rule_id") == "CONSIST-05" for t in result.rule_trace)
+
+
 def test_single_level_is_not_touched():
     """LEVEL-01 的反例：只有一个来源给出等级时，不产生冲突、不改值、不转确认。"""
     result = proj.project([claim("deal_level", "B")])

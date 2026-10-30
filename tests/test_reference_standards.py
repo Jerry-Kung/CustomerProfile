@@ -103,3 +103,31 @@ def test_rules_endpoint_marks_field_bound_rows():
     for rule in registry.all():
         marked = rs.is_field_bound(rule)
         assert marked == (len([s for s in rule.scope if s != "*"]) == 1 and "prompt" in rule.channels)
+
+
+def test_reasoning_path_reads_the_prompt_text():
+    """「标准推理路径」列必须**现读提示词正文**，不是展示用的空壳。
+
+    此前这一列只有个默认空串，页面显示「暂无附加口径」，业务方却以为写进去的口径
+    会到模型那里——它连渲染路径都没有。现在与 L1 真正读到的那段同源。
+    """
+    from customer_profile.rules import render as rule_render
+
+    rows = {row["attribute_key"]: row for row in rs.build_rows()}
+    texts = rule_render.field_notes(stage="extract")
+
+    assert rows["planned_purchase_time"]["reasoning_path"] == texts["planned_purchase_time"]
+    assert "时间表述" in rows["planned_purchase_time"]["reasoning_path"]
+
+
+def test_global_rules_are_served_separately():
+    """全局规则单独成块：不贴任何字段，也不混进逐字段的推理路径。"""
+    from customer_profile.rules import render as rule_render
+
+    payload = rs.build_payload()
+    assert payload["global_rules"] == rule_render.global_notes(stage="extract")
+    assert "客户原话" in payload["global_rules"]
+
+    # 不得被当成某个字段的口径贴进行内——那等于给它编造归属
+    for row in payload["rows"]:
+        assert "客户原话" not in (row["reasoning_path"] or "")

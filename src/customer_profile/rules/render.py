@@ -195,6 +195,38 @@ def field_notes(
     return notes
 
 
+def global_notes(
+    *,
+    stage: str = "extract",
+    registry: RuleRegistry | None = None,
+    blocks: Mapping[str, RuleBlock] | None = None,
+    separator: str = "\n\n",
+) -> str:
+    """**全局规则**的正文（``scope=("*",)`` 且挂 prompt 通道），拼成一段。
+
+    **不能复用** :func:`render`：那里 ``scope="*"`` 表示「不限制」——把这个值当作用域
+    过滤器传进去，结果是**全部**规则都被放行，而不是只取全局那几条，语义正好相反。
+    全局规则也没有「贴在哪个字段下面」这回事，因此同样不进 :func:`field_notes`。
+
+    段落按登记顺序拼接；``stage`` 与 :func:`field_notes` 同口径过滤。
+    """
+    table = registry if registry is not None else default_registry()
+    pools = blocks if blocks is not None else load_blocks()
+    pieces: list[str] = []
+    for rule in table.active():
+        if not rule.enables_channel("prompt") or not rule.enables_stage(stage):
+            continue
+        if "*" not in rule.scope:
+            continue
+        block = pools.get(rule.id)
+        if block is None:
+            continue
+        text = block.text.strip()
+        if text:
+            pieces.append(text)
+    return separator.join(pieces)
+
+
 def field_note_extra_scopes(
     *,
     stage: str = "extract",

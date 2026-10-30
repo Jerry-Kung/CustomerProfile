@@ -639,18 +639,42 @@ def normalize_level(value: Any) -> str | None:
 # ====================================================================
 
 
-def _pick_best(group: Sequence[Claim]) -> tuple[Claim, list[Claim]]:
+def _sort_tier_first() -> bool:
+    """``SORT_TIER_FIRST`` 的运行时取值；读不到配置时按**新序**处理（缺省 true）。"""
+    try:
+        from .settings import get_settings
+
+        return bool(get_settings().sort_tier_first)
+    except Exception:
+        return True
+
+
+def _pick_best(
+    group: Sequence[Claim], *, tier_first: bool | None = None
+) -> tuple[Claim, list[Claim]]:
     """挑出最强的一条，返回 ``(最佳, 同档并列)``。
 
-    排序键是 ``(basis 强弱, 来源档强弱)``——**``basis`` 优先于来源档**（设计稿 §6.2
-    「冲突消解取『更强的一条』：``fact`` > ``inferred_high`` > ``inferred_low``」）。
-    一条来源档较低但标了 ``fact``（有原文锚点）的断言，强于一条来源档高却只是推断的断言：
-    前者能回溯到客户原话，后者不能。
+    排序键由 ``SORT_TIER_FIRST`` 决定：
 
-    「同档并列」按**同一个 (basis, 档位) 组合**取，冲突检测据此判定「是否同档多值」。
+    - **来源档优先**（缺省，2026-10-30 用户口径）——``(来源档, basis)``。
+      一手录音里客户亲口说的，压过第三方画像标签的统计预测。理由：第三方标签描述的
+      是**群体概率**，一手原话描述的是**这个人这一句话**；前者再「高置信」也不构成
+      「客户说过」。业务方报障的「现车=无车、置换车型=X」正是旧序造成的——第三方
+      「无车」被抬成 ``inferred_high``，一手置换断言只是 ``inferred_low``，于是错值胜出。
+    - **basis 优先**（旧序，可回滚）——``(basis, 来源档)``（设计稿 §6.2 原文）。
+      其立论是「一条来源档低但有原文锚点的 ``fact`` 强于来源档高却只是推断的断言」。
+      该立论在**同为推断**时不成立，而冲突恰恰多发生在两条推断之间。
+
+    「同档并列」按**同一个键组合**取，冲突检测据此判定「是否同档多值」；键的定义随开关
+    一起切换，否则「胜出者」与「同档」会用两套口径，冲突计数跟着错位。
     """
-    best_key = min((claim.basis_rank, claim.rank) for claim in group)
-    same_tier = [claim for claim in group if (claim.basis_rank, claim.rank) == best_key]
+    use_tier = _sort_tier_first() if tier_first is None else tier_first
+
+    def key(claim: Claim) -> tuple[int, int]:
+        return (claim.rank, claim.basis_rank) if use_tier else (claim.basis_rank, claim.rank)
+
+    best_key = min(key(claim) for claim in group)
+    same_tier = [claim for claim in group if key(claim) == best_key]
     same_tier.sort(key=lambda c: (c.created_at or ""), reverse=True)
     return same_tier[0], same_tier
 
@@ -998,6 +1022,7 @@ def _run_rule_actions(
 
 # rule: CONSIST-01 有旧车 ⇔ 换购
 # rule: CONSIST-03 已注销企业不得当作在职企业
+# rule: CONSIST-05 有置换凭据时不得是无车
 def _apply_cross_field_rules(
     result: Projection,
     context: Mapping[str, Any],
@@ -1430,7 +1455,11 @@ def detail_from_claims(
     ``sources`` 为空、或渲染后 ``steps`` 与 ``evidence`` 都为空时返回空四键，由调用方
     继续往下一级退，**不得**在这里编造推导链。
     """
-    ordered = sorted(sources, key=lambda c: (c.basis_rank, c.rank))
+    ordered = (
+        sorted(sources, key=lambda c: (c.rank, c.basis_rank))
+        if _sort_tier_first()
+        else sorted(sources, key=lambda c: (c.basis_rank, c.rank))
+    )
     if not ordered:
         return {"summary": "", "steps": [], "evidence": [], "confidence": None}
 
@@ -1504,6 +1533,28 @@ def _to_notes_updates(
             }
         )
     return updates
+
+
+def channel_by_attribute(
+    result: Projection, grouped: Mapping[str, list[Claim]]
+) -> dict[str, str]:
+    """``{字段: 胜出断言所在的渠道}``——gate 层 HARD-03 的输入。
+
+    **为什么不写进 Notes 条目**：``basic_notes_updates`` 的三键形状（``attribute_key`` /
+    ``attribute_value`` / ``reasoning_detail``）是下游契约，条目上多一个键会让固定住该
+    形状的用例与出口白名单都要跟着改。判据真正需要的只是「这个字段的证据来自哪条渠道」，
+    那就单独交一份映射，产物形状一点不动。
+
+    **取 ``sources[0]``**（与 ``_readable_evidence`` 同一取料口径）：证据位的第一条就是
+    胜出断言的那条渠道。没有断言（如纯注入字段之外的兜底值）时给空串——空串不是登记档，
+    HARD-03 会照常判，这是正确行为。
+    """
+    channels: dict[str, str] = {}
+    for key in result.facts:
+        sources = sorted(grouped.get(key) or [], key=lambda c: c.rank)
+        if sources:
+            channels[key] = str(sources[0].channel or "")
+    return channels
 
 
 # ====================================================================

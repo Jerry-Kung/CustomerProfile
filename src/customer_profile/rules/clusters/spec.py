@@ -369,6 +369,29 @@ RULES: tuple[Rule, ...] = (
             "tests/rules/test_spec.py::test_spec_rules_cover_exactly_the_migrated_fields",
         ),
     ),
+    Rule(
+        id="SPEC-19",
+        version=1,
+        title="多来源冲突的取舍次序",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("*",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal=(
+            "多个来源对同一字段给出不同取值时，按「客户原话 > 销售描述 > 第三方标签」取舍；"
+            "第三方标签在一手与销售描述都缺失时必须给出取值，不得留空"
+        ),
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_global_rule_rendered_separately",
+            "tests/rules/test_spec.py::test_global_rule_not_folded_into_field_notes",
+        ),
+    ),
 )
 
 CONSUMPTION_LEVEL_NOTE = "（消费等级分{bands}档，数字越大代表消费水平越高）"

@@ -64,6 +64,10 @@ def test_spec_rules_cover_exactly_the_migrated_fields(notes, registry):
     多字段规则（SPEC-17）的正文只在**主字段**下渲染一次，其余适用字段由
     :func:`render.field_note_extra_scopes` 以「本条口径同样适用于」一行带出。
     因此比对集合是「有正文的字段 ∪ 被同样适用标注的字段」。
+
+    ``scope=("*",)`` 的全局规则（``SPEC-19``）不参与：它没有归属字段，正文由
+    :func:`render.global_notes` 单独成段，不会出现在任何字段行下。比对时一并排除，
+    与 :func:`render.field_notes` 的排除口径保持一致。
     """
     extra = render.field_note_extra_scopes(stage="extract")
     covered = set(notes) | {field for fields in extra.values() for field in fields}
@@ -72,6 +76,7 @@ def test_spec_rules_cover_exactly_the_migrated_fields(notes, registry):
         for rule in registry.active()
         if rule.cluster == "spec" and rule.enables_channel("prompt")
         for field in rule.scope
+        if field != "*"
     }
     assert registered == covered
 
@@ -114,11 +119,14 @@ def test_l1_guide_is_unchanged_by_the_migration():
     2026-10-27 经业务确认追加一条：``SPEC-16`` 消费等级档位方向（8240 → 8327 字符）。
     2026-10-28 经业务确认追加两条：``SPEC-17`` 小订/大定不是拥车、``SPEC-18`` 小订/
     大定的看车进度；同日业务确认多字段规则只渲染一次，长度 8327 → 8688 字符。
+    2026-10-30 经业务确认追加一条：``SPEC-19`` 多来源冲突取舍次序（8688 → 8944 字符）。
+    它是**全局规则**，单列一段放在《合法取值清单》之后。
     """
     guide = pipe.l1_guide()
-    assert len(guide) == 8688
+    assert len(guide) == 8944
     assert "取证范围：从沟通记录里的时间表述推断" in guide
     assert "数字越大代表消费水平越高" in guide
+    assert "第三方标签可以降档，但不允许整条丢掉" in guide
     # 标记不得漏进提示词：它们是落点凭据，不是给模型看的内容
     assert "<!-- rule:" not in guide
 
@@ -126,6 +134,30 @@ def test_l1_guide_is_unchanged_by_the_migration():
 def test_field_source_notes_constant_is_gone():
     """迁移完成后不得留第二份正文——「一处登记」的最低检验。"""
     assert not hasattr(pipe, "FIELD_SOURCE_NOTES")
+
+
+def test_global_rule_rendered_separately():
+    """``SPEC-19`` 正例：全局规则单独成段，且真的进了 L1 提示词。
+
+    这条测试存在的理由就是「写了但到不了模型」——参考标准表那一列只做展示，
+    规则正文若不经过渲染就永远影响不到输出。
+    """
+    text = render.global_notes(stage="extract")
+    assert "客户原话" in text and "第三方画像标签" in text
+    assert "不得" in text  # 必须写明「不得留空」这一条，否则模型会整批丢弃第三方字段
+    assert text in pipe.l1_guide()
+
+
+def test_global_rule_not_folded_into_field_notes():
+    """``SPEC-19`` 反例：全局规则**不得**被当成某个字段的取证口径贴进行内。
+
+    ``scope=("*",)`` 的语义是「不限于某字段」，不是「适用于每个字段」。若它混进
+    ``field_notes``，字段清单里每一行下面都会多出一段与字段无关的话。
+    """
+    notes = render.field_notes(stage="extract")
+    assert all("多来源冲突" not in text for text in notes.values())
+    extra = render.field_note_extra_scopes(stage="extract")
+    assert all("*" not in fields for fields in extra.values())
 
 
 def test_contract_fields_still_listed_once():

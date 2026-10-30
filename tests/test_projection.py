@@ -174,6 +174,26 @@ def test_same_tier_conflict_goes_to_confirm_not_two_values():
     assert any(t["attribute_key"] == "occupation" for t in result.to_confirm)
 
 
+def test_no_car_rewritten_when_trade_in_evidence_exists():
+    """CONSIST-05 正例：有置换凭据时「无车」必须改写，且降档保留。
+
+    业务方报障的原始矛盾——同一张卡上「现车信息=无车」与「置换车型=某旧车」并存。
+    一手置换证据压过第三方「无车」标签，取值改成有车，但**不得编造具体车型**。
+    """
+    result = proj.project(
+        [
+            claim("current_vehicle_info", "无车", channel="第三方画像数据"),
+            claim("trade_in_requirement", "yes", channel="外呼录音信息"),
+        ]
+    )
+    assert result.facts.get("current_vehicle_info") == "有车（具体车型与车龄待核实）"
+    # 依据是「另一处有凭据」，不是客户原话直接给出本字段 → 必须降档
+    assert result.basis.get("current_vehicle_info") == proj.INFERRED_HIGH
+    assert any(
+        t.get("rule_id") == "CONSIST-05" for t in result.rule_trace
+    )
+
+
 # ---------------------------------------------------------------- d 枚举归一
 
 def test_chinese_display_normalized_to_key():

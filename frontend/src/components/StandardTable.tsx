@@ -264,6 +264,15 @@ export function StandardTable() {
         本页为只读视图，内容由契约、字段登记表与规则正文现读拼成，不单独维护；单字段规则已并入本页，
         全局与跨字段规则仍在「规则清单」。字段编号仅供内部指代，不得出现在对客产物里。
       </p>
+
+      {payload?.global_rules ? (
+        <div className="data-card">
+          <div className="rule-text">
+            <h4>全局规则（不归属任何单一字段，单独成段进提示词）</h4>
+            <pre>{payload.global_rules}</pre>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -238,6 +238,8 @@ export interface StandardTable {
   by_admission: Record<string, number>
   admission_labels: Record<string, string>
   rows: StandardRow[]
+  /** 全局规则正文（`scope=("*",)`），与 L1 提示词里那一段逐字同源。 */
+  global_rules: string
 }
 
 /** 知识库里的一个档位型号（`GET /knowledge`）。 */

@@ -240,6 +240,64 @@ def test_empty_flattened_item_is_dropped_but_other_files_kept():
     assert record["content"].count("[]") == 0
 
 
+# ---------------------------------------------------------------- 转写失败串（T-02）
+
+FAILURE_TEXT = "解析失败: the JSON object must be str, bytes or bytearray, not NoneType"
+
+
+def test_transcript_failure_string_is_not_content():
+    """取不到 AUC 响应时拼出的「解析失败: …」是**诊断信息**，不是原文。
+
+    实测形态（uat-18 / 176****5077）：``status=ok``、``content_kind=transcript``、
+    正文 67 字符的失败串。它曾被当成一手录音证据送进提示词，客户原话整段丢失。
+    """
+    records = build(
+        manifest(entry("TestDriveRecordingFile")),
+        test_drive_transcript=FAILURE_TEXT,
+    )
+    record = record_for(records, "试驾录音信息")
+    assert record["status"] == pipe.EXCEPTION
+    assert record["content"] == ""
+    assert record["raw_failure"] == FAILURE_TEXT
+
+
+def test_transcript_failure_does_not_fall_back_to_report():
+    """转写失败时不得回落压缩报告——那会让一条失败的渠道重新看起来像有效输入。"""
+    records = build(
+        manifest(entry("TestDriveRecordingFile")),
+        test_drive_report="这是经过 LLM 压缩的报告正文",
+        test_drive_transcript=FAILURE_TEXT,
+    )
+    record = record_for(records, "试驾录音信息")
+    assert record["status"] == pipe.EXCEPTION
+    assert "压缩的报告" not in record["content"]
+    assert record["content_kind"] != "report"
+
+
+def test_transcript_failure_in_one_file_among_many_is_not_content():
+    """多文件录音里只要有一项是失败串，整条渠道就不算有真实转写。"""
+    good = json.dumps([{"text": "第二段录音的原话"}], ensure_ascii=False)
+    records = build(
+        manifest(entry("TestDriveRecordingFile", media=["a.mp3", "b.mp3"])),
+        test_drive_transcript=[FAILURE_TEXT, good],
+    )
+    assert record_for(records, "试驾录音信息")["status"] == pipe.EXCEPTION
+
+
+def test_customer_mentioning_failure_words_is_not_misjudged():
+    """客户真在通话里说到「解析失败」时不得误杀——判据只认开头，且要够长。"""
+    transcript = json.dumps(
+        [{"text": "我们那个系统老是提示解析失败，烦死了，所以想换车"}], ensure_ascii=False
+    )
+    records = build(
+        manifest(entry("AIOutboundCallRecordingFile")),
+        outbound_transcript=[transcript],
+    )
+    record = record_for(records, "外呼录音信息")
+    assert record["status"] == pipe.OK
+    assert record["raw_failure"] == ""
+
+
 # ---------------------------------------------------------------- 空壳与哨兵
 
 def test_empty_locked_notes_is_exception():
@@ -303,6 +361,40 @@ def test_triage_empty_when_nothing_usable():
     assert tier["tier"] == "empty"
 
 
+def test_triage_never_sufficient_on_transcript_failure_string():
+    """**只有报错串的案件必须判 thin 或以下，不得判 sufficient。**
+
+    这是首轮缺的地基：``status=ok 且有内容`` ≠ 有证据。上一版把它判成
+    ``sufficient``，于是失败串冒充一手证据进入事实流程。
+    """
+    records = build(
+        manifest(entry("TestDriveRecordingFile")),
+        test_drive_transcript=FAILURE_TEXT,
+        mengshi_it='{"nickname": "杨"}',
+    )
+    tier = pipe.triage(json.dumps(records, ensure_ascii=False))
+    assert tier["tier"] != "sufficient"
+    assert tier["transcript_failures"] == ["试驾录音信息"]
+    assert "转写失败" in tier["tier_reason"]
+
+
+def test_triage_reads_legacy_record_without_raw_failure():
+    """旧产物没有 ``raw_failure`` 字段：正文是失败串时同样不算证据。"""
+    records = build(
+        manifest(entry("TestDriveRecordingFile")),
+        test_drive_transcript=FAILURE_TEXT,
+    )
+    for record in records:
+        record.pop("raw_failure", None)
+        if record["source_name"] == "试驾录音信息":
+            # 模拟改动前的记录层：失败串就是正文
+            record["status"] = pipe.OK
+            record["content"] = FAILURE_TEXT
+            record["content_kind"] = "transcript"
+    tier = pipe.triage(json.dumps(records, ensure_ascii=False))
+    assert tier["tier"] != "sufficient"
+
+
 # ---------------------------------------------------------------- 取证输入包
 
 def test_evidence_input_excludes_empty_channels():
@@ -328,6 +420,19 @@ def test_evidence_input_prefers_transcript_over_report():
         pipe.build_evidence_input(json.dumps(records, ensure_ascii=False), "sufficient")["output"]
     )
     assert "逐字原话" in package["外呼录音信息"]
+
+
+def test_evidence_input_excludes_transcript_failure():
+    """失败串不得进入取证输入包——一旦进了上下文，模型无从分辨它不是证据。"""
+    records = build(
+        manifest(entry("TestDriveRecordingFile")),
+        test_drive_transcript=FAILURE_TEXT,
+    )
+    package = json.loads(
+        pipe.build_evidence_input(json.dumps(records, ensure_ascii=False), "thin")["output"]
+    )
+    assert "试驾录音信息" not in package
+    assert "解析失败" not in json.dumps(package, ensure_ascii=False)
 
 
 def test_records_json_is_pure_utf8_json():

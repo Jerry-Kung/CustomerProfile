@@ -386,6 +386,23 @@ async def run(args: argparse.Namespace) -> int:
     _log(log_path, f"http fixture: {len(frames)} endpoints, "
                    f"{sum(len(v) for v in frames.values())} frames")
     _log(log_path, f"transcript cache: {seeded} entries seeded")
+
+    # ---- 零播种守门（2026-10-30）。
+    # 转写缓存一条都没播下去时，回放跑的每一步录音请求都落到回放守卫的 599，
+    # 于是「解析失败: ...」冒充一手录音流进提示词，整批实验建立在空数据上——
+    # 首轮六项改动全部验在噪声里，就是从这里开始的。
+    # 要跑「只要 HTTP 帧、不在乎录音」的实验，用 --allow-empty-transcript 显式豁免，
+    # 此时 manifest 记 transcript_degraded=true，看批的人一眼能认出。
+    if seeded == 0 and not args.allow_empty_transcript:
+        raise SystemExit(
+            "拒绝开跑：源批次没有可播种的转写条目（transcript cache: 0 entries seeded）。"
+            "这意味着本批所有录音请求都会落到回放守卫的 599，录音位为空/报错串。"
+            f"源批次：{source.name}。"
+            "换一个含真实转写的源（如 uat-18-20261026），或用 --allow-empty-transcript "
+            "显式声明「本批不依赖录音」。"
+        )
+    if seeded == 0:
+        _log(log_path, "WARNING transcript_degraded=true（--allow-empty-transcript 显式豁免）")
     for phone, urls in unresolved.items():
         _log(log_path, f"WARNING unresolved binary response for {phone}: {len(urls)} url(s)")
 
@@ -403,6 +420,7 @@ async def run(args: argparse.Namespace) -> int:
         "http_endpoints": sorted(frames),
         "http_frames": sum(len(v) for v in frames.values()),
         "transcript_entries": seeded,
+        "transcript_degraded": seeded == 0,
         "unresolved_binary": unresolved,
         "llm": "live",
         "note": (
@@ -479,6 +497,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--read-timeout", type=float, default=1800.0, help="HTTP 读超时秒数")
     parser.add_argument("--workflow-id", default=ENTRY_WORKFLOW)
+    parser.add_argument(
+        "--allow-empty-transcript",
+        action="store_true",
+        help="允许转写缓存零播种照跑（只在实验不依赖录音时使用，manifest 会记 degraded）",
+    )
     args = parser.parse_args(argv)
 
     if not 1 <= args.concurrency <= 4:

@@ -424,6 +424,19 @@ CHANNELS: tuple[dict[str, Any], ...] = (
 # 而不是「录音信息提取」子流程的压缩报告。
 TRANSCRIPT_SOURCES: tuple[str, ...] = ("试驾录音信息", "外呼录音信息")
 
+TRANSCRIPT_FAILURE_PREFIXES: tuple[str, ...] = ("解析失败", "转写为空")
+"""转写链路的**失败串前缀**。命中即「这不是原文」，绝不能当一手证据往下走。
+
+来源是 ``shared_code.parse_task_params`` / ``extract_auc_result`` 的既有约定：取不到
+AUC 响应时把异常拼成 ``解析失败: <异常>`` 往下传（迁移前的刻意设计，便于日志排查）。
+问题在于该串非空，记录层据此判 ``status=ok``、``content_kind=transcript``，于是
+**报错文本冒充客户原话**进入 L1 提示词，真实录音整段丢失。
+
+**判据带形态、不带长度**：首轮沿用 ``_looks_like_sentinel`` 的「短串 + 子串命中」
+（上限 60 字符）拦不住——失败串长度取决于异常全文，实测 67 字符起。这里只认**开头**，
+因此客户在通话里恰好说到「解析失败」也不会被误杀。
+"""
+
 
 
 # ====================================================================
@@ -609,6 +622,36 @@ def _is_empty_container(value: Any) -> bool:
     return value is None
 
 
+def _as_failure_text(value: Any) -> str:
+    """取出失败串的原文（多文件时取第一个命中的），供记录层留痕。"""
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            text = _as_failure_text(item)
+            if text:
+                return text
+        return ""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    return text if _is_transcript_failure(text) else ""
+
+
+def _is_transcript_failure(value: Any) -> bool:
+    """一段转写产出是不是**失败串**（不是原文）。
+
+    只认开头前缀，见 :data:`TRANSCRIPT_FAILURE_PREFIXES`。列表按「任一项命中」判——
+    多文件录音里只要有一个文件是失败串，这条渠道就不该被当成有真实转写。
+    """
+    if isinstance(value, (list, tuple)):
+        return any(_is_transcript_failure(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    return text.startswith(TRANSCRIPT_FAILURE_PREFIXES)
+
+
 def _transcript_parts(value: Any) -> tuple[str, str, list, list]:
     """把录音转录产出拆成（标注正文，六字段原文，句级角色，勘误明细）。
 
@@ -654,7 +697,7 @@ def _transcript_parts(value: Any) -> tuple[str, str, list, list]:
         return "", "", [], []
 
     text = value.strip()
-    if not text or _looks_like_sentinel(text):
+    if not text or _looks_like_sentinel(text) or _is_transcript_failure(text):
         return "", "", [], []
     try:
         parsed = json.loads(text)
@@ -830,12 +873,23 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
         content_raw = ""
         role_lines: list = []
         corrections: list = []
+        raw_failure = ""
         if present:
             if source_name in TRANSCRIPT_SOURCES:
-                content, content_raw, role_lines, corrections = _transcript_parts(
-                    transcripts.get(source_name)
-                )
-                if content:
+                transcript_input = transcripts.get(source_name)
+                if _is_transcript_failure(transcript_input):
+                    # 转写链路失败：**不回落报告**。报告由同一路取数产出，转写失败时它
+                    # 只会是一句提示语或空壳；更关键的是「有报告」会让这条渠道重新看起来
+                    # 像有效输入，把一次失败重新伪装成证据。
+                    raw_failure = _as_failure_text(transcript_input)
+                    present = False
+                else:
+                    content, content_raw, role_lines, corrections = _transcript_parts(
+                        transcript_input
+                    )
+                if not present:
+                    content = ""
+                elif content:
                     content_kind = "transcript"
                 else:
                     # 原文缺失才回落压缩报告。报告经过一次 LLM 加工，且「无录音」时
@@ -872,6 +926,9 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
                 # 与投影层的证据标注使用；二者都只对录音渠道非空。
                 "role_lines": role_lines,
                 "corrections": corrections,
+                # 转写失败时的原始失败串。**不是内容**：它只用于排查「为什么这条渠道是
+                # 空的」，任何下游都不得把它当证据读。非失败情形为空串。
+                "raw_failure": raw_failure,
             }
         )
 
@@ -909,6 +966,25 @@ def _looks_like_sentinel(text: str) -> bool:
     return any(marker in candidate for marker in SENTINEL_MARKERS)
 
 
+def _is_usable_record(record: dict) -> bool:
+    """一条记录是否构成「可用证据」。
+
+    **``status=ok`` 且有内容 ≠ 有证据。** 转写失败串非空、也被记录层标成
+    ``content_kind=transcript``，若只看这两项，一次取数失败会被当成一手录音，
+    进而把案件判成 ``sufficient``、把报错文本送进提示词——首轮失败的起点。
+
+    判据与记录层同源（:func:`_is_transcript_failure` / ``raw_failure`` 字段），
+    分诊层、取证输入包、记录层三处必须给出同一结论。
+    """
+    if record.get("status") != OK:
+        return False
+    if not (record.get("content") or "").strip():
+        return False
+    if record.get("raw_failure"):
+        return False
+    return not _is_transcript_failure(record.get("content"))
+
+
 def triage(records_json) -> dict:
     """L4 分诊层（纯代码）：判定本案素材是否足以走事实流程。
 
@@ -928,8 +1004,12 @@ def triage(records_json) -> dict:
     except (ValueError, TypeError):
         records = []
 
-    usable = [r for r in records if r.get("status") == OK and (r.get("content") or "").strip()]
+    usable = [r for r in records if _is_usable_record(r)]
     primary = [r for r in usable if r.get("source_class") == PRIMARY_INTERACTION]
+    failed = [
+        r for r in records
+        if r.get("raw_failure") or _is_transcript_failure(r.get("content"))
+    ]
 
     if primary:
         tier = "sufficient"
@@ -941,10 +1021,17 @@ def triage(records_json) -> dict:
         tier = "empty"
         reason = "全部渠道无实质内容"
 
+    if failed:
+        # 失败要在判档理由里说出来：否则「掉了 thin」会被误读成「这个客户本来就没资料」，
+        # 而真实原因是取数链路坏了。这是首轮把噪声当基线的最直接教训。
+        names = ", ".join(str(r.get("source_name") or "") for r in failed)
+        reason = f"{reason}；转写失败：{names}（该渠道不计为证据）"
+
     return {
         "tier": tier,
         "tier_reason": reason,
         "usable_count": len(usable),
+        "transcript_failures": [str(r.get("source_name") or "") for r in failed],
     }
 
 
@@ -970,11 +1057,9 @@ def build_evidence_input(records_json, tier: str = "sufficient") -> dict:
     for spec in CHANNELS:
         source_name = spec["source_name"]
         for record in records:
-            if record.get("source_name") != source_name or record.get("status") != OK:
+            if record.get("source_name") != source_name or not _is_usable_record(record):
                 continue
             content = (record.get("content") or "").strip()
-            if not content:
-                continue
             # 同一渠道既可能有原文又可能有报告（录音）：原文优先。
             existing = package.get(source_name)
             if existing and record.get("content_kind") == "report":
@@ -1362,8 +1447,20 @@ def field_inference_guide() -> str:
 
 
 def l1_guide() -> str:
-    """L1 输入的前置清单：先《字段清单》，再《合法取值清单》。"""
-    return field_inference_guide() + "\n\n" + enum_key_guide()
+    """L1 输入的前置清单：先《字段清单》，再《合法取值清单》，最后**全局规则**。
+
+    全局规则（``scope=("*",)``）没有归属字段，不能贴进《字段清单》某一行，因此单列一
+    段放在最后。放在**记录正文之前**、字段清单之后：它与取值域约束同一性质，且必须
+    让记录原文仍是模型最后读到的内容（见 :func:`build_l1_input` 的 R1 实测说明）。
+
+    ``SPEC-19``（多来源冲突的取舍次序）就是靠这一条通道才真正到得了模型——此前它只
+    写在参考标准表的展示列里，提示词渲染不到，等于没写。
+    """
+    parts = [field_inference_guide(), enum_key_guide()]
+    globals_text = rules.render.global_notes(stage="extract")
+    if globals_text:
+        parts.append("## 多来源冲突的取舍次序\n\n" + globals_text)
+    return "\n\n".join(parts)
 
 
 def build_l1_input(records_json, kb_brief: str = "") -> dict:
@@ -2046,6 +2143,14 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
         # 字段级置信档。L3 校验据此区分「写成确定值却没有依据」（要拦）与
         # 「已明确降级为 inferred_low 的软值」（要放行）——两者在 facts 里长得一样。
         "basis_json": json.dumps(result.basis, ensure_ascii=False, default=str),
+        # 字段 → 胜出断言所在渠道。gate 的 HARD-03 要判「标为事实却指不出原文、
+        # 也不是登记档」，缺了渠道就只能判一半。单独交一份映射而**不写进 Notes 条目**：
+        # 条目三键形状是下游契约，不能为了一个判据改产物。
+        "channels_json": json.dumps(
+            proj.channel_by_attribute(result, proj.group_by_attribute(ledger)),
+            ensure_ascii=False,
+            default=str,
+        ),
         "notes_count": len(updates),
         # R2 覆盖 KPI：L1 发了却没给出取值的字段名。空值占位不再静默通过——
         # 计出来才知道「L1 漏了多少字段」，而不是把它伪装成「字段确实没内容」。
@@ -2067,6 +2172,7 @@ async def enum_map(
     to_confirm_json="[]",
     candidates_json="[]",
     basis_json="{}",
+    channels_json="{}",
     llm=None,
     templates=None,
     enabled=None,
@@ -2120,6 +2226,8 @@ async def enum_map(
             # 映射**不动置信档**：语义映射是一次有依据的猜测，不是客户原话。升档会把
             # 「模型替你改的写法」伪装成已坐实的事实。
             "basis_json": _dump(basis),
+            # 渠道映射原样透传：映射节点只改枚举取值，不改「证据来自哪条渠道」。
+            "channels_json": channels_json,
             "rule_trace_json": _dump(final_traces),
             "enum_map_status": status,
             "enum_map_mapped": len(applied or ()),
@@ -2397,7 +2505,7 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
     }
 
 
-def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
+def review_notes(notes_updates_json, facts_json, basis_json="{}", channels_json="{}") -> dict:
     """L2 审查核验层（纯代码，0 token）：对 L1/L2 产出做合规性复核，并**执行**判决。
 
     原实现只记 ``issue``——判出违规照样进最终 Notes，蓝图 §2.2 称之为「能判但不拦」。
@@ -2426,6 +2534,7 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
 
     facts = _loads_object(facts_json)
     basis = _loads_object(basis_json)
+    channels = _loads_object(channels_json)
     table = rules.default()
     disabled = _disabled_rule_ids()
     if disabled:
@@ -2444,6 +2553,7 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
         legal_keys=inf.legal_keys,
         display_to_key=inf.display_to_key,
         is_enum_key=inf.looks_like_enum_key,
+        channels=channels,
     ) + expression_rules.check_evidence(
         state.notes, is_conclusion=proj._is_conclusion
     ) + expression_rules.check_prose_keys(
@@ -3413,6 +3523,7 @@ WORKFLOW = WorkflowDef(
                 "to_confirm_json": (L2_PROJECT, "to_confirm_json"),
                 "candidates_json": (L2_PROJECT, "candidates_json"),
                 "basis_json": (L2_PROJECT, "basis_json"),
+                "channels_json": (L2_PROJECT, "channels_json"),
             },
             outputs=(
                 "facts_json",
@@ -3422,6 +3533,7 @@ WORKFLOW = WorkflowDef(
                 "to_confirm_json",
                 "candidates_json",
                 "basis_json",
+                "channels_json",
                 "rule_trace_json",
                 "enum_map_status",
                 "enum_map_mapped",
@@ -3445,6 +3557,7 @@ WORKFLOW = WorkflowDef(
                 "notes_updates_json": (L2_ENUM_MAP, "notes_updates_json"),
                 "facts_json": (L2_ENUM_MAP, "facts_json"),
                 "basis_json": (L2_ENUM_MAP, "basis_json"),
+                "channels_json": (L2_ENUM_MAP, "channels_json"),
             },
             outputs=(
                 "notes_updates_json",
