@@ -119,7 +119,8 @@ TPM 用「出网前按 prompt 长度预扣 + 拿到 usage 后校正」（差异 
 | 服务 | 端点 | 用途 |
 |---|---|---|
 | LLM | `.env` 的 `LLM_BASE_URL`（OpenAI 兼容）| 全部模型调用。**必须支持多模态**（12 个 vision 节点）|
-| Notes / 回写 | `118.145.238.50:8084` | 画像回写、Notes 模板、历史数据 |
+| Notes / 回写 | `.env` 的 `PROFILE_API_BASE_URL` | 画像回写、Notes 模板、历史数据。2026-11-02 起缺省指向 mhero；旧地址 `118.145.238.50:8084` 已弃用（取数返回 `200 []`，是死端点不是空数据）|
+| 客户资料清单 | 同上 `/api/v1/remote/data/history/{phone}` | 全部渠道原始资料；2026-10-31 起渠道集合换为本体命名，契约见 `reference/M2M历史资料接口规范-20261031.md` |
 | mhero 中台 | `mhero.dfmc.com.cn` | 客户画像与人工确认 Notes |
 | AUC 语音 | `openspeech.bytedance.com` | 录音识别。**2026-09-23 由内网自建改为火山引擎云服务**（差异 W14）|
 

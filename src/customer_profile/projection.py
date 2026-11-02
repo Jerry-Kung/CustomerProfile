@@ -95,7 +95,7 @@ ANCHOR_VERBATIM = "verbatim"
 
 ANCHOR_NORMALIZED = "normalized"
 """坐标形态·当归：值经 ASR 纠错 / 归一产生，原文里无字面匹配，``source_quote`` 记原文
-（v3 接口一，如「安安I60」→「埃安」）。"""
+（v3 接口一，如把同音错写的车名纠回本来的写法）。"""
 
 INJECTED_PHONE_CHANNEL = "客户留资手机号"
 """``phone_number`` 的注入来源名（登记档）。取值就是入参手机号，不来自任何渠道原文。"""
@@ -120,8 +120,23 @@ TIER_LABEL: dict[str, str] = {
 CHANNEL_TIER: dict[str, str] = {
     # —— 人工/系统登记
     "销售人员人工确认的客户Notes信息": REGISTRY,
-    "客户留存在我方销售数据系统中的信息记录": REGISTRY,
     "销售人员对当前客户历史画像数据的反馈记录": REGISTRY,
+    # —— 已下线的旧登记渠道：接口 2026-10-31 起不再返回（业务方确认移除），
+    #     但归档批次里仍有 166 条记录用这个名字。**保留它是为离线回归**——
+    #     删掉会让这些历史记录落到默认的社交自呈现档，回放结果与当初跑批不可比。
+    "客户留存在我方销售数据系统中的信息记录": REGISTRY,
+    # —— 本体登记渠道（2026-10-31 接口改版后取代 MengShiITSystemData）
+    "客户注册账号资料": REGISTRY,
+    "客户线索基础资料": REGISTRY,
+    "线索下发记录": REGISTRY,
+    "线索分配记录": REGISTRY,
+    "线索当前阶段": REGISTRY,
+    "销售跟进记录": REGISTRY,
+    "战败记录": REGISTRY,
+    "人工外呼记录": REGISTRY,
+    "试驾排程记录": REGISTRY,
+    "订单记录": REGISTRY,
+    "订单金融方案": REGISTRY,
     # —— 确定性注入（v3.1 改造四）：值由代码按入参 / 登记事实定，不经模型归纳。
     #     记人工/系统登记档，否则身份字段会因「非登记来源」被降为 inferred_low。
     "客户留资手机号": REGISTRY,
@@ -355,7 +370,7 @@ class Claim:
     """这条断言的来源坐标形态（v3 接口一）：
 
     - ``verbatim``：值能在原文里**字面定位**，``quote`` 就是切出来的原文（模型不许誊抄）；
-    - ``normalized``：值经 ASR 纠错 / 品牌归一产生，原文里**无字面匹配**（安安 → 埃安），
+    - ``normalized``：值经 ASR 纠错 / 品牌归一产生，原文里**无字面匹配**（同音错写 → 正确写法），
       此时 ``source_quote`` 记原文、理由记在 ``basis_of_inference``。
 
     空的按 ``verbatim`` 处理（离线回放的旧产物没有这个字段）。
@@ -639,18 +654,42 @@ def normalize_level(value: Any) -> str | None:
 # ====================================================================
 
 
-def _pick_best(group: Sequence[Claim]) -> tuple[Claim, list[Claim]]:
+def _sort_tier_first() -> bool:
+    """``SORT_TIER_FIRST`` 的运行时取值；读不到配置时按**新序**处理（缺省 true）。"""
+    try:
+        from .settings import get_settings
+
+        return bool(get_settings().sort_tier_first)
+    except Exception:
+        return True
+
+
+def _pick_best(
+    group: Sequence[Claim], *, tier_first: bool | None = None
+) -> tuple[Claim, list[Claim]]:
     """挑出最强的一条，返回 ``(最佳, 同档并列)``。
 
-    排序键是 ``(basis 强弱, 来源档强弱)``——**``basis`` 优先于来源档**（设计稿 §6.2
-    「冲突消解取『更强的一条』：``fact`` > ``inferred_high`` > ``inferred_low``」）。
-    一条来源档较低但标了 ``fact``（有原文锚点）的断言，强于一条来源档高却只是推断的断言：
-    前者能回溯到客户原话，后者不能。
+    排序键由 ``SORT_TIER_FIRST`` 决定：
 
-    「同档并列」按**同一个 (basis, 档位) 组合**取，冲突检测据此判定「是否同档多值」。
+    - **来源档优先**（缺省，2026-10-30 用户口径）——``(来源档, basis)``。
+      一手录音里客户亲口说的，压过第三方画像标签的统计预测。理由：第三方标签描述的
+      是**群体概率**，一手原话描述的是**这个人这一句话**；前者再「高置信」也不构成
+      「客户说过」。业务方报障的「现车=无车、置换车型=X」正是旧序造成的——第三方
+      「无车」被抬成 ``inferred_high``，一手置换断言只是 ``inferred_low``，于是错值胜出。
+    - **basis 优先**（旧序，可回滚）——``(basis, 来源档)``（设计稿 §6.2 原文）。
+      其立论是「一条来源档低但有原文锚点的 ``fact`` 强于来源档高却只是推断的断言」。
+      该立论在**同为推断**时不成立，而冲突恰恰多发生在两条推断之间。
+
+    「同档并列」按**同一个键组合**取，冲突检测据此判定「是否同档多值」；键的定义随开关
+    一起切换，否则「胜出者」与「同档」会用两套口径，冲突计数跟着错位。
     """
-    best_key = min((claim.basis_rank, claim.rank) for claim in group)
-    same_tier = [claim for claim in group if (claim.basis_rank, claim.rank) == best_key]
+    use_tier = _sort_tier_first() if tier_first is None else tier_first
+
+    def key(claim: Claim) -> tuple[int, int]:
+        return (claim.rank, claim.basis_rank) if use_tier else (claim.basis_rank, claim.rank)
+
+    best_key = min(key(claim) for claim in group)
+    same_tier = [claim for claim in group if key(claim) == best_key]
     same_tier.sort(key=lambda c: (c.created_at or ""), reverse=True)
     return same_tier[0], same_tier
 
@@ -998,6 +1037,7 @@ def _run_rule_actions(
 
 # rule: CONSIST-01 有旧车 ⇔ 换购
 # rule: CONSIST-03 已注销企业不得当作在职企业
+# rule: CONSIST-05 有置换凭据时不得是无车
 def _apply_cross_field_rules(
     result: Projection,
     context: Mapping[str, Any],
@@ -1255,7 +1295,7 @@ def _readable_evidence(sources: Sequence[Claim]) -> list[str]:
     在此基础上再分两类：
 
     - ``verbatim``：``quote`` 是切出的原文，直接呈现；
-    - ``normalized``：值经纠错/归一（安安 → 埃安），呈「原文『安安I60』」（标明是原文，
+    - ``normalized``：值经纠错/归一，呈「原文『某某I60』」（标明是原文，
       值本身是字段取值）——销售一眼能分清「客户说的」与「模型改的」。
 
     **渠道名不再作为证据**（2026-10-19 可读性整改）：裸渠道名只回答了「取自哪里」，
@@ -1332,6 +1372,29 @@ def _prediction_tag_text(claim: Claim) -> str:
     return f"第三方画像标签“{tag}”给出“{value}”"
 
 
+def _quote_basis_step(sources: Sequence[Claim]) -> str:
+    """有原文切片、但没有模型给的推导链时，说清**这条切片是谁说的**。
+
+    取第一条带 ``quote`` 的断言作代表（与 ``_readable_evidence`` 同一取料顺序）。
+    三种归属各有说法，**不能合并成一句**：
+
+    - 录音里的客户方 → 客户本人说的；
+    - 录音里的销售方 → 销售说的，不是客户表态；
+    - 登记档 / 截图 / 第三方标签（``speaker_role`` 为空）→ 系统里记着的，无所谓「谁说的」。
+    """
+    for claim in sources:
+        if not claim.quote:
+            continue
+        if claim.speaker_role == SPEAKER_CUSTOMER:
+            return "客户本人有明确表述，据此直接确定"
+        if claim.speaker_role == SPEAKER_SALES:
+            return "销售在沟通中提及，据此确定"
+        if claim.tier == REGISTRY:
+            return "客户资料中有明确记录，据此直接确定"
+        return "客户资料中有明确原文，据此直接确定"
+    return "客户资料中有明确原文，据此直接确定"
+
+
 def _readable_steps(sources: Sequence[Claim]) -> list[str]:
     """推理步骤：由依据推到结论的**思维路径**（v3.1 改造一，1–4 条中文短句）。
 
@@ -1358,14 +1421,21 @@ def _readable_steps(sources: Sequence[Claim]) -> list[str]:
             return lines[:4]
 
     # —— 退路：一句**不复述材料**的说明。旧的「原始依据：<锚点>」正是雷同的来源。
+    # 措辞一律用销售听得懂的说法：不写「据现有记录归纳」「未作二次推断」这类
+    # 管线口径（2026-10-29 出口可读性整改，见 ``PIPELINE_VOCABULARY`` 同批）。
+    #
+    # **必须按来源分说**（2026-10-29 A/B 复核发现）：``quote`` 来自哪个渠道不决定
+    # 「谁说的」——登记档的 ``quote`` 是系统里的字段值，录音的 ``quote`` 可能是销售
+    # 说的话。一律写「客户本人有明确表述」会把「系统里记着客户开一辆现代」说成
+    # 「客户自己讲了这句话」。实测 382 条里 187 条并非客户原话（登记 136 / 销售 51）。
     if any(claim.quote for claim in sources):
-        return ["由客户原话直接得出该结论"]
+        return [_quote_basis_step(sources)]
     if any(claim.source_quote for claim in sources):
-        return ["经语义纠错归一并核对后得出该结论"]
+        return ["客户原话经口误与品牌名核对后确定"]
     if any(claim.basis_of_inference for claim in sources):
-        return ["综合上述线索归纳得出该结论"]
+        return ["综合上述几条线索归纳得出"]
     # **不再输出「来自{渠道}」**（2026-10-19 可读性整改）：它只复述了出处，没给出推导。
-    return ["据现有记录归纳"]
+    return ["根据客户资料中已有信息归纳"]
 
 
 def _readable_summary(sources: Sequence[Claim]) -> str:
@@ -1376,7 +1446,54 @@ def _readable_summary(sources: Sequence[Claim]) -> str:
     hint = next((_strip_conclusion(h) for c in sources for h in c.basis_of_inference if _strip_conclusion(h)), "")
     if hint:
         return f"由多条线索推断：{hint}"
-    return "据现有记录归纳得出"
+    return "根据客户资料中已有信息归纳得出"
+
+
+def detail_from_claims(
+    attribute: str,
+    sources: Sequence[Claim],
+    *,
+    summary: str = "",
+) -> dict[str, Any]:
+    """由断言渲染 ``reasoning_detail`` 四键——**出口层复用 Notes 那同一套渲染**。
+
+    为什么要在这里开一个公开入口：``callback_build`` 构造画像卡时，字段大多不在
+    Notes 契约里（``emotion`` / ``personality_and_preferences`` / ``purchase_nature`` /
+    ``old_car_model`` …），Notes 里因此从来没有它们的条目，出口只能退到一句
+    「由上游已定稿的事实直接给出，未作二次推断」——那句话是内部审计口径，销售读不懂。
+
+    但 L1 的断言账本里这些字段**本来就带着完整推导链**（``reasoning_steps``）与推断
+    依据（``basis_of_inference``），只是从前没有一路传到出口。本函数把那份原料按
+    Notes 出口的同一套规则渲染（:func:`_readable_steps` / :func:`_readable_evidence`），
+    于是同一事实在 Notes 与画像卡上仍是同一种说法——这正是 ``_FactView`` 存在的理由。
+
+    ``sources`` 为空、或渲染后 ``steps`` 与 ``evidence`` 都为空时返回空四键，由调用方
+    继续往下一级退，**不得**在这里编造推导链。
+    """
+    ordered = (
+        sorted(sources, key=lambda c: (c.rank, c.basis_rank))
+        if _sort_tier_first()
+        else sorted(sources, key=lambda c: (c.basis_rank, c.rank))
+    )
+    if not ordered:
+        return {"summary": "", "steps": [], "evidence": [], "confidence": None}
+
+    steps = _readable_steps(ordered)
+    evidence = _readable_evidence(ordered)
+    if not steps and not evidence:
+        return {"summary": "", "steps": [], "evidence": [], "confidence": None}
+
+    # 置信度走 Notes 出口同一个函数：按档位对 L1 自报分做校准，不另给一个值。
+    view = Projection(
+        facts={attribute: ordered[0].value},
+        basis={attribute: ordered[0].effective_basis},
+    )
+    return {
+        "summary": summary or _readable_summary(ordered),
+        "steps": steps,
+        "evidence": evidence,
+        "confidence": _confidence_for(view, attribute, ordered),
+    }
 
 
 def _to_notes_updates(
@@ -1431,6 +1548,28 @@ def _to_notes_updates(
             }
         )
     return updates
+
+
+def channel_by_attribute(
+    result: Projection, grouped: Mapping[str, list[Claim]]
+) -> dict[str, str]:
+    """``{字段: 胜出断言所在的渠道}``——gate 层 HARD-03 的输入。
+
+    **为什么不写进 Notes 条目**：``basic_notes_updates`` 的三键形状（``attribute_key`` /
+    ``attribute_value`` / ``reasoning_detail``）是下游契约，条目上多一个键会让固定住该
+    形状的用例与出口白名单都要跟着改。判据真正需要的只是「这个字段的证据来自哪条渠道」，
+    那就单独交一份映射，产物形状一点不动。
+
+    **取 ``sources[0]``**（与 ``_readable_evidence`` 同一取料口径）：证据位的第一条就是
+    胜出断言的那条渠道。没有断言（如纯注入字段之外的兜底值）时给空串——空串不是登记档，
+    HARD-03 会照常判，这是正确行为。
+    """
+    channels: dict[str, str] = {}
+    for key in result.facts:
+        sources = sorted(grouped.get(key) or [], key=lambda c: c.rank)
+        if sources:
+            channels[key] = str(sources[0].channel or "")
+    return channels
 
 
 # ====================================================================

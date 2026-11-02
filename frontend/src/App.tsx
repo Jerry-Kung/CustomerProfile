@@ -12,13 +12,14 @@
 import { useEffect, useState } from 'react'
 
 import { api, type RuntimeInfo } from './api/client'
+import { KnowledgeBase } from './components/KnowledgeBase'
 import { RuleCatalog } from './components/RuleCatalog'
 import { RunList } from './components/RunList'
 import { RunDetail } from './components/RunDetail'
 import { StandardTable } from './components/StandardTable'
 import { SubmitRun } from './components/SubmitRun'
 
-type Tab = 'runs' | 'submit' | 'rules' | 'standards'
+type Tab = 'runs' | 'submit' | 'rules' | 'standards' | 'knowledge'
 
 function App() {
   const [tab, setTab] = useState<Tab>('runs')
@@ -80,6 +81,13 @@ function App() {
           >
             参考标准表
           </button>
+          <button
+            type="button"
+            className={tab === 'knowledge' ? 'active' : ''}
+            onClick={() => setTab('knowledge')}
+          >
+            知识库
+          </button>
         </nav>
       </header>
 
@@ -107,6 +115,8 @@ function App() {
         {tab === 'rules' ? <RuleCatalog /> : null}
 
         {tab === 'standards' ? <StandardTable /> : null}
+
+        {tab === 'knowledge' ? <KnowledgeBase /> : null}
 
         {tab === 'runs' && currentRun ? (
           <RunDetail

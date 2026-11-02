@@ -166,7 +166,7 @@ RULES: tuple[Rule, ...] = (
     Rule(
         id="SPEC-09",
         version=1,
-        title="了解猛士的取证范围",
+        title="了解本方品牌的取证范围",
         content_kind="spec",
         channels=("prompt",),
         scope=("knowledge_of_mengshi",),
@@ -253,7 +253,7 @@ RULES: tuple[Rule, ...] = (
         stages=("extract",),
         severity="warn",
         default_action="annotate",
-        message_internal="与 `competing_brand` 同口径，落到**具体车型**（如「豹8」「坦克700」）。品牌与车型分不清时，两个字段可同时给值，不要硬拆。",
+        message_internal="与 `competing_brand` 同口径，落到**具体车型**（客户说的那台车的正式车名）。品牌与车型分不清时，两个字段可同时给值，不要硬拆。",
         message_customer="",
         owner="business",
         status="active",
@@ -367,6 +367,29 @@ RULES: tuple[Rule, ...] = (
         tests=(
             "tests/rules/test_spec.py::test_spec_note_rendered_inline",
             "tests/rules/test_spec.py::test_spec_rules_cover_exactly_the_migrated_fields",
+        ),
+    ),
+    Rule(
+        id="SPEC-19",
+        version=1,
+        title="多来源冲突的取舍次序",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("*",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal=(
+            "多个来源对同一字段给出不同取值时，按「客户原话 > 销售描述 > 第三方标签」取舍；"
+            "第三方标签在一手与销售描述都缺失时必须给出取值，不得留空"
+        ),
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_global_rule_rendered_separately",
+            "tests/rules/test_spec.py::test_global_rule_not_folded_into_field_notes",
         ),
     ),
 )

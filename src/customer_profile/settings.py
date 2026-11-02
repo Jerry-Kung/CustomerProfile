@@ -200,7 +200,12 @@ class Settings(BaseSettings):
     缺省值对着「录音文件大、单次识别可达 20–30 分钟」这一实测口径。
     """
 
-    profile_api_base_url: str = "http://118.145.238.50:8084"
+    profile_api_base_url: str = "https://mhero.dfmc.com.cn/customer_profile/m2m_api"
+    """取数与回写的服务根地址。**以 ``.env`` 为准**，这里只是兜底。
+
+    2026-11-02 起缺省值指向 mhero：旧地址 ``118.145.238.50:8084`` 随接口改版弃用，
+    对它取数会返回 ``200 []``——看起来像「该客户无资料」，实际是打到了死端点。
+    """
     profile_api_key: str = ""
     mhero_base_url: str = "https://mhero.dfmc.com.cn/customer_profile/m2m_api"
     profile_mhero_api_key: str = ""
@@ -279,6 +284,18 @@ class Settings(BaseSettings):
     用逗号串而不是列表：环境变量里的列表要写成 JSON，运维侧容易写错。
     """
 
+    sort_tier_first: bool = True
+    """冲突消解排序是否**来源档优先**（``SORT_TIER_FIRST``，缺省 true）。
+
+    用户口径（2026-10-30）：多来源冲突时按「客户原话 > 销售描述 > 第三方标签」取舍，
+    **来源档位排在置信档之前**。关闭即回到旧序 ``(basis, 来源档)``——旧序下
+    「第三方预测 + 自称 fact」会被抬成 ``inferred_high``，于是**任何一手断言**（哪怕只标
+    ``inferred_low``）都输给它，业务方报障的「无车」正是这样胜出。
+
+    留这个开关是因为一手断言可能来自**说话方误判**（录音里销售方说的被当成客户说的），
+    全部放开需要真实批次验证；关掉即单批回滚，不必改代码。
+    """
+
     rule_checker_enabled: bool = False
     """``llm_checker`` 通道总开关。
 
@@ -296,6 +313,41 @@ class Settings(BaseSettings):
     与 ``rule_checker_enabled`` 分开是刻意的：两者方向相反（checker 只判不补，映射只补
     不判），成本模型与风险面都不同，用一个开关会把「想省钱」与「想救字段」绑死。
     """
+
+    # ------------------------------------------------------------ 知识库
+    knowledge_pack: str = "dfms-mengshi"
+    """当前生效的知识包 ID（``KNOWLEDGE_PACK``）。
+
+    **换合作伙伴只改这一处**（外加把新包放进 ``knowledge/packs/``）。包里的品牌、
+    在售车型、价格与卖点全部随包切换，代码与提示词不动。
+
+    置空串表示**不启用知识**：视图输出空串、意向车型闭集校验跳过，管线行为与接入
+    知识前逐字节一致。这是刻意留的回滚口——比代码开关可靠，开关会腐烂，数据不会。
+    """
+
+    knowledge_packs_dir: str = ""
+    """知识包根目录（``KNOWLEDGE_PACKS_DIR``）。空表示用包内缺省目录
+    ``src/customer_profile/knowledge/packs/``。
+
+    存在的意义是测试注入临时包：无需改动仓库内的正式知识文件，也避免两个测试
+    共用同一个 ``pack_id`` 时互相污染。
+    """
+
+    knowledge_competitors: str = ""
+    """当前生效的竞品库 ID（``KNOWLEDGE_COMPETITORS``）。**缺省空串 = 不启用。**
+
+    缺省为空不是疏漏：竞品情报需要业务方提供资料来源（见
+    ``docs/feature-knowledge-base/07`` Q8），目前尚未到位。空串的产物与「没有这个
+    模块」逐字节一致，因此骨架可以先落地，等资料到了只改这一处配置。
+
+    竞品库与知识包**分开配置**，理由见 :mod:`customer_profile.knowledge.competitors`：
+    它描述「别人家有什么」，变化快于本方资料，且换合作伙伴时不该跟着换。
+    """
+
+    knowledge_competitors_dir: str = ""
+    """竞品库根目录（``KNOWLEDGE_COMPETITORS_DIR``）。空表示用包内缺省目录
+    ``src/customer_profile/knowledge/competitors/``。与 ``knowledge_packs_dir`` 同理，
+    存在的意义是测试注入临时库。"""
 
     @property
     def disabled_rule_ids(self) -> tuple[str, ...]:

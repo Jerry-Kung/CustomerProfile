@@ -297,7 +297,7 @@ WORKFLOW = WorkflowDef(
             OUTBOUND_CALL,
             "外呼录音信息提取",
             "outbound_call_audio",
-            "AIOutboundCallRecordingFile",
+            "OntologyManualOutboundCallRecordingFile",
         ),
         _tool(ALIPAY, "支付宝个人页信息提取", "alipay_homepage", "AlipayPersonalPageScreenshot"),
         _tool(
@@ -332,7 +332,7 @@ WORKFLOW = WorkflowDef(
             CHAT_HISTORY,
             "聊天记录数据信息",
             "chat_history_data",
-            "MengShiCustomerChatInfo",
+            "OntologyCustomerChatInfo",
         ),
         _tool(
             FEEDBACK,

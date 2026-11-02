@@ -37,7 +37,8 @@ WORKFLOW_MODULES: tuple[str, ...] = (
     # 它承载的是 v1 的 45 字段旧清单（``married`` / ``commute`` / ``transport`` 等已废弃
     # 枚举键仍在它的两份提示词里），入口早已改指 ``customer_profile_pipeline``，
     # 留着只会让旧键继续被引用。见 ``docs/history/旧版枚举键与production臂整改方案.md``。
-    # 它复用的 6 份业务资产模板已改名为 ``customer_profile_shared__*``，由 L3 表达层继续引用。
+    # 它复用的业务资产模板已改名为 ``customer_profile_shared__*``，由 L3 表达层继续引用
+    # （2026-10-29 起邀约策略迁入 knowledge/common/，模板侧剩 5 份）。
     #
     # ``customer_profile_entry``（客户初始画像，基线臂）于 2026-10-16 从注册表摘除：
     # 该臂已无业务用途，入口改指 ``customer_profile_pipeline``（业务测试臂）。

@@ -336,7 +336,7 @@ def is_english_placeholder(attribute_key: str, value: Any) -> bool:
     """``value`` 是不是该字段的**英文占位串**（合法枚举键不算）。
 
     判据是「英文占位串 + 不是本字段的合法键」，不是「含英文字母」——后者会误伤
-    ``Model Y`` / ``BMW`` / ``max版`` 这类品牌与车型名（见英文残留治理方案 §4.1）。
+    品牌名 / 车型名 / ``max版`` 这类专有名词（见英文残留治理方案 §4.1）。
     """
     if not isinstance(value, str):
         return False
@@ -416,7 +416,7 @@ LEGACY_ENUM_ALIASES: dict[str, dict[str, str]] = {
    ``company`` / ``personal`` 语义完全不重叠，属于**换字段**而非改键，走
    :func:`legacy_cross_field` 的跨字段路由。
 
-来源：``docs/reference/AI画像v2回传改造核查清单.md`` §2.3 与
+来源：``docs/history/AI画像v2回传改造核查清单.md`` §2.3 与
 ``docs/history/旧版枚举键与production臂整改方案.md`` §3。
 """
 

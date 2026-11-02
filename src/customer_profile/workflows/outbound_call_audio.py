@@ -1,11 +1,11 @@
 """``外呼录音信息提取`` 的 Python 定义。
 
 迁移前的定义基线：20 节点 / 21 边，与「外呼录音信息提取」**图结构逐节点相同**，只有渠道名
-（``AIOutboundCallRecordingFile``）与提示词正文不同。结构复用
+（``OntologyManualOutboundCallRecordingFile``）与提示词正文不同。结构复用
 :mod:`customer_profile.workflows.audio_flow`。
 
 录音文件直链来自 ``GET /api/v1/remote/data/history/{phone}`` 响应里
-``channel == AIOutboundCallRecordingFile`` 那条记录的 ``media_urls``。
+``channel == OntologyManualOutboundCallRecordingFile`` 那条记录的 ``media_urls``。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from .audio_flow import AudioFlow, build_audio_workflow, build_pure_workflow
 WORKFLOW_ID = "outbound_call_audio"
 DISPLAY_NAME = "外呼录音信息提取"
 
-DATA_SOURCE = "AIOutboundCallRecordingFile"
+DATA_SOURCE = "OntologyManualOutboundCallRecordingFile"
 
 FLOW = AudioFlow(
     slug=WORKFLOW_ID,

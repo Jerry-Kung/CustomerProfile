@@ -160,12 +160,22 @@ REGISTRY_CHANNELS: frozenset[str] = frozenset(
         "销售人员人工确认的客户Notes信息",
         "客户留存在我方销售数据系统中的信息记录",
         "销售人员对当前客户历史画像数据的反馈记录",
+        # 确定性注入渠道（2026-10-30 补）：取值由代码按入参或试驾记录定，不经模型归纳，
+        # 因此本就不存在「原文锚点」这回事。首轮补这两条时**无效**——当时 gate 侧读不到
+        # 渠道名（投影层没往 Notes 条目写 ``record_channel``），不是这两条写错了。
+        "客户留资手机号",
+        "试驾与置换记录",
     }
 )
 """登记档渠道：由系统直接给出的事实，本就不需要原文锚点。
 
 ``review_notes``（Notes 侧）与 ``validate_l3``（断言侧）共用这一份——两处各写一份
 正是 HARD-03 之前「同名不同义」的成因。
+
+**两个调用点喂进来的 ``channel`` 来源不同**：Notes 侧读条目的 ``record_channel``，
+断言侧读 ``claim.channel``。因此这张表要真正生效，投影层必须把渠道写进 Notes 条目
+（见 ``projection._to_notes_updates``）——只补这张表、不补输入，等于把开关装在没有
+电线的墙上。
 """
 
 
@@ -231,6 +241,7 @@ def check_notes(
     legal_keys: Any,
     display_to_key: Any,
     is_enum_key: Any,
+    channels: Mapping[str, str] | None = None,
 ) -> list[Action]:
     """gate 阶段：占位串、非法枚举、无锚点 fact。
 
@@ -329,7 +340,9 @@ def check_notes(
         if str(basis.get(key) or "") == BASIS_FACT:
             evidence = [str(item) for item in (detail.get("evidence") or [])]
             has_quote = any(has_quote_marker(item) for item in evidence)
-            channel = str(entry.get("record_channel") or "")
+            # 渠道优先取自外部映射（投影层产出、经 L2_ENUM_MAP 原样透传）。
+            # 条目本身只有三键，不带渠道——只读条目会让判据退化成「只看有没有原文标记」。
+            channel = str((channels or {}).get(key) or entry.get("record_channel") or "")
             if is_unbacked_fact(has_quote, channel):
                 actions.append(
                     Action(

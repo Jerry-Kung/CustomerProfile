@@ -1839,3 +1839,66 @@ button {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------------------------------------------------------------- 知识库 */
+
+/* 车型卡片：一车一块，块间用间距分隔而不是加边框——边框会让页面看起来像表格，
+   而这里要传达的是「几款车各自是什么」，不是「几行数据」。 */
+.kb-model {
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 2px 6px;
+}
+
+.kb-model:first-of-type {
+  border-top: none;
+}
+
+.kb-model-head {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.kb-model-head h3 {
+  font-size: 16px;
+  margin: 0;
+}
+
+/* 定位是一句话说明，让它与下方的字段列表拉开层次。 */
+.kb-positioning {
+  color: var(--text-soft);
+  font-size: 13.5px;
+  line-height: 1.7;
+  margin: 0;
+}
+
+.kb-configs h4 {
+  color: var(--text-soft);
+  font-size: 12.5px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+/* 档位表沿用运行台既有表格样式，只把列宽收紧：六列都是短值。 */
+.kb-configs .data-table th,
+.kb-configs .data-table td {
+  padding-bottom: 6px;
+  padding-top: 6px;
+}
+
+.kb-highlights {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  line-height: 1.7;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.kb-highlights strong {
+  color: var(--text);
+}

@@ -10,7 +10,7 @@
           → customer_profile_pipeline → result1
 
     业务测试臂（本模块，阶段一/二）:
-      取数层（14 路 tool，**原样复用**既有子流程）
+      取数层（子流程按渠道并行取数 + 本体渠道清单直读）
         → L0 记录层（纯代码）：把清单与各渠道产物统一成 records[]
           → L4 分诊层（纯代码）：sufficient / thin / empty
             → 取证输入包（纯代码）：只喂「有内容」的渠道
@@ -36,8 +36,11 @@
    **0 token**。
 
 **与 ``evidence_subagent`` 的关系**：不修改它。它是基线臂的组成部分，改它会让同一条分支上
-的两臂一起变，AB 立刻不成立。代价是 14 路 ``tool`` 声明在这里重复一份；``tests``
-里有一条用例断言两份声明的渠道集合一致，防止日后单边漂移。
+的两臂一起变，AB 立刻不成立。代价是取数层的 ``tool`` 声明在这里重复一份；``tests``
+里有一条用例断言两份声明逐条一致，防止日后单边漂移。
+
+**本体渠道不需要子流程**（2026-10-31 接口改版）：它们的载荷是扁平结构，由
+:mod:`ontology_payload` 直接渲染成中文正文，因此只在渠道表里登记，不在图上开节点。
 """
 
 from __future__ import annotations
@@ -56,6 +59,7 @@ from ..definitions import WorkflowDef, make_node
 from ..rules.clusters import expression as expression_rules
 from ..rules.clusters import hard as hard_rules
 from ..rules import checker as rule_checker
+from . import ontology_payload
 
 WORKFLOW_ID = "customer_profile_pipeline"
 """**稳定标识，不得改动。** 模板资源名是 ``<slug>__<node_id>``，而 ``scripts/run_baseline.py
@@ -81,7 +85,7 @@ START = "pipeline_start"
 HISTORY_HTTP = "pipeline_history"
 END = "pipeline_end"
 
-# —— 取数层（14 路 tool，复用既有子流程）
+# —— 取数层（子流程 tool，复用既有定义）
 MOMENTS = "pipeline_moments"
 WECHAT_SEARCH = "pipeline_wechat_search"
 WECHAT_HOME = "pipeline_wechat_home"
@@ -92,7 +96,6 @@ XIAOHONGSHU = "pipeline_xiaohongshu"
 DOUYIN = "pipeline_douyin"
 LOCKED_NOTES = "pipeline_locked_notes"
 JIGUANG = "pipeline_jiguang"
-MENGSHI_IT = "pipeline_mengshi_it"
 CHAT_HISTORY = "pipeline_chat_history"
 FEEDBACK = "pipeline_feedback"
 PHONE_COMPANY = "pipeline_phone_company"
@@ -114,6 +117,12 @@ L4_TRIAGE = "pipeline_l4_triage"
 
 # —— L1 取证层（v3 三分层：事实 → 人设 → 分析投影）/ L2 投影层
 L1_INPUT = "pipeline_l1_input"
+KB_BRIEF = "pipeline_kb_brief"
+"""知识库·取证侧视图（K3，0 token）。
+
+单独成节点而不是在 ``build_l1_input`` 里直接读知识包：节点产物里能看到它生成了什么、
+有多长、用的是哪个包。排查「客户说要买 X 却没进 Notes」时，这是第一处要看的地方。
+空包时输出空串，``build_l1_input`` 随之逐字节回到接入知识前的形态。"""
 L1_FACTS = "pipeline_l1_facts"
 L1_PERSONA = "pipeline_l1_persona"
 L1_FIELDS = "pipeline_l1_fields"
@@ -122,7 +131,7 @@ L1_MERGE = "pipeline_l1_merge"
 
 **为什么必须有这一层**：三分层把「一次直出」拆成「1a 出硬事实 + 1c 补推断」，而 1c
 提示词明说「事实清单已给的字段不用重复」——两层因此是**互补**而非重叠。若少了这一层，
-1a 检出的事实（如 ``intended_brand=埃安``）根本不进账本，在 Notes 里直接变空值。
+1a 检出的事实（如 ``intended_brand=某某``）根本不进账本，在 Notes 里直接变空值。
 实测 8 案：1a=90 字段 / 1c=156 字段 / 两层重叠仅 6 / 仅 1a 有 84。"""
 L1_LOCALIZE = "pipeline_l1_localize"
 L1_INJECT = "pipeline_l1_inject"
@@ -282,7 +291,7 @@ LEVEL_ASSESS_TEMPLATE = template_name(LEVEL_ASSESS)
 
 
 # ====================================================================
-# 渠道表：15 个取证渠道 → 清单渠道名 / 来源分级 / 内容形态
+# 渠道表：取证渠道 → 清单渠道名 / 来源分级 / 内容形态
 #
 # ``manifest_channel`` 为 ``None`` 表示该渠道不来自
 # ``GET /api/v1/remote/data/history/{phone}`` 清单（人工确认与反馈走 mhero），
@@ -331,7 +340,7 @@ CHANNELS: tuple[dict[str, Any], ...] = (
     },
     {
         "source_name": "外呼录音信息",
-        "manifest_channel": "AIOutboundCallRecordingFile",
+        "manifest_channel": "OntologyManualOutboundCallRecordingFile",
         "source_class": PRIMARY_INTERACTION,
         "content_kind": "transcript",
         "node_id": OUTBOUND_CALL,
@@ -385,16 +394,110 @@ CHANNELS: tuple[dict[str, Any], ...] = (
         "content_kind": "json",
         "node_id": LOCKED_NOTES,
     },
+    # ---------------------------------------------------------------- 本体渠道
+    # 2026-10-31 接口改版：``MengShiITSystemData`` 等旧渠道已由业务方确认移除，
+    # 改为下面这批「本体」渠道。载荷已是扁平结构，由 :mod:`ontology_payload` 直出中文
+    # 正文（``render`` 键），**不经子流程**——这些字段没有 OCR/转写可言，多开一路
+    # tool 只会多一层图结构与模板。
     {
-        "source_name": "客户留存在我方销售数据系统中的信息记录",
-        "manifest_channel": "MengShiITSystemData",
+        "source_name": "客户注册账号资料",
+        "manifest_channel": "OntologyAppRegistration",
         "source_class": DECLARED,
         "content_kind": "json",
-        "node_id": MENGSHI_IT,
+        "node_id": None,
+        "render": "ontology",
+    },
+    {
+        "source_name": "客户线索基础资料",
+        "manifest_channel": "OntologyLeadInfo",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+    },
+    {
+        "source_name": "线索下发记录",
+        "manifest_channel": "OntologyLeadDistribution",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "线索分配记录",
+        "manifest_channel": "OntologyLeadAssignment",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "线索当前阶段",
+        "manifest_channel": "OntologyLeadStage",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+    },
+    {
+        "source_name": "销售跟进记录",
+        "manifest_channel": "OntologyLeadFollowRecord",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "战败记录",
+        "manifest_channel": "OntologyDefeatRecord",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "人工外呼记录",
+        "manifest_channel": "OntologyManualOutboundCall",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "试驾排程记录",
+        "manifest_channel": "OntologyTestDriveSchedule",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "订单记录",
+        "manifest_channel": "OntologyOrder",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "订单金融方案",
+        "manifest_channel": "OntologyOrderFinance",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
     },
     {
         "source_name": "客户与我方销售人员的聊天记录信息",
-        "manifest_channel": "MengShiCustomerChatInfo",
+        "manifest_channel": "OntologyCustomerChatInfo",
         "source_class": PRIMARY_INTERACTION,
         "content_kind": "json",
         "node_id": CHAT_HISTORY,
@@ -407,7 +510,7 @@ CHANNELS: tuple[dict[str, Any], ...] = (
         "node_id": FEEDBACK,
     },
 )
-"""15 个取证渠道的元信息。
+"""全部取证渠道的元信息。
 
 顺序与 ``evidence_subagent`` 的「客户数据聚合」模板一致——取证输入包按同一套
 中文键组织，``证据线索整理`` 提示词要求 ``evidence_source`` 的取值与输入 JSON 的 key
@@ -417,6 +520,19 @@ CHANNELS: tuple[dict[str, Any], ...] = (
 # 需要逐字转写的两个录音渠道：它们的原话取自 ``audio_content_extract``，
 # 而不是「录音信息提取」子流程的压缩报告。
 TRANSCRIPT_SOURCES: tuple[str, ...] = ("试驾录音信息", "外呼录音信息")
+
+TRANSCRIPT_FAILURE_PREFIXES: tuple[str, ...] = ("解析失败", "转写为空")
+"""转写链路的**失败串前缀**。命中即「这不是原文」，绝不能当一手证据往下走。
+
+来源是 ``shared_code.parse_task_params`` / ``extract_auc_result`` 的既有约定：取不到
+AUC 响应时把异常拼成 ``解析失败: <异常>`` 往下传（迁移前的刻意设计，便于日志排查）。
+问题在于该串非空，记录层据此判 ``status=ok``、``content_kind=transcript``，于是
+**报错文本冒充客户原话**进入 L1 提示词，真实录音整段丢失。
+
+**判据带形态、不带长度**：首轮沿用 ``_looks_like_sentinel`` 的「短串 + 子串命中」
+（上限 60 字符）拦不住——失败串长度取决于异常全文，实测 67 字符起。这里只认**开头**，
+因此客户在通话里恰好说到「解析失败」也不会被误杀。
+"""
 
 
 
@@ -458,6 +574,11 @@ def collect_audio_files(records, data_source) -> dict:
             continue
         media = item.get("media_urls")
         if media is None:
+            # 2026-10 接口改版：录音渠道的直链也可能只在 ``raw_payload.recording_url``。
+            raw = item.get("raw_payload")
+            if isinstance(raw, dict):
+                media = raw.get("recording_url")
+        if media is None:
             return {"files": []}
         if isinstance(media, str):
             media = [media]
@@ -479,7 +600,7 @@ def collect_test_drive_files(records) -> dict:
 
 def collect_outbound_files(records) -> dict:
     """``code`` 节点入口：收集外呼录音的文件直链。见 ``collect_test_drive_files``。"""
-    return collect_audio_files(records, "AIOutboundCallRecordingFile")
+    return collect_audio_files(records, "OntologyManualOutboundCallRecordingFile")
 
 
 def bundle_channels(
@@ -491,7 +612,6 @@ def bundle_channels(
     xiaohongshu=None,
     douyin=None,
     locked_notes=None,
-    mengshi_it=None,
     chat_history=None,
     feedback=None,
     phone_company=None,
@@ -502,7 +622,7 @@ def bundle_channels(
     test_drive_report=None,
     outbound_report=None,
 ) -> dict:
-    """把 14 路子流程的产出与清单原文汇成一份「渠道 → 内容」表。
+    """把各路子流程的产出与清单原文汇成一份「渠道 → 内容」表。
 
     录音渠道给两样东西：``*_transcript``（逐字原文，来自 ``audio_content_extract``）
     与 ``*_report``（压缩报告，来自「录音信息提取」子流程）。L0 取原文，
@@ -522,7 +642,6 @@ def bundle_channels(
         "小红书主页截图信息": xiaohongshu,
         "抖音主页截图信息": douyin,
         "销售人员人工确认的客户Notes信息": locked_notes,
-        "客户留存在我方销售数据系统中的信息记录": mengshi_it,
         "客户与我方销售人员的聊天记录信息": chat_history,
         "销售人员对当前客户历史画像数据的反馈记录": feedback,
         "手机号归属地信息": phone_location,
@@ -549,11 +668,18 @@ def bundle_channels(
     }
 
 
-def _manifest_index(history_body: Any) -> dict[str, dict]:
-    """把清单响应体解析成 ``{channel: 第一条记录}``。
+def _manifest_index(history_body: Any) -> dict[str, list[dict]]:
+    """把清单响应体解析成 ``{channel: [记录, ...]}``，按 ``created_at`` 升序。
 
     解析失败按「清单为空」处理：拿不到清单时**所有**渠道都记 ``exception``。
     这是刻意的保守取向——宁可如实说「不知道有哪些渠道」，也不要凭猜测给它内容。
+
+    **为什么从「每渠道一条」改成「每渠道一组」**：2026-10-31 接口改版引入了天生多条的
+    渠道（跟进记录、订单、金融方案），只留最新一条会让同一客户的三次跟进只剩最后一次。
+    既有渠道仍是「取最新一条」，由 :func:`build_records` 在消费侧决定，索引层不做裁剪。
+
+    上游标记 ``operation=removed`` 的记录在这里就被剔除：它表示业务系统已删除该条，
+    留着会让一条**不存在的记录**进入正文。
     """
     if history_body is None:
         return {}
@@ -570,19 +696,19 @@ def _manifest_index(history_body: Any) -> dict[str, dict]:
     if not isinstance(data, list):
         return {}
 
-    index: dict[str, dict] = {}
+    index: dict[str, list[dict]] = {}
     for item in data:
         if not isinstance(item, dict):
             continue
         channel = item.get("channel")
         if not channel:
             continue
-        # 同一渠道出现多条时保留**最新**一条（清单自带 created_at）。
-        current = index.get(channel)
-        if current is None or str(item.get("created_at") or "") >= str(
-            current.get("created_at") or ""
-        ):
-            index[channel] = item
+        if ontology_payload.is_removed(item.get("raw_payload")):
+            continue
+        index.setdefault(channel, []).append(item)
+
+    for items in index.values():
+        items.sort(key=lambda entry: str(entry.get("created_at") or ""))
     return index
 
 
@@ -601,6 +727,36 @@ def _is_empty_container(value: Any) -> bool:
     if isinstance(value, str):
         return not value.strip()
     return value is None
+
+
+def _as_failure_text(value: Any) -> str:
+    """取出失败串的原文（多文件时取第一个命中的），供记录层留痕。"""
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            text = _as_failure_text(item)
+            if text:
+                return text
+        return ""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    return text if _is_transcript_failure(text) else ""
+
+
+def _is_transcript_failure(value: Any) -> bool:
+    """一段转写产出是不是**失败串**（不是原文）。
+
+    只认开头前缀，见 :data:`TRANSCRIPT_FAILURE_PREFIXES`。列表按「任一项命中」判——
+    多文件录音里只要有一个文件是失败串，这条渠道就不该被当成有真实转写。
+    """
+    if isinstance(value, (list, tuple)):
+        return any(_is_transcript_failure(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    return text.startswith(TRANSCRIPT_FAILURE_PREFIXES)
 
 
 def _transcript_parts(value: Any) -> tuple[str, str, list, list]:
@@ -648,7 +804,7 @@ def _transcript_parts(value: Any) -> tuple[str, str, list, list]:
         return "", "", [], []
 
     text = value.strip()
-    if not text or _looks_like_sentinel(text):
+    if not text or _looks_like_sentinel(text) or _is_transcript_failure(text):
         return "", "", [], []
     try:
         parsed = json.loads(text)
@@ -784,9 +940,9 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
     记录形状（``端到端方案.md`` §3.2）::
 
         {record_id, channel, source_name, source_class,
-         status, created_at, content, content_kind}
+         status, created_at, fetched_at, content, content_kind}
 
-    四条判定口径：
+    五条判定口径：
 
     - **清单里没有该 channel ⇒ ``status=exception``**。清单是「有哪些渠道」的唯一事实来源，
       因此「输入里到底有没有录音」由这里说了算。
@@ -794,6 +950,13 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
     - 录音渠道的内容取**逐字原文**；原文缺失时回落压缩报告，并把 ``content_kind``
       标成 ``report``——明确区分「这是原话」与「这是二次加工产物」。
     - 每条记录都带 ``created_at``（清单自带；缺失时为空串，不伪造时间）。
+    - **本体渠道直接由载荷渲染**（:mod:`ontology_payload`），不经子流程；过程资料一条清单
+      记录产出一条 record，不合并——三次跟进合成一段会把「什么时候说了什么」吃掉。
+
+    **``fetched_at`` 与 ``created_at`` 是两件事**（2026-10-31 起随接口提供）：
+    ``created_at`` 是这条资料落库的时刻，``fetched_at`` 是本轮**基础资料整体抓取**的时刻
+    （只有基础渠道与外部补充渠道带）。前者用于排序与时效判定，后者留给增量更新判断
+    「这份数据是哪一轮拉的」。取不到 ``fetched_at`` 时回落 ``created_at``，字段恒有值。
     """
     payload: dict[str, Any] = {}
     if channels_json:
@@ -811,10 +974,21 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
     for spec in CHANNELS:
         source_name = spec["source_name"]
         manifest_channel = spec["manifest_channel"]
-        item = manifest.get(manifest_channel) if manifest_channel else None
+        items = manifest.get(manifest_channel) if manifest_channel else None
+        latest = items[-1] if items else None
+
+        if spec.get("render") == "ontology":
+            records.extend(
+                _ontology_records(
+                    spec,
+                    items or [],
+                    phone_number=phone_number,
+                )
+            )
+            continue
 
         if manifest_channel is not None:
-            present = item is not None
+            present = bool(items)
         else:
             # 无清单背书的渠道：产出非空即视为有内容。
             present = bool(_as_content(contents.get(source_name)))
@@ -824,12 +998,23 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
         content_raw = ""
         role_lines: list = []
         corrections: list = []
+        raw_failure = ""
         if present:
             if source_name in TRANSCRIPT_SOURCES:
-                content, content_raw, role_lines, corrections = _transcript_parts(
-                    transcripts.get(source_name)
-                )
-                if content:
+                transcript_input = transcripts.get(source_name)
+                if _is_transcript_failure(transcript_input):
+                    # 转写链路失败：**不回落报告**。报告由同一路取数产出，转写失败时它
+                    # 只会是一句提示语或空壳；更关键的是「有报告」会让这条渠道重新看起来
+                    # 像有效输入，把一次失败重新伪装成证据。
+                    raw_failure = _as_failure_text(transcript_input)
+                    present = False
+                else:
+                    content, content_raw, role_lines, corrections = _transcript_parts(
+                        transcript_input
+                    )
+                if not present:
+                    content = ""
+                elif content:
                     content_kind = "transcript"
                 else:
                     # 原文缺失才回落压缩报告。报告经过一次 LLM 加工，且「无录音」时
@@ -843,8 +1028,8 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
                 # 媒体渠道（截图/企业/第三方）的正文常常只在清单的 raw_payload 里
                 # （视觉子流程未命中时返回一句「查询异常」的哨兵文本）。清单有实体载荷
                 # 就以它为正文，避免把哨兵当成内容。
-                if item is not None and item.get("raw_payload") is not None:
-                    raw = _as_content(item.get("raw_payload"))
+                if latest is not None and latest.get("raw_payload") is not None:
+                    raw = _as_content(latest.get("raw_payload"))
                     if raw and (not content or _looks_like_sentinel(content)):
                         content = raw
 
@@ -856,7 +1041,10 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
                 "source_name": source_name,
                 "source_class": spec["source_class"],
                 "status": status,
-                "created_at": str((item or {}).get("created_at") or ""),
+                "created_at": str((latest or {}).get("created_at") or ""),
+                # 本轮基础资料的抓取时刻。缺失时回落 created_at，保证恒有值，
+                # 增量侧不必到处判空。
+                "fetched_at": _fetched_at_of(latest),
                 "content": content,
                 "content_kind": content_kind,
                 # 录音的**未标注**六字段原文。角色标注与勘误都可能出错，而正文一经改写
@@ -866,6 +1054,9 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
                 # 与投影层的证据标注使用；二者都只对录音渠道非空。
                 "role_lines": role_lines,
                 "corrections": corrections,
+                # 转写失败时的原始失败串。**不是内容**：它只用于排查「为什么这条渠道是
+                # 空的」，任何下游都不得把它当证据读。非失败情形为空串。
+                "raw_failure": raw_failure,
             }
         )
 
@@ -874,6 +1065,83 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
         "records_count": len(records),
         "exception_count": sum(1 for r in records if r["status"] == EXCEPTION),
     }
+
+
+def _ontology_records(
+    spec: dict, items: list[dict], *, phone_number: str
+) -> list[dict[str, Any]]:
+    """本体渠道 → 记录列表。
+
+    ``multi`` 决定多条清单记录怎么用：
+
+    - ``latest``（基础渠道）：``raw_payload.records`` 是**本轮全量读取**，多轮之间是快照
+      关系而不是增量，因此只取最新一轮，避免同一份资料按批次重复计数；
+    - ``all``（过程资料）：每条就是一条独立事实（一次跟进、一笔订单），全留。
+
+    无记录时仍产出一条 ``exception`` 记录：清单是「有没有」的唯一事实来源，缺失本身要留痕。
+    """
+    channel = spec["manifest_channel"]
+    if spec.get("multi") == "all":
+        chosen = list(items)
+        numbered = len(chosen) > 1
+    else:
+        chosen = items[-1:]
+        numbered = False
+
+    if not chosen:
+        return [
+            {
+                "record_id": f"rec_{channel}_{phone_number}",
+                "channel": channel,
+                "source_name": spec["source_name"],
+                "source_class": spec["source_class"],
+                "status": EXCEPTION,
+                "created_at": "",
+                "fetched_at": "",
+                "content": "",
+                "content_kind": spec["content_kind"],
+                "content_raw": "",
+                "role_lines": [],
+                "corrections": [],
+                "raw_failure": "",
+            }
+        ]
+
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(chosen, start=1):
+        raw_payload = item.get("raw_payload")
+        text = ontology_payload.render_payload(channel, raw_payload)
+        suffix = f"_{index}" if numbered else ""
+        result.append(
+            {
+                "record_id": f"rec_{channel}_{phone_number}{suffix}",
+                "channel": channel,
+                "source_name": spec["source_name"],
+                "source_class": spec["source_class"],
+                "status": OK if text else EXCEPTION,
+                "created_at": str(item.get("created_at") or ""),
+                "fetched_at": _fetched_at_of(item),
+                "content": text,
+                "content_kind": spec["content_kind"],
+                "content_raw": "",
+                "role_lines": [],
+                "corrections": [],
+                "raw_failure": "",
+            }
+        )
+    return result
+
+
+def _fetched_at_of(item: dict | None) -> str:
+    """取记录的抓取时刻：``raw_payload.fetched_at`` → 记录级 ``created_at`` → 空串。"""
+    if not isinstance(item, dict):
+        return ""
+    raw_payload = item.get("raw_payload")
+    if isinstance(raw_payload, dict):
+        fetched = str(raw_payload.get("fetched_at") or "").strip()
+        if fetched:
+            return fetched
+    return str(item.get("created_at") or "")
 
 
 SENTINEL_MARKERS: tuple[str, ...] = (
@@ -903,6 +1171,25 @@ def _looks_like_sentinel(text: str) -> bool:
     return any(marker in candidate for marker in SENTINEL_MARKERS)
 
 
+def _is_usable_record(record: dict) -> bool:
+    """一条记录是否构成「可用证据」。
+
+    **``status=ok`` 且有内容 ≠ 有证据。** 转写失败串非空、也被记录层标成
+    ``content_kind=transcript``，若只看这两项，一次取数失败会被当成一手录音，
+    进而把案件判成 ``sufficient``、把报错文本送进提示词——首轮失败的起点。
+
+    判据与记录层同源（:func:`_is_transcript_failure` / ``raw_failure`` 字段），
+    分诊层、取证输入包、记录层三处必须给出同一结论。
+    """
+    if record.get("status") != OK:
+        return False
+    if not (record.get("content") or "").strip():
+        return False
+    if record.get("raw_failure"):
+        return False
+    return not _is_transcript_failure(record.get("content"))
+
+
 def triage(records_json) -> dict:
     """L4 分诊层（纯代码）：判定本案素材是否足以走事实流程。
 
@@ -922,8 +1209,12 @@ def triage(records_json) -> dict:
     except (ValueError, TypeError):
         records = []
 
-    usable = [r for r in records if r.get("status") == OK and (r.get("content") or "").strip()]
+    usable = [r for r in records if _is_usable_record(r)]
     primary = [r for r in usable if r.get("source_class") == PRIMARY_INTERACTION]
+    failed = [
+        r for r in records
+        if r.get("raw_failure") or _is_transcript_failure(r.get("content"))
+    ]
 
     if primary:
         tier = "sufficient"
@@ -935,10 +1226,17 @@ def triage(records_json) -> dict:
         tier = "empty"
         reason = "全部渠道无实质内容"
 
+    if failed:
+        # 失败要在判档理由里说出来：否则「掉了 thin」会被误读成「这个客户本来就没资料」，
+        # 而真实原因是取数链路坏了。这是首轮把噪声当基线的最直接教训。
+        names = ", ".join(str(r.get("source_name") or "") for r in failed)
+        reason = f"{reason}；转写失败：{names}（该渠道不计为证据）"
+
     return {
         "tier": tier,
         "tier_reason": reason,
         "usable_count": len(usable),
+        "transcript_failures": [str(r.get("source_name") or "") for r in failed],
     }
 
 
@@ -964,11 +1262,9 @@ def build_evidence_input(records_json, tier: str = "sufficient") -> dict:
     for spec in CHANNELS:
         source_name = spec["source_name"]
         for record in records:
-            if record.get("source_name") != source_name or record.get("status") != OK:
+            if record.get("source_name") != source_name or not _is_usable_record(record):
                 continue
             content = (record.get("content") or "").strip()
-            if not content:
-                continue
             # 同一渠道既可能有原文又可能有报告（录音）：原文优先。
             existing = package.get(source_name)
             if existing and record.get("content_kind") == "report":
@@ -1037,7 +1333,7 @@ def merge_l1_layers(facts_json, fields_json) -> dict:
     **为什么需要这一层**（v3 三分层的接线遗漏，见 ``L1_MERGE`` 常量说明）：
     三层把原先「一次直出全部字段」拆成「1a 出硬事实 + 1c 补推断」。1c 提示词明说
     「事实清单已经给了的字段，你不用重复」，两层因此是**互补**而非重叠——若不合并，
-    1a 检出的事实（``intended_brand=埃安`` 这类带原文锚点的 ``fact``）根本不进账本，
+    1a 检出的事实（``intended_brand=某某`` 这类带原文锚点的 ``fact``）根本不进账本，
     在最终 Notes 里直接变空值。实测 8 案：1a=90 / 1c=156 / 重叠仅 6 / 仅 1a 有 84。
 
     **同字段两边都有时的取舍**：按 ``basis`` 档位取更硬的一条（``fact`` >
@@ -1356,12 +1652,27 @@ def field_inference_guide() -> str:
 
 
 def l1_guide() -> str:
-    """L1 输入的前置清单：先《字段清单》，再《合法取值清单》。"""
-    return field_inference_guide() + "\n\n" + enum_key_guide()
+    """L1 输入的前置清单：先《字段清单》，再《合法取值清单》，最后**全局规则**。
+
+    全局规则（``scope=("*",)``）没有归属字段，不能贴进《字段清单》某一行，因此单列一
+    段放在最后。放在**记录正文之前**、字段清单之后：它与取值域约束同一性质，且必须
+    让记录原文仍是模型最后读到的内容（见 :func:`build_l1_input` 的 R1 实测说明）。
+
+    ``SPEC-19``（多来源冲突的取舍次序）就是靠这一条通道才真正到得了模型——此前它只
+    写在参考标准表的展示列里，提示词渲染不到，等于没写。
+    """
+    parts = [field_inference_guide(), enum_key_guide()]
+    globals_text = rules.render.global_notes(stage="extract")
+    if globals_text:
+        parts.append("## 多来源冲突的取舍次序\n\n" + globals_text)
+    return "\n\n".join(parts)
 
 
-def build_l1_input(records_json) -> dict:
+def build_l1_input(records_json, kb_brief: str = "") -> dict:
     """L1 取证层的输入装配：把有内容的渠道排成分节文本。
+
+    ``kb_brief`` 是知识库渲染的《本方品牌与在售车型》（K3）。**缺省空串**——
+    未接知识包时输出与接入前逐字节相同，既有用例与直接调用都不受影响。
 
     与 ``build_evidence_input`` 的分工：那个交给既有「证据线索整理」提示词（A-E 五级
     证据口径），本函数交给 L1 断言账本提示词，因此要多带两样东西——
@@ -1393,8 +1704,13 @@ def build_l1_input(records_json) -> dict:
             f"来源分级：{proj.TIER_LABEL[tier]}",
             f"记录编号：{record.get('record_id') or ''}",
         ]
+        fetched_at = str(record.get("fetched_at") or "").strip()
         created_at = str(record.get("created_at") or "").strip()
-        if created_at:
+        if fetched_at:
+            header.append(f"采集时间：{fetched_at}")
+            if created_at and created_at != fetched_at:
+                header.append(f"记录时间：{created_at}")
+        elif created_at:
             header.append(f"采集时间：{created_at}")
         header.append(f"内容形态：{record.get('content_kind') or 'text'}")
         # 录音的说话方分区：**放在分节头里、不插进正文**。插进正文会让 L1 抄锚点时
@@ -1412,12 +1728,34 @@ def build_l1_input(records_json) -> dict:
     # Ms=女士`）会诱导模型把 anchor 也写成同样短的裸串（R0 中位锚长 16 → R1 的 6），
     # 导致大量正确断言被长度门丢弃。改置开头，让**记录原文仍是最后读到的内容**。
     guide = l1_guide()
+    if kb_brief:
+        # 《本方品牌与在售车型》紧跟在字段清单之后、记录正文之前：
+        # 它是「取值域」的约束，与《合法取值清单》同一性质，因此排在同类位置。
+        guide = f"{guide}\n\n{kb_brief}"
     output = f"{guide}\n\n---\n\n{body}" if body else guide
     return {
         "output": output,
         "section_count": len(sections),
         "chars": len(output),
         "guide_chars": len(guide),
+    }
+
+
+def build_kb_brief() -> dict:
+    """K3：把知识包渲染成《本方品牌与在售车型》，供 L1 做归属判断与意向车型闭集。
+
+    **空包时输出空串**，``build_l1_input`` 随之逐字节回到接入知识前的形态——
+    这是刻意的回滚口（``KNOWLEDGE_PACK`` 置空即完全退出知识能力）。
+    """
+    from .. import knowledge
+
+    pack = knowledge.current_pack()
+    text = knowledge.views.render_brand_brief(pack) if not pack.is_empty else ""
+    return {
+        "output": text,
+        "chars": len(text),
+        "model_count": len(pack.models),
+        "pack_id": pack.pack_id,
     }
 
 
@@ -1617,14 +1955,27 @@ def _has_test_drive(records: list[dict]) -> bool:
 
 
 def _has_old_car(claims: list[dict]) -> bool:
-    """断言里是否存在「有旧车 / 要置换」的旁证（与 :func:`_projection_context` 同口径）。"""
+    """断言里是否存在「有旧车 / 要置换」的旁证（与 :func:`_projection_context` 同口径）。
+
+    **占位值不算凭据**。此前这里只看 ``_blank_value``（只认空串），于是
+    ``old_car_model="未知"``、``trade_in_requirement="no"`` 都被当成「有旧车」，
+    进而注入 ``driver_license_status=yes``（``basis=fact``、置信 0.95）——凭一个
+    什么都没说的取值，给客户记上一条事实级结论。实测 15972379760 就是这样多出
+    「有驾照」的。
+
+    投影层（:func:`_projection_context`）早已按 :func:`hard_rules.is_placeholder`
+    排除占位值，两处判据必须同形：否则同一张卡上会同时出现「无旧车」与「有驾照」。
+    """
     for claim in claims:
         attribute = str(claim.get("attribute") or "")
-        if attribute in OLD_CAR_ATTRIBUTES and not _blank_value(claim.get("value")):
+        value = claim.get("value")
+        if _blank_value(value) or _is_placeholder_value(value):
+            continue
+        if attribute in OLD_CAR_ATTRIBUTES:
             return True
         if attribute != "trade_in_requirement":
             continue
-        text = json.dumps(claim.get("value"), ensure_ascii=False, default=str).lower()
+        text = json.dumps(value, ensure_ascii=False, default=str).lower()
         if "yes" in text or any(marker in text for marker in TRADE_IN_MARKERS):
             return True
     return False
@@ -1930,11 +2281,40 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
                 confidence=_num(raw.get("confidence")),
             )
         )
+    # rule: KB-02 意向车型必须取自本方在售清单
+    # ---- K5 意向车型闭集（在**投影之前**校正归属）
+    #      放在这里而不是投影层内部：分流要改的是「这条断言该归到哪个字段」，
+    #      投影层只看得到已落定的字段值，看不到客户到底说了什么。放这里还有一个
+    #      副作用是好的——``projection.py`` 完全不知道知识库存在，它的单测也不受
+    #      知识配置影响。
+    intent_outcome = None
+    if "KB-02" not in _disabled_rule_ids():
+        from .. import knowledge
+
+        pack = knowledge.current_pack()
+        if not pack.is_empty:
+            intent_outcome = knowledge.intent.reroute_claims(ledger, pack)
+            ledger = list(intent_outcome.claims)
+
     result = proj.project(
         ledger,
         context=_projection_context(ledger),
         disabled_rules=_disabled_rule_ids(),
     )
+
+    if intent_outcome is not None and intent_outcome.touched:
+        # 留痕与转确认都**追加**，不替换：投影层自己的 rejected/to_confirm 照旧保留。
+        result.rule_trace.extend(intent_outcome.as_trace())
+        result.to_confirm.extend(intent_outcome.to_confirm)
+        for item in intent_outcome.dropped:
+            result.rejected.append(
+                {
+                    "attribute": knowledge.intent.INTENDED,
+                    "value": item.get("value"),
+                    "rule": "kb_not_on_sale",
+                    "reason": item.get("reason", ""),
+                }
+            )
 
     updates = result.notes_updates
     # 姓名条目在任何档位都保留：「未知」或白名单来源的真名都必须交代给销售，
@@ -1973,6 +2353,14 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
         # 字段级置信档。L3 校验据此区分「写成确定值却没有依据」（要拦）与
         # 「已明确降级为 inferred_low 的软值」（要放行）——两者在 facts 里长得一样。
         "basis_json": json.dumps(result.basis, ensure_ascii=False, default=str),
+        # 字段 → 胜出断言所在渠道。gate 的 HARD-03 要判「标为事实却指不出原文、
+        # 也不是登记档」，缺了渠道就只能判一半。单独交一份映射而**不写进 Notes 条目**：
+        # 条目三键形状是下游契约，不能为了一个判据改产物。
+        "channels_json": json.dumps(
+            proj.channel_by_attribute(result, proj.group_by_attribute(ledger)),
+            ensure_ascii=False,
+            default=str,
+        ),
         "notes_count": len(updates),
         # R2 覆盖 KPI：L1 发了却没给出取值的字段名。空值占位不再静默通过——
         # 计出来才知道「L1 漏了多少字段」，而不是把它伪装成「字段确实没内容」。
@@ -1994,6 +2382,7 @@ async def enum_map(
     to_confirm_json="[]",
     candidates_json="[]",
     basis_json="{}",
+    channels_json="{}",
     llm=None,
     templates=None,
     enabled=None,
@@ -2047,6 +2436,8 @@ async def enum_map(
             # 映射**不动置信档**：语义映射是一次有依据的猜测，不是客户原话。升档会把
             # 「模型替你改的写法」伪装成已坐实的事实。
             "basis_json": _dump(basis),
+            # 渠道映射原样透传：映射节点只改枚举取值，不改「证据来自哪条渠道」。
+            "channels_json": channels_json,
             "rule_trace_json": _dump(final_traces),
             "enum_map_status": status,
             "enum_map_mapped": len(applied or ()),
@@ -2230,8 +2621,8 @@ def _illegal_enum_values(facts, notes) -> dict[str, list[str]]:
             # 与送检前的过滤**同判据**（`_needs_mapping`）：本地能翻的、占位串、
             # 换字段能救的、废弃键形态都不该报「无法归入可选范围」——它们各自有归属，
             # 报了只会让销售去核对一基本就正确的字段（2026-10-28 实测：`本科`、
-            # `首购`、`暂无置换需求` 都被误报）。契约缺口例外：本地也翻不了，且业务方
-            # 需要知道缺键，必须报。
+            # `首购`、`暂无置换需求` 都被误报）。契约缺口例外：本地也翻不了，必须报。
+            # 微信不加键已由业务方 2026-10-29 定论，销售侧仍需知道这一格有值待补。
             if not enum_mapping._is_contract_gap(attribute, item):
                 if not enum_mapping._needs_mapping(attribute, item):
                     continue
@@ -2324,7 +2715,7 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
     }
 
 
-def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
+def review_notes(notes_updates_json, facts_json, basis_json="{}", channels_json="{}") -> dict:
     """L2 审查核验层（纯代码，0 token）：对 L1/L2 产出做合规性复核，并**执行**判决。
 
     原实现只记 ``issue``——判出违规照样进最终 Notes，蓝图 §2.2 称之为「能判但不拦」。
@@ -2353,6 +2744,7 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
 
     facts = _loads_object(facts_json)
     basis = _loads_object(basis_json)
+    channels = _loads_object(channels_json)
     table = rules.default()
     disabled = _disabled_rule_ids()
     if disabled:
@@ -2371,6 +2763,7 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}") -> dict:
         legal_keys=inf.legal_keys,
         display_to_key=inf.display_to_key,
         is_enum_key=inf.looks_like_enum_key,
+        channels=channels,
     ) + expression_rules.check_evidence(
         state.notes, is_conclusion=proj._is_conclusion
     ) + expression_rules.check_prose_keys(
@@ -2638,8 +3031,13 @@ def _level_record_sections(records: list[dict]) -> list[str]:
             f"## {source_name}",
             f"记录编号：{record.get('record_id') or ''}",
         ]
+        fetched_at = str(record.get("fetched_at") or "").strip()
         created_at = str(record.get("created_at") or "").strip()
-        if created_at:
+        if fetched_at:
+            header.append(f"采集时间：{fetched_at}")
+            if created_at and created_at != fetched_at:
+                header.append(f"记录时间：{created_at}")
+        elif created_at:
             header.append(f"采集时间：{created_at}")
         header.append(f"内容形态：{record.get('content_kind') or 'text'}")
         sections.append("\n".join(header) + "\n\n" + str(record.get("content")))
@@ -2973,7 +3371,7 @@ WORKFLOW = WorkflowDef(
                 "@outputs": {"body": "$text", "status": "$status"},
             },
         ),
-        # ---------------------------------------------------------- 取数层（14 路）
+        # ---------------------------------------------------------- 取数层
         _tool(MOMENTS, "朋友圈信息提取", MOMENTS_PURE, "WeChatMomentsScreenshot"),
         _tool(
             WECHAT_SEARCH,
@@ -2987,7 +3385,7 @@ WORKFLOW = WorkflowDef(
             OUTBOUND_CALL,
             "外呼录音信息提取",
             OUTBOUND_CALL_PURE,
-            "AIOutboundCallRecordingFile",
+            "OntologyManualOutboundCallRecordingFile",
         ),
         _tool(ALIPAY, "支付宝个人页信息提取", "alipay_homepage", "AlipayPersonalPageScreenshot"),
         _tool(
@@ -3011,18 +3409,14 @@ WORKFLOW = WorkflowDef(
             },
         ),
         _tool(JIGUANG, "极光数据", "jiguang_data", "DatametInterestPoints"),
-        _tool(
-            MENGSHI_IT,
-            "猛士IT系统数据信息",
-            "mengshi_it_system_data",
-            "MengShiITSystemData",
-            outputs=("IT_customer_info", "IT_json_data"),
-        ),
+        # 2026-10-31 接口改版：``MengShiITSystemData`` 渠道已由业务方确认移除，
+        # 原「猛士IT系统数据信息」这一路取数随之摘除；它的字段语义由本体渠道
+        # （``OntologyLeadInfo`` 等）承接，直接由记录层渲染，不再走子流程。
         _tool(
             CHAT_HISTORY,
             "聊天记录数据信息",
             "chat_history_data",
-            "MengShiCustomerChatInfo",
+            "OntologyCustomerChatInfo",
         ),
         _tool(
             FEEDBACK,
@@ -3070,7 +3464,6 @@ WORKFLOW = WorkflowDef(
                 DOUYIN,
                 LOCKED_NOTES,
                 JIGUANG,
-                MENGSHI_IT,
                 CHAT_HISTORY,
                 FEEDBACK,
                 PHONE_COMPANY,
@@ -3089,7 +3482,6 @@ WORKFLOW = WorkflowDef(
                 "douyin": (DOUYIN, "result"),
                 "locked_notes": (LOCKED_NOTES, "result"),
                 "jiguang": (JIGUANG, "result"),
-                "mengshi_it": (MENGSHI_IT, "IT_customer_info"),
                 "chat_history": (CHAT_HISTORY, "result"),
                 "feedback": (FEEDBACK, "result"),
                 "phone_company": (PHONE_COMPANY, "company_analysis_result"),
@@ -3126,12 +3518,27 @@ WORKFLOW = WorkflowDef(
         # 1a 事实提取 → 1b 人设画像 → 1c 分析投影 → 代码定坐标（设计稿 §3）。
         # 三层直接用绑定组装输入（``{{ arg1 }} {{ arg2 }} {{ arg3 }}``），不再插装配代码节点：
         # LLM 执行器本就支持多入参模板渲染，多插一层只是多一处失败点。
+        # ---------------------------------------------------------- 知识库视图（K3，0 token）
+        # 在 L1 之前生成，供输入装配拼进《本方品牌与在售车型》。单独成节点而不是在
+        # ``build_l1_input`` 里直接读知识包，是为了让「知识用没用上」在节点产物里可见：
+        # 排查「客户说要买 X 却没进 Notes」时，首先要确认的就是这一段有没有生成。
+        make_node(
+            KB_BRIEF,
+            "知识库·本方品牌与在售车型",
+            "code",
+            after=(L0_RECORDS,),
+            outputs=("output", "chars", "model_count", "pack_id"),
+            function=f"customer_profile.workflows.{SLUG}:build_kb_brief",
+        ),
         make_node(
             L1_INPUT,
             "L1 取证输入装配",
             "code",
-            after=(L0_RECORDS,),
-            inputs={"records_json": (L0_RECORDS, "records_json")},
+            after=(L0_RECORDS, KB_BRIEF),
+            inputs={
+                "records_json": (L0_RECORDS, "records_json"),
+                "kb_brief": (KB_BRIEF, "output"),
+            },
             outputs=("output", "section_count", "chars", "guide_chars"),
             function=f"customer_profile.workflows.{SLUG}:build_l1_input",
         ),
@@ -3325,6 +3732,7 @@ WORKFLOW = WorkflowDef(
                 "to_confirm_json": (L2_PROJECT, "to_confirm_json"),
                 "candidates_json": (L2_PROJECT, "candidates_json"),
                 "basis_json": (L2_PROJECT, "basis_json"),
+                "channels_json": (L2_PROJECT, "channels_json"),
             },
             outputs=(
                 "facts_json",
@@ -3334,6 +3742,7 @@ WORKFLOW = WorkflowDef(
                 "to_confirm_json",
                 "candidates_json",
                 "basis_json",
+                "channels_json",
                 "rule_trace_json",
                 "enum_map_status",
                 "enum_map_mapped",
@@ -3357,6 +3766,7 @@ WORKFLOW = WorkflowDef(
                 "notes_updates_json": (L2_ENUM_MAP, "notes_updates_json"),
                 "facts_json": (L2_ENUM_MAP, "facts_json"),
                 "basis_json": (L2_ENUM_MAP, "basis_json"),
+                "channels_json": (L2_ENUM_MAP, "channels_json"),
             },
             outputs=(
                 "notes_updates_json",
@@ -3523,6 +3933,11 @@ WORKFLOW = WorkflowDef(
                 # 表达层的 section 产物（resistances / emotion_state / overall_tag 从这里取）。
                 # ``result1`` 是**字符串**：由 callback_build 内部二次解析。
                 "express_json": (PRODUCTION, "result1"),
+                # L1 定稿的断言账本：画像卡上大量字段（心理画像三项、当前用车、换车动因）
+                # 不在 Notes 契约内、或被 thin 档清空，Notes 里没有它们的条目。这里把它们的
+                # ``reasoning_chain`` 与 ``basis_of_inference`` 送到出口，卡片才写得出
+                # 销售读得懂的推导链（2026-10-29 可读性整改）。
+                "claims_json": (L1_INJECT, "claims_json"),
             },
             outputs=("callback_json",),
             # 指向 ``main`` 而不是 ``build_analysis_result``：后者返回的是 JSON **字符串**，
@@ -3587,6 +4002,7 @@ CODE_SPECS: dict[str, dict] = {
     CHANNEL_BUNDLE: {"main": "bundle_channels", "renames": {}},
     L0_RECORDS: {"main": "build_records", "renames": {}},
     L4_TRIAGE: {"main": "triage", "renames": {}},
+    KB_BRIEF: {"main": "build_kb_brief", "renames": {}},
     L1_INPUT: {"main": "build_l1_input", "renames": {}},
     L1_MERGE: {"main": "merge_l1_layers", "renames": {}},
     L1_LOCALIZE: {"main": "localize_claims", "renames": {}},

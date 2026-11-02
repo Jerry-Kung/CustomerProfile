@@ -39,7 +39,7 @@ def note(key, value, *, evidence=None, channel=""):
     }
 
 
-def gate_actions(entries, basis=None):
+def gate_actions(entries, basis=None, channels=None):
     """按 gate 层的真实入参调 HARD 簇，返回动作（不执行）。"""
     return hard_rules.check_notes(
         entries,
@@ -49,6 +49,7 @@ def gate_actions(entries, basis=None):
         legal_keys=inf.legal_keys,
         display_to_key=inf.display_to_key,
         is_enum_key=inf.looks_like_enum_key,
+        channels=dict(channels or {}),
     )
 
 
@@ -248,3 +249,41 @@ def test_rules_disabled_is_empty_by_default(monkeypatch):
         json.dumps([note("hobbies", "未提供")], ensure_ascii=False), "{}", "{}"
     )
     assert json.loads(result["notes_updates_json"]) == []
+
+
+# ---------------------------------------------------------------- 渠道输入的来路
+
+def test_registry_channel_from_external_map_needs_no_quote():
+    """登记档渠道由**外部映射**提供时，同样不需要原文锚点。
+
+    投影层只往 Notes 条目写三键（``attribute_key`` / ``attribute_value`` /
+    ``reasoning_detail``），条目上根本没有 ``record_channel``。gate 若只读条目，
+    渠道恒为空，登记档豁免就永远不生效——首轮补 ``REGISTRY_CHANNELS`` 却无效，
+    根因正在这里。
+    """
+    actions = gate_actions(
+        [note("company", "某某电力局")],
+        basis={"company": "fact"},
+        channels={"company": "销售人员人工确认的客户Notes信息"},
+    )
+    assert actions == []
+
+
+def test_injected_channel_is_registry_tier():
+    """确定性注入渠道按登记档处理：取值由代码按入参/试驾定，本就不存在原文锚点。"""
+    actions = gate_actions(
+        [note("driver_license_status", '{"key": "yes", "input_value": ""}')],
+        basis={"driver_license_status": "fact"},
+        channels={"driver_license_status": "试驾与置换记录"},
+    )
+    assert actions == []
+
+
+def test_unknown_channel_fact_still_downgraded():
+    """反例：渠道既不是登记档、证据也没有原文标记时，照常降档。"""
+    actions = gate_actions(
+        [note("company", "某某电力局")],
+        basis={"company": "fact"},
+        channels={"company": "第三方画像数据"},
+    )
+    assert [a.rule for a in actions] == ["HARD-03"]

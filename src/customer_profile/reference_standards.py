@@ -259,6 +259,12 @@ def build_rows() -> list[dict[str, Any]]:
                 continue
             rule_scope.setdefault(field, []).append(payload)
 
+    # 「标准推理路径」列**现读提示词正文**（2026-10-30）。
+    # 此前这一列只有个空壳字段，页面显示「暂无附加口径」，而业务方以为写进去的口径
+    # 会到模型那里——实际上它连渲染路径都没有。现在直接取 L1 真正读到的那一段：
+    # 同一句话只有一个出处，改规则时不会出现「页面写了、提示词没变」。
+    field_texts = rule_render.field_notes(stage="extract")
+
     rows: list[dict[str, Any]] = []
     for item in FIELDS:
         key = item.attribute_key
@@ -275,7 +281,9 @@ def build_rows() -> list[dict[str, Any]]:
                 "admission_label": ADMISSION_LABELS[item.admission],
                 "admission_hint": ADMISSION_HINTS[item.admission],
                 "output_mode": _output_mode(key),
-                "reasoning_path": item.reasoning_path,
+                # 手写口径优先（业务方逐字段下达时写进 FieldStandard），
+                # 否则现读该字段的提示词正文。
+                "reasoning_path": item.reasoning_path or field_texts.get(key, ""),
                 "forbidden": item.forbidden,
                 "note": item.note,
                 "rules": _rules_for(rule_scope, key),
@@ -286,7 +294,10 @@ def build_rows() -> list[dict[str, Any]]:
 
 def build_payload() -> dict[str, Any]:
     """页面接口的返回体：行数据 + 规模统计 + 契约版本。"""
+    from .rules import render as rule_render
+
     rows = build_rows()
+    global_text = rule_render.global_notes(stage="extract")
     by_mode = {mode: 0 for mode in ADMISSION_MODES}
     for row in rows:
         by_mode[row["admission"]] += 1
@@ -296,6 +307,9 @@ def build_payload() -> dict[str, Any]:
         "by_admission": by_mode,
         "admission_labels": ADMISSION_LABELS,
         "rows": rows,
+        # 全局规则（``scope=("*",)``）**单独成块**：它们不贴任何字段，塞进某一行就等于
+        # 给它编造归属。这一块与 L1 提示词里那一段逐字同源。
+        "global_rules": global_text,
     }
 
 

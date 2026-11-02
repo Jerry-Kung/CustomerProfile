@@ -1,0 +1,105 @@
+{
+  "_comment": "品牌名残留守卫的豁免清单（T3-1）。每条必须是「路径 + 品牌 + 理由」三元组。按路径整体豁免会让该文件里任何新品牌名一并放行，因此一律成对声明。过期豁免同样会被守卫报出来——文件里的品牌名删了、条目留着，日后同位置再写回来就没人拦。",
+  "exemptions": [
+    {
+      "path": "src/customer_profile/knowledge/common/invite_strategy.json",
+      "brand": "比亚迪",
+      "reason": "AI触发标签里的竞品举例。拍板第二条明确要求「去品牌化但保留竞品名」，删掉会让策略的匹配条件失去意义"
+    },
+    {
+      "path": "src/customer_profile/knowledge/common/invite_strategy.json",
+      "brand": "特斯拉",
+      "reason": "同上：竞品名按拍板保留，不是合作方品牌泄漏"
+    },
+    {
+      "path": "src/customer_profile/knowledge/common/invite_strategy.json",
+      "brand": "小鹏",
+      "reason": "同上：竞品名按拍板保留"
+    },
+    {
+      "path": "src/customer_profile/notes_contract.py",
+      "brand": "方程豹",
+      "reason": "competing_brand 字段描述里的举例，来自业务方的字段契约原文，本次不改契约"
+    },
+    {
+      "path": "src/customer_profile/notes_contract.py",
+      "brand": "坦克",
+      "reason": "competing_brand / competing_model 字段描述里的举例，契约原文"
+    },
+    {
+      "path": "src/customer_profile/notes_contract.py",
+      "brand": "豹8",
+      "reason": "competing_model 字段描述里的举例，契约原文"
+    },
+    {
+      "path": "src/customer_profile/notes_contract.py",
+      "brand": "猛士",
+      "reason": "多选字段的对外展示名「了解猛士」取自业务方契约（attribute_name），改了会与回传约定不一致"
+    },
+    {
+      "path": "src/customer_profile/workflows/mengshi_it_system_data.py",
+      "brand": "猛士",
+      "reason": "「猛士IT系统」是内部数据渠道名，工作流标识与 DISPLAY_NAME 都叫这个，改名会动到节点 ID 与回放数据"
+    },
+    {
+      "path": "src/customer_profile/workflows/evidence_subagent.py",
+      "brand": "猛士",
+      "reason": "同上：证据子流程里挂载的「猛士IT系统数据信息」是渠道名，同时出现在流程图注释里"
+    },
+    {
+      "path": "src/customer_profile/workflows/customer_profile_pipeline.py",
+      "brand": "猛士",
+      "reason": "同上：管线里该 tool 节点的显示名是渠道名"
+    },
+    {
+      "path": "src/customer_profile/workflows/shared_code.py",
+      "brand": "猛士",
+      "reason": "同上：注释说明该取值函数服务于哪些渠道，含渠道名"
+    },
+    {
+      "path": "src/customer_profile/templates/audio_content_extract__1773135369428.txt",
+      "brand": "猛士",
+      "reason": "LLM 节点「1773135369428 LLM 识别结果校对」的提示词正文，运行期生效。「猛士」出现在提示词自带的 ASR 示例输入里，是讲解输出格式用的样例，不是客户数据；正文属资源文件，改写会改变模型行为"
+    },
+    {
+      "path": "src/customer_profile/templates/audio_content_extract__17732152003520.txt",
+      "brand": "猛士",
+      "reason": "LLM 节点「17732152003520 LLM 内容有效性判断」的提示词正文，运行期生效。「猛士」同样只出现在示例转写文本里"
+    },
+    {
+      "path": "src/customer_profile/templates/chat_history_data__1778809002515.txt",
+      "brand": "猛士",
+      "reason": "LLM 节点「1779672287769 数据深度清洗」的提示词正文，缺省业务臂每次带聊天记录都会走到。「猛士」出现在清洗示例里，不是客户数据；删除会让该节点运行期找不到模板"
+    },
+    {
+      "path": "src/customer_profile/invitation_context.py",
+      "brand": "猛士",
+      "reason": "邀约上下文 brief 里写死的对客销售身份。2026-10-30 业务确认「邀约话术统一猛士品牌」，首邀与二次邀约的销售身份都是猛士；改成从知识包读取会与邀约模板口径脱钩"
+    },
+    {
+      "path": "src/customer_profile/templates/invitation__1780473244130.txt",
+      "brand": "猛士",
+      "reason": "LLM 节点「首邀策略」提示词正文，运行期生效。2026-10-30 业务确认将首邀销售身份统一为猛士（修订另记 runtime_revision），正文里的品牌名是销售身份与门店口径，不是竞品泄漏"
+    },
+    {
+      "path": "src/customer_profile/templates/invitation__17821167995750.txt",
+      "brand": "猛士",
+      "reason": "LLM 节点「通话总结与待办事项提取」提示词正文，运行期生效。「猛士」只出现在客户原话风格示例里，属客户自述内容样例，不是提示词自造的品牌口径"
+    },
+    {
+      "path": "src/customer_profile/templates/invitation__17821186748980.txt",
+      "brand": "猛士",
+      "reason": "LLM 节点「二次邀约策略」提示词正文，运行期生效。2026-10-30 业务确认将二次邀约销售身份统一为猛士（修订另记 runtime_revision），正文里的品牌名是销售身份与门店口径，不是竞品泄漏"
+    },
+    {
+      "path": "src/customer_profile/templates/invitation_audio__1773135369428.txt",
+      "brand": "猛士",
+      "reason": "LLM 节点「LLM 识别结果校对」的提示词正文，运行期生效。「猛士」出现在提示词自带的 ASR 示例转写「猛士汽车总部线上体验顾问」里，是讲解输出格式用的样例，不是客户数据"
+    },
+    {
+      "path": "src/customer_profile/templates/invitation_audio__17732152003520.txt",
+      "brand": "猛士",
+      "reason": "LLM 节点「录音无效性判断」的提示词正文，运行期生效。「猛士」同样只出现在输入格式示例的 ASR 示例转写里，与校对节点的示例同源，不是客户数据"
+    }
+  ]
+}

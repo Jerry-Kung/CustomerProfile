@@ -36,8 +36,10 @@ def _express(**sections) -> str:
     return json.dumps({"analysis_result": sections}, ensure_ascii=False)
 
 
-def _build(facts="{}", notes="[]", express="{}"):
-    return json.loads(cb.build_analysis_result("13500000000", "b-1", facts, notes, express))
+def _build(facts="{}", notes="[]", express="{}", claims="{}"):
+    return json.loads(
+        cb.build_analysis_result("13500000000", "b-1", facts, notes, express, claims)
+    )
 
 
 def _categories(result) -> dict[str, list[dict]]:
@@ -497,6 +499,213 @@ def test_detail_reuses_the_notes_wording_for_the_same_field():
     items = _categories(_build(facts=_facts(core_concerns="fuel_efficiency"), notes=notes))["核心关注"]
     assert items[0]["reasoning_detail"]["summary"] == "客户反复问油耗"
     assert items[0]["reasoning_detail"]["confidence"] == 0.9
+
+
+# ---------------------------------------------------------------- 断言账本兜底（2026-10-29）
+
+def _claims(*entries) -> str:
+    return json.dumps({"fields": list(entries)}, ensure_ascii=False)
+
+
+def test_card_uses_claim_reasoning_chain_when_notes_have_no_entry():
+    """Notes 里没有该字段的条目时，卡片从**断言账本**取推导链，而不是退回审计话。
+
+    心理画像的三项来自 ``personality_and_preferences`` / ``communication_rhythm`` /
+    ``emotion``，这三个字段不在 Notes 契约内，Notes 永远不会有它们的条目。改造前
+    卡片对它们只能写「由上游已定稿的事实直接给出，未作二次推断」——销售读不懂。
+    它们的推导链一直存在于 L1 的 ``reasoning_chain`` 里，``claims_json`` 就是通道。
+    """
+    payload = _build(
+        facts=_facts(personality_and_preferences="rational"),
+        claims=_claims(
+            {
+                "attribute": "personality_and_preferences",
+                "value": "rational",
+                "basis": "inferred_low",
+                "basis_of_inference": ["客户关注智驾付费方式、维修保养成本"],
+                "reasoning_chain": ["客户关注参数、成本与技术细节", "决策偏理性", "判断为理性型"],
+                "confidence": 0.55,
+            }
+        ),
+    )
+    detail = payload["analysis_result"]["decision_psychology"][0]["reasoning_detail"]
+    assert detail["steps"] == ["客户关注参数、成本与技术细节", "决策偏理性", "判断为理性型"]
+    assert detail["evidence"] == ["客户关注智驾付费方式、维修保养成本"]
+    assert "未作二次推断" not in detail["steps"][0]
+    assert 0.0 < detail["confidence"] <= 1.0
+
+
+def test_notes_wording_still_wins_over_the_claim_ledger():
+    """Notes 有条目时仍以 Notes 为准——账本只是退路，不是新的首选。
+
+    这条守住 ``_FactView`` 的原始设计：同一事实在 Notes 与卡片上必须是同一种说法。
+    """
+    notes = _notes(
+        {
+            "attribute_key": "core_concerns",
+            "attribute_value": "fuel_efficiency",
+            "reasoning_detail": {
+                "summary": "客户反复问油耗",
+                "steps": ["问了几次油耗"],
+                "evidence": ["我比较看重油耗"],
+                "confidence": 0.9,
+            },
+        }
+    )
+    claims = _claims(
+        {
+            "attribute": "core_concerns",
+            "value": "fuel_efficiency",
+            "basis": "inferred_low",
+            "reasoning_chain": ["账本里的推导链不该被用到"],
+        }
+    )
+    items = _categories(
+        _build(facts=_facts(core_concerns="fuel_efficiency"), notes=notes, claims=claims)
+    )["核心关注"]
+    assert items[0]["reasoning_detail"]["steps"] == ["问了几次油耗"]
+
+
+def test_claim_ledger_accepts_both_payload_shapes():
+    """``{"fields": [...]}`` 与 ``{"claims": [...]}`` 都要认。
+
+    v2 起 L1 输出 ``fields``，既有批次产物是 ``claims``。只认一种会让离线回放出来的
+    卡片与新跑批次长得不一样，而那正是排查「改了没改」时最需要的一致性。
+    """
+    entry = {
+        "attribute": "emotion",
+        "value": "guard_against",
+        "basis": "inferred_low",
+        "reasoning_chain": ["客户回避追问", "推断存在防备心理"],
+    }
+    for shape in ({"fields": [entry]}, {"claims": [entry]}):
+        payload = _build(
+            facts=_facts(emotion="guard_against"),
+            claims=json.dumps(shape, ensure_ascii=False),
+        )
+        detail = payload["analysis_result"]["decision_psychology"][0]["reasoning_detail"]
+        assert detail["steps"] == ["客户回避追问", "推断存在防备心理"]
+
+
+def test_malformed_claims_degrade_instead_of_crashing():
+    """账本不是 JSON 或条目不成形时，退化成空账本——卡片照常产出。"""
+    payload = _build(
+        facts=_facts(emotion="guard_against"),
+        claims="不是 JSON",
+    )
+    entries = payload["analysis_result"]["decision_psychology"]
+    assert [e["key"] for e in entries] == ["emotion_state"]
+    assert set(entries[0]["reasoning_detail"]) == {"summary", "steps", "evidence", "confidence"}
+
+
+def test_callback_build_node_receives_the_claim_ledger():
+    """节点必须把 ``claims_json`` 接进来，否则上面几条修复在真实运行里全都不生效。
+
+    **这条是接线守卫**：``_FactView`` 能读账本，但节点不给它，产线与单测就会出现
+    「本地绿、跑批依旧全是审计话」的分裂。
+    """
+    from customer_profile.workflows import customer_profile_pipeline as pipe
+
+    nodes = {n.node_id: n for n in pipe.WORKFLOW.nodes}
+    build = nodes[pipe.CALLBACK_BUILD]
+    sources = {b.target: tuple(b.source) for b in build.bindings}
+    assert sources["claims_json"] == (pipe.L1_INJECT, "claims_json")
+
+
+# ---------------------------------------------------------------- 对客文案自净（2026-10-29）
+
+INTERNAL_PHRASES = (
+    "已定稿事实",
+    "未作二次推断",
+    "据现有记录归纳",
+    "由表达层",
+    "由商机定级环节",
+    "检视已定稿",
+    "上游已定稿",
+)
+"""回写体里**不得出现**的管线口径（销售读不懂，且会暴露内部结构）。
+
+这份清单是「对客产出必须真人可读」这条口径的可执行版本。新增兜底分支时若又把
+内部说法写进去，这条用例会直接打红——比人工读产物可靠。
+"""
+
+
+def _all_details(payload) -> list[dict]:
+    out: list[dict] = []
+    ar = payload["analysis_result"]
+    for entry in ar.get("basic_notes_updates") or []:
+        out.append(entry["reasoning_detail"])
+    for item in (ar.get("ai_insight") or {}).values():
+        out.append(item["reasoning_detail"])
+    for block in ar.get("purchase_decisions") or []:
+        out.extend(i["reasoning_detail"] for i in block["items"])
+    for key in ("win_conditions", "loss_conditions"):
+        out.extend(i["reasoning_detail"] for i in (ar.get("deal_battle") or {}).get(key) or [])
+    out.extend(e["reasoning_detail"] for e in ar.get("decision_psychology") or [])
+    return out
+
+
+def test_no_pipeline_vocabulary_reaches_the_sales_rep():
+    """四个区块的每一段文案都不出现管线口径。
+
+    覆盖两类来源：代码拼的兜底串（填充项、表达层 supplement）与**模型写的**句子
+    （表达层实测会写「已定稿事实显示客户处于买车中」）。后者改不到源头，只能出口自净。
+    """
+    express = _express(
+        profile_summary={
+            "personality_summary": "已定稿事实显示客户处于买车中，核心关注点为安全",
+            "overall_tag": "务实中产",
+        },
+        resistances=[
+            {"resistance_name": "价格不透明"},  # 无 reasoning_detail → 走代码兜底
+            {"resistance_name": "交付周期长", "description": "担心等太久"},
+        ],
+        emotion_state={"current_state": {"value": "谨慎观望"}},
+    )
+    payload = _build(
+        facts=_facts(
+            purchase_type="personal",  # 触发「暂无换车动因」填充项
+            deal_level="C",            # 走定级兜底（无 deal_level_detail）
+            emotion="guard_against",
+            personality_and_preferences="rational",
+        ),
+        express=express,
+    )
+    for detail in _all_details(payload):
+        blob = " ".join(
+            [detail["summary"], *detail["steps"], *detail["evidence"]]
+        )
+        for phrase in INTERNAL_PHRASES:
+            assert phrase not in blob, f"回写体出现管线口径「{phrase}」：{blob[:120]}"
+
+
+def test_filler_item_explains_absence_in_sales_language():
+    """空态填充项说的是「资料里没有」，不是「已定稿事实中未见」。
+
+    「已定稿事实」是本管线的内部说法；销售看不懂它指什么，也就无从判断这条是
+    「没查到」还是「查到了但没用」。填充项本就无证据可引，``steps`` 至少要给一句
+    读得懂的说明，而不是一句审计话。
+    """
+    items = _categories(_build(facts=_facts(purchase_type="personal")))
+    change = items["换车动因"][0]
+    assert "客户资料" in change["reasoning_detail"]["summary"]
+    assert "已定稿" not in change["reasoning_detail"]["summary"]
+    assert "已定稿" not in change["reasoning_detail"]["steps"][0]
+    assert change["reasoning_detail"]["evidence"] == []
+
+
+def test_last_resort_detail_speaks_about_customer_material():
+    """Notes 与断言账本都没有时，末级兜底也只能说「客户资料里已有这条信息」。
+
+    用 ``old_car_model`` 而非 ``purchase_purpose``：后者在调用处传了自己的 ``summary``
+    （「购车用途为家用」），走不到末级分支。
+    """
+    payload = _build(facts=_facts(old_car_model="2019款别克君威"))
+    detail = _categories(payload)["当前用车"][0]["reasoning_detail"]
+    assert "客户资料" in detail["summary"]
+    for phrase in INTERNAL_PHRASES:
+        assert phrase not in detail["summary"]
+        assert all(phrase not in s for s in detail["steps"])
 
 
 # ---------------------------------------------------------------- 唯一性

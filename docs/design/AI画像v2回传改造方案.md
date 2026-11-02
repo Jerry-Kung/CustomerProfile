@@ -3,7 +3,7 @@
 > 前端（业务架构师侧）指定了新的回传契约：`analysis_result` 六键 + 一份 45 字段的 Notes 清单。
 > 本文是落地计划：目标、验收标准、阶段划分、每阶段的改动面与验证方式。
 >
-> 差异逐项核对见 `docs/reference/AI画像v2回传改造核查清单.md`；本轮不解决的问题见 `docs/遗留问题清单.md`。
+> 差异逐项核对见 `docs/history/AI画像v2回传改造核查清单.md`；本轮不解决的问题见 `docs/遗留问题清单.md`。
 > 契约原文：`docs/reference/AI画像远程回传接口数据结构说明.md`；线上实测清单：`docs/reference/Notes_new.txt`。
 >
 > 立项：2026-10-15。承接臂：`customer_profile_pipeline`（对外口径改称**业务测试臂**）。

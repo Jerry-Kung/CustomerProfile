@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Mapping, Sequence
 
 from ..actions import Action
@@ -55,6 +56,29 @@ RULES: tuple[Rule, ...] = (
         legacy_codes=("f_deregistered",),
     ),
     Rule(
+        id="CONSIST-05",
+        version=1,
+        title="有置换凭据时不得是无车",
+        content_kind="consistency",
+        channels=("code",),
+        scope=("current_vehicle_info",),
+        stages=("project",),
+        severity="repair",
+        default_action="rewrite",
+        message_internal=(
+            "有旧车 / 拥车 / 置换凭据，现车信息却是「无车」：改写为有车（车型车龄未知），"
+            "降档保留，证据一并改指该凭据"
+        ),
+        message_customer="客户名下有可置换的旧车，现车情况请核实具体车型与车龄",
+        owner="business",
+        status="active",
+        cluster="consistency",
+        tests=(
+            "tests/test_projection.py::test_no_car_rewritten_when_trade_in_evidence_exists",
+            "tests/rules/test_landings.py::test_no_car_kept_without_evidence",
+        ),
+    ),
+    Rule(
         id="CONSIST-04",
         version=1,
         title="小订/大定不是拥车",
@@ -99,6 +123,16 @@ DEPOSIT_PHRASES: tuple[str, ...] = (
 
 词表是**封闭**的（业务方 2026-10-28 定稿：先用这一版，后续遇到新说法再加）。它只用于
 「拥车与置换类字段」的断言，不看别的字段——``intended_model`` 里出现小订是正确形态。
+"""
+
+NO_CAR_MARKERS: tuple[str, ...] = ("无车", "没有车", "暂无车", "名下无车")
+"""「无车」类取值。命中且另有置换凭据时，两处互相矛盾，必须改写。"""
+
+NO_CAR_REWRITE = "有车（具体车型与车龄待核实）"
+"""跨字段改写的落定值。
+
+刻意不写具体车型：凭据只说「有旧车 / 要置换」，没说车型与车龄。凭现有信息补出来的
+车型就是编造——销售拿着一个猜的车名去压价，比留白更糟。
 """
 
 OWNERSHIP_ATTRIBUTES: frozenset[str] = frozenset(
@@ -188,6 +222,35 @@ def _trade_in_yes(value: Any) -> bool:
     return isinstance(value, dict) and value.get("key") == "yes"
 
 
+def _is_no_car_value(value: Any) -> bool:
+    """现车信息是不是「无车」类取值（文本或结构化串都认）。"""
+    text = _text(value)
+    if not text:
+        return False
+    for item in _value_fragments(text):
+        if any(marker in item for marker in NO_CAR_MARKERS):
+            return True
+    return any(marker in text for marker in NO_CAR_MARKERS)
+
+
+def _value_fragments(text: str) -> list[str]:
+    """把一个取值拆成可比对的片段（结构化串取 ``key``，多选按 ``||`` 拆）。"""
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(stripped)
+        except ValueError:
+            return [stripped]
+        if isinstance(parsed, dict):
+            return [
+                str(parsed.get("key") or "").strip(),
+                str(parsed.get("input_value") or "").strip(),
+            ]
+    if "||" in stripped:
+        return [part.strip() for part in stripped.split("||") if part.strip()]
+    return [stripped]
+
+
 def check_cross_field(
     facts: Mapping[str, Any], context: Mapping[str, Any]
 ) -> list[Action]:
@@ -273,4 +336,30 @@ def check_cross_field(
                     },
                 )
             )
+
+    # —— CONSIST-05：有置换凭据时不得是「无车」
+    # 业务方报障的原始矛盾：同一张卡上「现车信息=无车」与「置换车型=某旧车车型」并存。
+    # 一手置换证据压过第三方「无车」标签，因此**改值**；但落定值不编造具体车型，
+    # 并降档保留（前端已有低置信标记）——依据是「另一处有凭据」，不是客户原话直接
+    # 给出本字段取值，所以不能继续声称事实。
+    no_car = facts.get("current_vehicle_info")
+    if _is_no_car_value(no_car) and (has_old_car or trade_in_yes):
+        actions.append(
+            Action(
+                rule="CONSIST-05",
+                attribute="current_vehicle_info",
+                action="rewrite",
+                severity="repair",
+                reason="有旧车或置换凭据，现车信息不可能是无车",
+                customer_reason="客户名下有可置换的旧车，现车情况请核实具体车型与车龄",
+                value=NO_CAR_REWRITE,
+                affects_basis=True,
+                payload={
+                    "attribute": "current_vehicle_info",
+                    "value": no_car,
+                    "rule": "f_no_car_conflict",
+                    "reason": "有旧车或置换凭据，现车信息不可能是无车",
+                },
+            )
+        )
     return actions

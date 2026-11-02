@@ -154,6 +154,72 @@ def main() -> int:
         all_ok &= check("attempts 补列已登记", False, f"{type(exc).__name__}: {exc}")
     print()
 
+    # 5.5 知识库
+    print("5.5 知识库")
+    try:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from customer_profile.settings import get_settings
+        from customer_profile.knowledge import current_pack
+
+        settings = get_settings()
+        pack = current_pack(settings)
+        configured = (settings.knowledge_pack or "").strip()
+        if not configured:
+            check("知识包", True, "KNOWLEDGE_PACK 为空——不启用知识（视图为空、闭集校验跳过）")
+        else:
+            configs = sum(len(item.configs) for item in pack.models)
+            check(
+                "知识包装载",
+                not pack.is_empty,
+                f"pack={pack.pack_id or '（空）'} 车型={len(pack.models)} 档位={configs}",
+            )
+            if pack.is_empty:
+                # 装载失败已在 current_pack 里记过 warning。这里把「配了却用不上」
+                # 明确报出来：跑批不会失败，但产出会静默退回无知识形态。
+                check(
+                    "知识包可用",
+                    False,
+                    f"KNOWLEDGE_PACK={configured!r} 装载失败，管线将退化为不启用知识",
+                )
+        # 通用知识：邀约策略。第 2 期从 templates/ 迁入 knowledge/common/，
+        # 迁走后那份模板已删除——装载失败就没有第二份兜底，必须在这里看见。
+        from customer_profile.knowledge import common as kb_common
+
+        invite = kb_common.current_invite_strategy()
+        check(
+            "通用邀约策略",
+            not invite.is_empty,
+            f"{len(invite.items)} 条策略"
+            if not invite.is_empty
+            else "装载失败或为空——表达层将不注入邀约策略",
+        )
+
+        # 竞品库：缺省不启用，属**正常状态**而不是缺陷——业务资料尚未到位
+        # （见 docs/feature-knowledge-base/07 Q8）。因此「没配」报 OK，
+        # 「配了却装不起来」才报 FAIL。
+        from customer_profile.knowledge import competitors as kb_competitors
+
+        configured_lib = (settings.knowledge_competitors or "").strip()
+        if not configured_lib:
+            check(
+                "竞品库",
+                True,
+                "KNOWLEDGE_COMPETITORS 为空——不启用竞品资料（表达层不注入对比段）",
+            )
+        else:
+            library = kb_competitors.current_competitors(settings)
+            check(
+                "竞品库装载",
+                not library.is_empty,
+                f"library={library.library_id or '（空）'} 竞品={len(library.entries)} 款"
+                if not library.is_empty
+                else f"KNOWLEDGE_COMPETITORS={configured_lib!r} 装载失败，"
+                     "卡片将不出现竞品对比段",
+            )
+    except Exception as exc:
+        check("知识库", False, f"{type(exc).__name__}: {exc}")
+    print()
+
     # 6. 输出目录
     print("6. 输出目录")
     out_dir = REPO_ROOT / "experiments"

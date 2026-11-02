@@ -114,6 +114,35 @@ def test_no_evidence_no_license():
     assert result["license_injected"] is False
 
 
+def test_placeholder_old_car_does_not_imply_license():
+    """占位取值不是「有旧车」的凭据——``未知`` 什么都没说。
+
+    实测 15972379760：``old_car_model="未知"`` + ``trade_in_requirement="no"``，
+    旧判据（只排除空串）据此注入了 ``driver_license_status=yes``（``basis=fact``、
+    置信 0.95）。投影层一直按 ``is_placeholder`` 排除占位值，两处判据必须同形，
+    否则同一张卡上会同时出现「无置换」与「有驾照」。
+    """
+    merged, result = _inject(
+        _records(),
+        _claims(
+            {"attribute": "old_car_model", "value": "未知", "basis": "inferred_low"},
+            {"attribute": "trade_in_requirement", "value": "no", "basis": "inferred_low"},
+        ),
+    )
+    assert "driver_license_status" not in merged
+    assert result["license_injected"] is False
+
+
+def test_explicit_no_old_car_does_not_imply_license():
+    """客户明说「无旧车」时更不能注入——否则卡片自相矛盾。"""
+    merged, result = _inject(
+        _records(),
+        _claims({"attribute": "old_car_model", "value": "无", "basis": "fact"}),
+    )
+    assert "driver_license_status" not in merged
+    assert result["license_injected"] is False
+
+
 def test_empty_test_drive_does_not_imply_license():
     """录音记录在、但内容为空时不构成试驾证据。"""
     merged, _ = _inject(
