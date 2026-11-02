@@ -175,10 +175,19 @@ def build_http_frames(run_dir: Path) -> tuple[dict[str, list[dict]], list[str]]:
         if not url or any(marker in url for marker in SKIP_TARGETS):
             continue
 
+        # **失败的尝试不进 fixture**（2026-11-02）。``status_code`` 为空表示这次请求
+        # 根本没拿到响应（``ConnectTimeout`` / ``ConnectError``）。此前的写法用
+        # ``or 200`` 兜底，等于把一次网络故障伪造成「200 + 空正文」的合法响应——
+        # 回放时它排在成功帧前面，被 ``next_http`` 的游标先取走，L0 于是判所有渠道
+        # 空、L4 直接掉 ``empty``，而整条链路「成功」退出，看不出任何异常。
+        # 真实调用里这种失败会重试到成功；fixture 里只该保留最终拿到的响应。
+        if attempt.get("status_code") is None:
+            continue
+
         headers = request.get("response_headers") or {}
         text = attempt.get("response_text") or ""
         frame: dict[str, Any] = {
-            "status_code": int(attempt.get("status_code") or 200),
+            "status_code": int(attempt["status_code"]),
             "text": text,
             "headers": dict(headers),
         }

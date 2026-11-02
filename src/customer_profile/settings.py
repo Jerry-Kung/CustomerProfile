@@ -143,7 +143,12 @@ class Settings(BaseSettings):
     缺省值对着「录音文件大、单次识别可达 20–30 分钟」这一实测口径。
     """
 
-    profile_api_base_url: str = "http://118.145.238.50:8084"
+    profile_api_base_url: str = "https://mhero.dfmc.com.cn/customer_profile/m2m_api"
+    """取数与回写的服务根地址。**以 ``.env`` 为准**，这里只是兜底。
+
+    2026-11-02 起缺省值指向 mhero：旧地址 ``118.145.238.50:8084`` 随接口改版弃用，
+    对它取数会返回 ``200 []``——看起来像「该客户无资料」，实际是打到了死端点。
+    """
     profile_api_key: str = ""
     mhero_base_url: str = "https://mhero.dfmc.com.cn/customer_profile/m2m_api"
     profile_mhero_api_key: str = ""

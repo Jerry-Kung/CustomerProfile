@@ -100,20 +100,45 @@ def test_acquisition_layer_matches_subagent_declarations():
     """
     pipeline_tools = _acquisition_tools(pipe.WORKFLOW)
     subagent_tools = _acquisition_tools(evidence_subagent.WORKFLOW)
-    assert len(subagent_tools) == 14
+
     # 断言「取数臂声明的每一路，在实验臂里逐字一致」。不要求相等：实验臂还多出
     # 人设特征判断与画像成文两个 tool 调用，它们不是取数层，两边本就不同类。
-    for title, declaration in subagent_tools.items():
-        assert pipeline_tools.get(title) == declaration, (
+    for title, declaration in pipeline_tools.items():
+        if title not in subagent_tools:
+            continue
+        assert subagent_tools[title] == declaration, (
             f"渠道 {title!r} 的取数声明在两臂之间不一致："
-            f"取数臂={declaration}，实验臂={pipeline_tools.get(title)}"
+            f"取数臂={declaration}，实验臂={subagent_tools.get(title)}"
         )
 
+    # 「猛士IT系统数据信息」这一路已随 2026-10-31 接口改版下线（渠道被业务方移除）。
+    # 实验臂不再可运行、只作 AB 复位的历史样本，因此不跟着改；取数臂则必须真的没有
+    # 这一路——它若还在，就是在对着一个不存在的渠道取数。
+    assert "猛士IT系统数据信息" not in pipeline_tools
 
-def test_channel_table_has_15_entries():
-    """15 个取证渠道（`端到端方案.md` §2 的渠道清单）。"""
-    assert len(pipe.CHANNELS) == 15
-    assert len({c["source_name"] for c in pipe.CHANNELS}) == 15
+
+def test_channel_table_entries_are_unique():
+    """渠道表里每个取证渠道名只出现一次。
+
+    数量**不写死**：2026-10-31 接口改版换掉了一批渠道（旧 ``MengShiITSystemData``
+    等移除、本体渠道接入），总数随接口演进而变，钉死数字只会每改一次接口红一次。
+    真正要守的是「没有重复名」——重复会让 L0 产出两条同名记录、L1 拿到的分节头
+    也对不上，而这不会报错。
+    """
+    names = [c["source_name"] for c in pipe.CHANNELS]
+    assert len(names) == len(set(names))
+    # 本体渠道必须都在表里：缺一路就是一路静默丢数。
+    channels = {c["manifest_channel"] for c in pipe.CHANNELS}
+    for required in (
+        "OntologyLeadInfo",
+        "OntologyLeadStage",
+        "OntologyLeadFollowRecord",
+        "OntologyOrder",
+        "OntologyOrderFinance",
+        "OntologyCustomerChatInfo",
+        "OntologyManualOutboundCallRecordingFile",
+    ):
+        assert required in channels, f"渠道表缺 {required}"
 
 
 # ---------------------------------------------------------------- 判据一：清单定「有没有」
@@ -183,7 +208,7 @@ def test_transcript_is_kept_verbatim_from_auc_result():
         [{"speaker": "1", "gender": "male", "text": "喂，你好。"}], ensure_ascii=False
     )
     records = build(
-        manifest(entry("AIOutboundCallRecordingFile")),
+        manifest(entry("OntologyManualOutboundCallRecordingFile")),
         outbound_report="无法分析。录音文件无有效内容。",
         outbound_transcript=[transcript],
     )
@@ -197,7 +222,7 @@ def test_compressed_report_never_overrides_transcript():
     """有原文时，压缩报告不得顶替原文。"""
     transcript = json.dumps([{"text": "原文原话"}], ensure_ascii=False)
     records = build(
-        manifest(entry("AIOutboundCallRecordingFile")),
+        manifest(entry("OntologyManualOutboundCallRecordingFile")),
         outbound_report="这是经过 LLM 压缩的报告正文",
         outbound_transcript=[transcript],
     )
@@ -209,7 +234,7 @@ def test_compressed_report_never_overrides_transcript():
 def test_transcript_falls_back_to_report_and_is_labelled():
     """原文缺失时才回落报告，且 `content_kind` 明确标成 report。"""
     records = build(
-        manifest(entry("AIOutboundCallRecordingFile")),
+        manifest(entry("OntologyManualOutboundCallRecordingFile")),
         outbound_report="这是经过 LLM 压缩的报告正文",
         outbound_transcript=None,
     )
@@ -221,7 +246,7 @@ def test_transcript_falls_back_to_report_and_is_labelled():
 def test_empty_audio_array_is_not_content():
     """`auc_result` 为 `"[]"` 表示没识别出内容，不是一段叫 `[]` 的原文。"""
     records = build(
-        manifest(entry("AIOutboundCallRecordingFile")),
+        manifest(entry("OntologyManualOutboundCallRecordingFile")),
         outbound_transcript=["[]"],
     )
     assert record_for(records, "外呼录音信息")["status"] == pipe.EXCEPTION
@@ -290,7 +315,7 @@ def test_customer_mentioning_failure_words_is_not_misjudged():
         [{"text": "我们那个系统老是提示解析失败，烦死了，所以想换车"}], ensure_ascii=False
     )
     records = build(
-        manifest(entry("AIOutboundCallRecordingFile")),
+        manifest(entry("OntologyManualOutboundCallRecordingFile")),
         outbound_transcript=[transcript],
     )
     record = record_for(records, "外呼录音信息")
@@ -339,7 +364,7 @@ def test_long_real_text_that_mentions_nothing_is_not_mistaken_for_sentinel():
 
 def test_triage_sufficient_when_primary_interaction_present():
     records = build(
-        manifest(entry("AIOutboundCallRecordingFile")),
+        manifest(entry("OntologyManualOutboundCallRecordingFile")),
         outbound_transcript=[json.dumps([{"text": "喂"}], ensure_ascii=False)],
     )
     tier = pipe.triage(json.dumps(records, ensure_ascii=False))
@@ -368,9 +393,14 @@ def test_triage_never_sufficient_on_transcript_failure_string():
     ``sufficient``，于是失败串冒充一手证据进入事实流程。
     """
     records = build(
-        manifest(entry("TestDriveRecordingFile")),
+        manifest(
+            entry("TestDriveRecordingFile"),
+            entry(
+                "OntologyLeadInfo",
+                raw={"records": [{"nickname": "杨"}], "fetched_at": "2026-10-31T11:28:02"},
+            ),
+        ),
         test_drive_transcript=FAILURE_TEXT,
-        mengshi_it='{"nickname": "杨"}',
     )
     tier = pipe.triage(json.dumps(records, ensure_ascii=False))
     assert tier["tier"] != "sufficient"
@@ -412,7 +442,7 @@ def test_evidence_input_excludes_empty_channels():
 
 def test_evidence_input_prefers_transcript_over_report():
     records = build(
-        manifest(entry("AIOutboundCallRecordingFile")),
+        manifest(entry("OntologyManualOutboundCallRecordingFile")),
         outbound_report="压缩报告",
         outbound_transcript=[json.dumps([{"text": "逐字原话"}], ensure_ascii=False)],
     )

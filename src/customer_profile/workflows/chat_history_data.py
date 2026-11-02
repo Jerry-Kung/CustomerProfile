@@ -131,6 +131,10 @@ def _parse_valid_records(records):
 
         dialogue_content = (
             rec.get("dialogue_content")
+            # 2026-10-31 起本体渠道 ``OntologyCustomerChatInfo`` 的字段名是
+            # ``dialoguecontent``（全小写、无下划线）。不加这一项时整条聊天记录
+            # 会被判成「未解析到有效对话内容」——内容其实在，只是键名对不上。
+            or rec.get("dialoguecontent")
             or rec.get("dialogue")
             or rec.get("dialogueContent")
             or rec.get("messages")
@@ -567,7 +571,7 @@ def default_inputs(customer_data: str, phone_number: str = "") -> dict[str, Any]
     return {
         "phone_number": phone_number,
         "customer_data": customer_data,
-        "data_source": "MengShiCustomerChatInfo",
+        "data_source": "OntologyCustomerChatInfo",
     }
 
 

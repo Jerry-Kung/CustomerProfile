@@ -10,7 +10,7 @@
           → customer_profile_pipeline → result1
 
     业务测试臂（本模块，阶段一/二）:
-      取数层（14 路 tool，**原样复用**既有子流程）
+      取数层（子流程按渠道并行取数 + 本体渠道清单直读）
         → L0 记录层（纯代码）：把清单与各渠道产物统一成 records[]
           → L4 分诊层（纯代码）：sufficient / thin / empty
             → 取证输入包（纯代码）：只喂「有内容」的渠道
@@ -36,8 +36,11 @@
    **0 token**。
 
 **与 ``evidence_subagent`` 的关系**：不修改它。它是基线臂的组成部分，改它会让同一条分支上
-的两臂一起变，AB 立刻不成立。代价是 14 路 ``tool`` 声明在这里重复一份；``tests``
-里有一条用例断言两份声明的渠道集合一致，防止日后单边漂移。
+的两臂一起变，AB 立刻不成立。代价是取数层的 ``tool`` 声明在这里重复一份；``tests``
+里有一条用例断言两份声明逐条一致，防止日后单边漂移。
+
+**本体渠道不需要子流程**（2026-10-31 接口改版）：它们的载荷是扁平结构，由
+:mod:`ontology_payload` 直接渲染成中文正文，因此只在渠道表里登记，不在图上开节点。
 """
 
 from __future__ import annotations
@@ -56,6 +59,7 @@ from ..definitions import WorkflowDef, make_node
 from ..rules.clusters import expression as expression_rules
 from ..rules.clusters import hard as hard_rules
 from ..rules import checker as rule_checker
+from . import ontology_payload
 
 WORKFLOW_ID = "customer_profile_pipeline"
 """**稳定标识，不得改动。** 模板资源名是 ``<slug>__<node_id>``，而 ``scripts/run_baseline.py
@@ -81,7 +85,7 @@ START = "pipeline_start"
 HISTORY_HTTP = "pipeline_history"
 END = "pipeline_end"
 
-# —— 取数层（14 路 tool，复用既有子流程）
+# —— 取数层（子流程 tool，复用既有定义）
 MOMENTS = "pipeline_moments"
 WECHAT_SEARCH = "pipeline_wechat_search"
 WECHAT_HOME = "pipeline_wechat_home"
@@ -92,7 +96,6 @@ XIAOHONGSHU = "pipeline_xiaohongshu"
 DOUYIN = "pipeline_douyin"
 LOCKED_NOTES = "pipeline_locked_notes"
 JIGUANG = "pipeline_jiguang"
-MENGSHI_IT = "pipeline_mengshi_it"
 CHAT_HISTORY = "pipeline_chat_history"
 FEEDBACK = "pipeline_feedback"
 PHONE_COMPANY = "pipeline_phone_company"
@@ -288,7 +291,7 @@ LEVEL_ASSESS_TEMPLATE = template_name(LEVEL_ASSESS)
 
 
 # ====================================================================
-# 渠道表：15 个取证渠道 → 清单渠道名 / 来源分级 / 内容形态
+# 渠道表：取证渠道 → 清单渠道名 / 来源分级 / 内容形态
 #
 # ``manifest_channel`` 为 ``None`` 表示该渠道不来自
 # ``GET /api/v1/remote/data/history/{phone}`` 清单（人工确认与反馈走 mhero），
@@ -337,7 +340,7 @@ CHANNELS: tuple[dict[str, Any], ...] = (
     },
     {
         "source_name": "外呼录音信息",
-        "manifest_channel": "AIOutboundCallRecordingFile",
+        "manifest_channel": "OntologyManualOutboundCallRecordingFile",
         "source_class": PRIMARY_INTERACTION,
         "content_kind": "transcript",
         "node_id": OUTBOUND_CALL,
@@ -391,16 +394,110 @@ CHANNELS: tuple[dict[str, Any], ...] = (
         "content_kind": "json",
         "node_id": LOCKED_NOTES,
     },
+    # ---------------------------------------------------------------- 本体渠道
+    # 2026-10-31 接口改版：``MengShiITSystemData`` 等旧渠道已由业务方确认移除，
+    # 改为下面这批「本体」渠道。载荷已是扁平结构，由 :mod:`ontology_payload` 直出中文
+    # 正文（``render`` 键），**不经子流程**——这些字段没有 OCR/转写可言，多开一路
+    # tool 只会多一层图结构与模板。
     {
-        "source_name": "客户留存在我方销售数据系统中的信息记录",
-        "manifest_channel": "MengShiITSystemData",
+        "source_name": "客户注册账号资料",
+        "manifest_channel": "OntologyAppRegistration",
         "source_class": DECLARED,
         "content_kind": "json",
-        "node_id": MENGSHI_IT,
+        "node_id": None,
+        "render": "ontology",
+    },
+    {
+        "source_name": "客户线索基础资料",
+        "manifest_channel": "OntologyLeadInfo",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+    },
+    {
+        "source_name": "线索下发记录",
+        "manifest_channel": "OntologyLeadDistribution",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "线索分配记录",
+        "manifest_channel": "OntologyLeadAssignment",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "线索当前阶段",
+        "manifest_channel": "OntologyLeadStage",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+    },
+    {
+        "source_name": "销售跟进记录",
+        "manifest_channel": "OntologyLeadFollowRecord",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "战败记录",
+        "manifest_channel": "OntologyDefeatRecord",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "人工外呼记录",
+        "manifest_channel": "OntologyManualOutboundCall",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "试驾排程记录",
+        "manifest_channel": "OntologyTestDriveSchedule",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "订单记录",
+        "manifest_channel": "OntologyOrder",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
+    },
+    {
+        "source_name": "订单金融方案",
+        "manifest_channel": "OntologyOrderFinance",
+        "source_class": DECLARED,
+        "content_kind": "json",
+        "node_id": None,
+        "render": "ontology",
+        "multi": "all",
     },
     {
         "source_name": "客户与我方销售人员的聊天记录信息",
-        "manifest_channel": "MengShiCustomerChatInfo",
+        "manifest_channel": "OntologyCustomerChatInfo",
         "source_class": PRIMARY_INTERACTION,
         "content_kind": "json",
         "node_id": CHAT_HISTORY,
@@ -413,7 +510,7 @@ CHANNELS: tuple[dict[str, Any], ...] = (
         "node_id": FEEDBACK,
     },
 )
-"""15 个取证渠道的元信息。
+"""全部取证渠道的元信息。
 
 顺序与 ``evidence_subagent`` 的「客户数据聚合」模板一致——取证输入包按同一套
 中文键组织，``证据线索整理`` 提示词要求 ``evidence_source`` 的取值与输入 JSON 的 key
@@ -477,6 +574,11 @@ def collect_audio_files(records, data_source) -> dict:
             continue
         media = item.get("media_urls")
         if media is None:
+            # 2026-10 接口改版：录音渠道的直链也可能只在 ``raw_payload.recording_url``。
+            raw = item.get("raw_payload")
+            if isinstance(raw, dict):
+                media = raw.get("recording_url")
+        if media is None:
             return {"files": []}
         if isinstance(media, str):
             media = [media]
@@ -498,7 +600,7 @@ def collect_test_drive_files(records) -> dict:
 
 def collect_outbound_files(records) -> dict:
     """``code`` 节点入口：收集外呼录音的文件直链。见 ``collect_test_drive_files``。"""
-    return collect_audio_files(records, "AIOutboundCallRecordingFile")
+    return collect_audio_files(records, "OntologyManualOutboundCallRecordingFile")
 
 
 def bundle_channels(
@@ -510,7 +612,6 @@ def bundle_channels(
     xiaohongshu=None,
     douyin=None,
     locked_notes=None,
-    mengshi_it=None,
     chat_history=None,
     feedback=None,
     phone_company=None,
@@ -521,7 +622,7 @@ def bundle_channels(
     test_drive_report=None,
     outbound_report=None,
 ) -> dict:
-    """把 14 路子流程的产出与清单原文汇成一份「渠道 → 内容」表。
+    """把各路子流程的产出与清单原文汇成一份「渠道 → 内容」表。
 
     录音渠道给两样东西：``*_transcript``（逐字原文，来自 ``audio_content_extract``）
     与 ``*_report``（压缩报告，来自「录音信息提取」子流程）。L0 取原文，
@@ -541,7 +642,6 @@ def bundle_channels(
         "小红书主页截图信息": xiaohongshu,
         "抖音主页截图信息": douyin,
         "销售人员人工确认的客户Notes信息": locked_notes,
-        "客户留存在我方销售数据系统中的信息记录": mengshi_it,
         "客户与我方销售人员的聊天记录信息": chat_history,
         "销售人员对当前客户历史画像数据的反馈记录": feedback,
         "手机号归属地信息": phone_location,
@@ -568,11 +668,18 @@ def bundle_channels(
     }
 
 
-def _manifest_index(history_body: Any) -> dict[str, dict]:
-    """把清单响应体解析成 ``{channel: 第一条记录}``。
+def _manifest_index(history_body: Any) -> dict[str, list[dict]]:
+    """把清单响应体解析成 ``{channel: [记录, ...]}``，按 ``created_at`` 升序。
 
     解析失败按「清单为空」处理：拿不到清单时**所有**渠道都记 ``exception``。
     这是刻意的保守取向——宁可如实说「不知道有哪些渠道」，也不要凭猜测给它内容。
+
+    **为什么从「每渠道一条」改成「每渠道一组」**：2026-10-31 接口改版引入了天生多条的
+    渠道（跟进记录、订单、金融方案），只留最新一条会让同一客户的三次跟进只剩最后一次。
+    既有渠道仍是「取最新一条」，由 :func:`build_records` 在消费侧决定，索引层不做裁剪。
+
+    上游标记 ``operation=removed`` 的记录在这里就被剔除：它表示业务系统已删除该条，
+    留着会让一条**不存在的记录**进入正文。
     """
     if history_body is None:
         return {}
@@ -589,19 +696,19 @@ def _manifest_index(history_body: Any) -> dict[str, dict]:
     if not isinstance(data, list):
         return {}
 
-    index: dict[str, dict] = {}
+    index: dict[str, list[dict]] = {}
     for item in data:
         if not isinstance(item, dict):
             continue
         channel = item.get("channel")
         if not channel:
             continue
-        # 同一渠道出现多条时保留**最新**一条（清单自带 created_at）。
-        current = index.get(channel)
-        if current is None or str(item.get("created_at") or "") >= str(
-            current.get("created_at") or ""
-        ):
-            index[channel] = item
+        if ontology_payload.is_removed(item.get("raw_payload")):
+            continue
+        index.setdefault(channel, []).append(item)
+
+    for items in index.values():
+        items.sort(key=lambda entry: str(entry.get("created_at") or ""))
     return index
 
 
@@ -833,9 +940,9 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
     记录形状（``端到端方案.md`` §3.2）::
 
         {record_id, channel, source_name, source_class,
-         status, created_at, content, content_kind}
+         status, created_at, fetched_at, content, content_kind}
 
-    四条判定口径：
+    五条判定口径：
 
     - **清单里没有该 channel ⇒ ``status=exception``**。清单是「有哪些渠道」的唯一事实来源，
       因此「输入里到底有没有录音」由这里说了算。
@@ -843,6 +950,13 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
     - 录音渠道的内容取**逐字原文**；原文缺失时回落压缩报告，并把 ``content_kind``
       标成 ``report``——明确区分「这是原话」与「这是二次加工产物」。
     - 每条记录都带 ``created_at``（清单自带；缺失时为空串，不伪造时间）。
+    - **本体渠道直接由载荷渲染**（:mod:`ontology_payload`），不经子流程；过程资料一条清单
+      记录产出一条 record，不合并——三次跟进合成一段会把「什么时候说了什么」吃掉。
+
+    **``fetched_at`` 与 ``created_at`` 是两件事**（2026-10-31 起随接口提供）：
+    ``created_at`` 是这条资料落库的时刻，``fetched_at`` 是本轮**基础资料整体抓取**的时刻
+    （只有基础渠道与外部补充渠道带）。前者用于排序与时效判定，后者留给增量更新判断
+    「这份数据是哪一轮拉的」。取不到 ``fetched_at`` 时回落 ``created_at``，字段恒有值。
     """
     payload: dict[str, Any] = {}
     if channels_json:
@@ -860,10 +974,21 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
     for spec in CHANNELS:
         source_name = spec["source_name"]
         manifest_channel = spec["manifest_channel"]
-        item = manifest.get(manifest_channel) if manifest_channel else None
+        items = manifest.get(manifest_channel) if manifest_channel else None
+        latest = items[-1] if items else None
+
+        if spec.get("render") == "ontology":
+            records.extend(
+                _ontology_records(
+                    spec,
+                    items or [],
+                    phone_number=phone_number,
+                )
+            )
+            continue
 
         if manifest_channel is not None:
-            present = item is not None
+            present = bool(items)
         else:
             # 无清单背书的渠道：产出非空即视为有内容。
             present = bool(_as_content(contents.get(source_name)))
@@ -903,8 +1028,8 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
                 # 媒体渠道（截图/企业/第三方）的正文常常只在清单的 raw_payload 里
                 # （视觉子流程未命中时返回一句「查询异常」的哨兵文本）。清单有实体载荷
                 # 就以它为正文，避免把哨兵当成内容。
-                if item is not None and item.get("raw_payload") is not None:
-                    raw = _as_content(item.get("raw_payload"))
+                if latest is not None and latest.get("raw_payload") is not None:
+                    raw = _as_content(latest.get("raw_payload"))
                     if raw and (not content or _looks_like_sentinel(content)):
                         content = raw
 
@@ -916,7 +1041,10 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
                 "source_name": source_name,
                 "source_class": spec["source_class"],
                 "status": status,
-                "created_at": str((item or {}).get("created_at") or ""),
+                "created_at": str((latest or {}).get("created_at") or ""),
+                # 本轮基础资料的抓取时刻。缺失时回落 created_at，保证恒有值，
+                # 增量侧不必到处判空。
+                "fetched_at": _fetched_at_of(latest),
                 "content": content,
                 "content_kind": content_kind,
                 # 录音的**未标注**六字段原文。角色标注与勘误都可能出错，而正文一经改写
@@ -937,6 +1065,83 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
         "records_count": len(records),
         "exception_count": sum(1 for r in records if r["status"] == EXCEPTION),
     }
+
+
+def _ontology_records(
+    spec: dict, items: list[dict], *, phone_number: str
+) -> list[dict[str, Any]]:
+    """本体渠道 → 记录列表。
+
+    ``multi`` 决定多条清单记录怎么用：
+
+    - ``latest``（基础渠道）：``raw_payload.records`` 是**本轮全量读取**，多轮之间是快照
+      关系而不是增量，因此只取最新一轮，避免同一份资料按批次重复计数；
+    - ``all``（过程资料）：每条就是一条独立事实（一次跟进、一笔订单），全留。
+
+    无记录时仍产出一条 ``exception`` 记录：清单是「有没有」的唯一事实来源，缺失本身要留痕。
+    """
+    channel = spec["manifest_channel"]
+    if spec.get("multi") == "all":
+        chosen = list(items)
+        numbered = len(chosen) > 1
+    else:
+        chosen = items[-1:]
+        numbered = False
+
+    if not chosen:
+        return [
+            {
+                "record_id": f"rec_{channel}_{phone_number}",
+                "channel": channel,
+                "source_name": spec["source_name"],
+                "source_class": spec["source_class"],
+                "status": EXCEPTION,
+                "created_at": "",
+                "fetched_at": "",
+                "content": "",
+                "content_kind": spec["content_kind"],
+                "content_raw": "",
+                "role_lines": [],
+                "corrections": [],
+                "raw_failure": "",
+            }
+        ]
+
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(chosen, start=1):
+        raw_payload = item.get("raw_payload")
+        text = ontology_payload.render_payload(channel, raw_payload)
+        suffix = f"_{index}" if numbered else ""
+        result.append(
+            {
+                "record_id": f"rec_{channel}_{phone_number}{suffix}",
+                "channel": channel,
+                "source_name": spec["source_name"],
+                "source_class": spec["source_class"],
+                "status": OK if text else EXCEPTION,
+                "created_at": str(item.get("created_at") or ""),
+                "fetched_at": _fetched_at_of(item),
+                "content": text,
+                "content_kind": spec["content_kind"],
+                "content_raw": "",
+                "role_lines": [],
+                "corrections": [],
+                "raw_failure": "",
+            }
+        )
+    return result
+
+
+def _fetched_at_of(item: dict | None) -> str:
+    """取记录的抓取时刻：``raw_payload.fetched_at`` → 记录级 ``created_at`` → 空串。"""
+    if not isinstance(item, dict):
+        return ""
+    raw_payload = item.get("raw_payload")
+    if isinstance(raw_payload, dict):
+        fetched = str(raw_payload.get("fetched_at") or "").strip()
+        if fetched:
+            return fetched
+    return str(item.get("created_at") or "")
 
 
 SENTINEL_MARKERS: tuple[str, ...] = (
@@ -1499,8 +1704,13 @@ def build_l1_input(records_json, kb_brief: str = "") -> dict:
             f"来源分级：{proj.TIER_LABEL[tier]}",
             f"记录编号：{record.get('record_id') or ''}",
         ]
+        fetched_at = str(record.get("fetched_at") or "").strip()
         created_at = str(record.get("created_at") or "").strip()
-        if created_at:
+        if fetched_at:
+            header.append(f"采集时间：{fetched_at}")
+            if created_at and created_at != fetched_at:
+                header.append(f"记录时间：{created_at}")
+        elif created_at:
             header.append(f"采集时间：{created_at}")
         header.append(f"内容形态：{record.get('content_kind') or 'text'}")
         # 录音的说话方分区：**放在分节头里、不插进正文**。插进正文会让 L1 抄锚点时
@@ -2821,8 +3031,13 @@ def _level_record_sections(records: list[dict]) -> list[str]:
             f"## {source_name}",
             f"记录编号：{record.get('record_id') or ''}",
         ]
+        fetched_at = str(record.get("fetched_at") or "").strip()
         created_at = str(record.get("created_at") or "").strip()
-        if created_at:
+        if fetched_at:
+            header.append(f"采集时间：{fetched_at}")
+            if created_at and created_at != fetched_at:
+                header.append(f"记录时间：{created_at}")
+        elif created_at:
             header.append(f"采集时间：{created_at}")
         header.append(f"内容形态：{record.get('content_kind') or 'text'}")
         sections.append("\n".join(header) + "\n\n" + str(record.get("content")))
@@ -3156,7 +3371,7 @@ WORKFLOW = WorkflowDef(
                 "@outputs": {"body": "$text", "status": "$status"},
             },
         ),
-        # ---------------------------------------------------------- 取数层（14 路）
+        # ---------------------------------------------------------- 取数层
         _tool(MOMENTS, "朋友圈信息提取", MOMENTS_PURE, "WeChatMomentsScreenshot"),
         _tool(
             WECHAT_SEARCH,
@@ -3170,7 +3385,7 @@ WORKFLOW = WorkflowDef(
             OUTBOUND_CALL,
             "外呼录音信息提取",
             OUTBOUND_CALL_PURE,
-            "AIOutboundCallRecordingFile",
+            "OntologyManualOutboundCallRecordingFile",
         ),
         _tool(ALIPAY, "支付宝个人页信息提取", "alipay_homepage", "AlipayPersonalPageScreenshot"),
         _tool(
@@ -3194,18 +3409,14 @@ WORKFLOW = WorkflowDef(
             },
         ),
         _tool(JIGUANG, "极光数据", "jiguang_data", "DatametInterestPoints"),
-        _tool(
-            MENGSHI_IT,
-            "猛士IT系统数据信息",
-            "mengshi_it_system_data",
-            "MengShiITSystemData",
-            outputs=("IT_customer_info", "IT_json_data"),
-        ),
+        # 2026-10-31 接口改版：``MengShiITSystemData`` 渠道已由业务方确认移除，
+        # 原「猛士IT系统数据信息」这一路取数随之摘除；它的字段语义由本体渠道
+        # （``OntologyLeadInfo`` 等）承接，直接由记录层渲染，不再走子流程。
         _tool(
             CHAT_HISTORY,
             "聊天记录数据信息",
             "chat_history_data",
-            "MengShiCustomerChatInfo",
+            "OntologyCustomerChatInfo",
         ),
         _tool(
             FEEDBACK,
@@ -3253,7 +3464,6 @@ WORKFLOW = WorkflowDef(
                 DOUYIN,
                 LOCKED_NOTES,
                 JIGUANG,
-                MENGSHI_IT,
                 CHAT_HISTORY,
                 FEEDBACK,
                 PHONE_COMPANY,
@@ -3272,7 +3482,6 @@ WORKFLOW = WorkflowDef(
                 "douyin": (DOUYIN, "result"),
                 "locked_notes": (LOCKED_NOTES, "result"),
                 "jiguang": (JIGUANG, "result"),
-                "mengshi_it": (MENGSHI_IT, "IT_customer_info"),
                 "chat_history": (CHAT_HISTORY, "result"),
                 "feedback": (FEEDBACK, "result"),
                 "phone_company": (PHONE_COMPANY, "company_analysis_result"),

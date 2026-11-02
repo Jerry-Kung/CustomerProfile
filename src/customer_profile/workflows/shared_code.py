@@ -22,6 +22,20 @@ from .. import text_utils as tut
 # ====================================================================
 
 
+def _recording_url_of(raw_payload: Any) -> Any:
+    """从录音渠道的 ``raw_payload`` 里取直链。
+
+    2026-10 接口扁平化后，录音渠道可能只给 ``raw_payload.recording_url`` 而不给记录级
+    ``media_urls``。取不到时返回 ``None``，由调用方按「无文件」处理。
+    """
+    if not isinstance(raw_payload, dict):
+        return None
+    url = raw_payload.get("recording_url")
+    if isinstance(url, str) and url.strip():
+        return [url]
+    return None
+
+
 def extract_media_urls(records: str, data_source: str) -> dict:
     """从 ``customer_data`` 里取出 ``channel == data_source`` 那一项的 ``media_urls``。
 
@@ -56,7 +70,11 @@ def extract_media_urls(records: str, data_source: str) -> dict:
         if item.get("channel") == data_source:
             media_urls = item.get("media_urls")
 
-            # 若找到目标元素，但 media_urls 为空/null，则返回空字符串
+            # 若找到目标元素，但 media_urls 为空/null，则回落到 raw_payload 里的
+            # 录音直链（2026-10 接口扁平化后新增 ``recording_url``），仍取不到才返回空串。
+            if media_urls is None:
+                media_urls = _recording_url_of(item.get("raw_payload"))
+
             if media_urls is None:
                 return {"result": ""}
 

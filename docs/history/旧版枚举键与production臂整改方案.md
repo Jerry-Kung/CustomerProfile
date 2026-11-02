@@ -2,7 +2,7 @@
 
 > 状态：**待批准**（2026-10-27）
 > 依据：`docs/reference/AI画像远程回传接口数据结构说明.md`、`docs/reference/Notes_new.txt`（payload 签名 `b36e78edf9a2`）
-> 关联：`docs/reference/AI画像v2回传改造核查清单.md` §2.3；`docs/遗留问题清单.md` L-015
+> 关联：`docs/history/AI画像v2回传改造核查清单.md` §2.3；`docs/遗留问题清单.md` L-015
 
 ---
 
@@ -194,7 +194,7 @@ import。改指后这些测试仍能验证「子流程编排」这一形态，�
 |---|---|
 | `docs/history/对客产出英文残留治理方案.md` §218 | 「前端若仍显示 `unmarried`」改为指向本文档，说明旧键已在读取时归一 |
 | `docs/遗留问题清单.md` L-015 | 补充：不是纯前端映射问题，`purchase_type`/`purchase_purpose` 的旧键在现行契约里无对应项 |
-| `docs/reference/AI画像v2回传改造核查清单.md` | 保留原文（它是**核查记录**，记录的就是「哪些字段变了」），在文首加一行「旧键已于 2026-10-27 清理，见设计文档」 |
+| `docs/history/AI画像v2回传改造核查清单.md` | 保留原文（它是**核查记录**，记录的就是「哪些字段变了」），在文首加一行「旧键已于 2026-10-27 清理，见设计文档」。2026-11-02 随核查收口从 `reference/` 移入 `history/` |
 | `docs/changelog.md` | 新增本次整改条目 |
 | `docs/design/客户人设画像管线设计.md` §3.8 | 补 `ENUM-01` 的登记与分工 |
 

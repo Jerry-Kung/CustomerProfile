@@ -129,6 +129,15 @@ def split_operator_and_company(body) -> dict:
     else:
         raise ValueError(f"Unsupported body type: {type(body)}")
 
+    # 2026-10-31 起该渠道的 ``raw_payload`` 外面又包了一层 ``data``（同层还有
+    # ``fetched_at`` / ``fetch_status``）。不剥这一层时，两个产出都恒为 ``{}``——
+    # 与迁移期那次静默丢数同一形态，因此这里显式解包，旧形态（字段直接在顶层）一并兼容。
+    # 只在顶层确实没有归属地/企业块时才下钻，避免把企业字段名恰好叫 ``data`` 的载荷误解。
+    if isinstance(data.get("data"), dict) and not any(
+        key in data for key in ("operator_location", "operator_location_json", *COMPANY_BLOCK_KEYS)
+    ):
+        data = data["data"]
+
     # 归属地：新形态把字段摊在 ``operator_location`` 下，旧形态用 ``operator_location_json``。
     # 两者都认，取到哪个用哪个；都取不到时退回空对象（下游据此输出「无数据」）。
     operator_location = data.get("operator_location")

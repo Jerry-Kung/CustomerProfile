@@ -493,7 +493,7 @@ def test_thin_keep_predicate_covers_six_arms():
     """
     keep = pipe._thin_keeps
     # 1 登记档：不论置信档都留（销售本人确认或系统留痕，取值可回溯）
-    assert keep(["客户留存在我方销售数据系统中的信息记录"], "inferred_low")
+    assert keep(["客户线索基础资料"], "inferred_low")
     # 2 第三方画像 + 非低置信：v3.2 起商用画像在无一手记录时是唯一可靠信源
     assert keep(["第三方画像数据"], "inferred_high")
     # 3 第三方画像 + 低置信：不留
@@ -511,7 +511,7 @@ def test_project_claims_thin_tier_keeps_registry_and_trusted_prediction():
     result = pipe.project_claims(
         claims_json(
             claim(attribute="occupation", value="教师", claim_id="c_001",
-                  record_channel="客户留存在我方销售数据系统中的信息记录", basis="inferred_low"),
+                  record_channel="客户线索基础资料", basis="inferred_low"),
             claim(attribute="industry", value="充电桩", claim_id="c_002",
                   record_channel="第三方画像数据", basis="inferred_high"),
             claim(attribute="residence_address", value="广州", claim_id="c_003",

@@ -416,7 +416,7 @@ LEGACY_ENUM_ALIASES: dict[str, dict[str, str]] = {
    ``company`` / ``personal`` 语义完全不重叠，属于**换字段**而非改键，走
    :func:`legacy_cross_field` 的跨字段路由。
 
-来源：``docs/reference/AI画像v2回传改造核查清单.md`` §2.3 与
+来源：``docs/history/AI画像v2回传改造核查清单.md`` §2.3 与
 ``docs/history/旧版枚举键与production臂整改方案.md`` §3。
 """
 
