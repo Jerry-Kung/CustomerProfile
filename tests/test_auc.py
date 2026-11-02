@@ -240,12 +240,13 @@ def test_parse_auc_result_fields_match_the_prompt_example():
     }, f"字段集合漂移：{sorted(parsed[0])}"
 
 
-def test_submit_body_format_follows_the_extension():
+def test_submit_body_format_follows_the_extension(tmp_path):
     """格式按扩展名推断，与原 handler 规则一致（``.mp3`` 之外一律 wav）。"""
-    assert build_submit_body("https://x/a.mp3")["audio"]["format"] == "mp3"
-    assert build_submit_body("https://x/a.MP3")["audio"]["format"] == "mp3"
-    assert build_submit_body("https://x/a.wav")["audio"]["format"] == "wav"
-    assert build_submit_body("https://x/a.m4a")["audio"]["format"] == "wav"
+    settings = make_settings(tmp_path)
+    assert build_submit_body("https://x/a.mp3", settings)["audio"]["format"] == "mp3"
+    assert build_submit_body("https://x/a.MP3", settings)["audio"]["format"] == "mp3"
+    assert build_submit_body("https://x/a.wav", settings)["audio"]["format"] == "wav"
+    assert build_submit_body("https://x/a.m4a", settings)["audio"]["format"] == "wav"
 
 
 async def test_audio_workflow_submit_node_is_routed_to_the_cloud_client(tmp_path):
@@ -319,7 +320,7 @@ async def test_transcript_cache_miss_goes_out_and_archives_the_raw_body(tmp_path
     assert len(transport.requests) == 2, "未命中必须真实出网（提交 + 查询）"
     assert cache.stats.writes == 1, "真实识别后应归档一条"
 
-    entry = cache.load(url, build_submit_body(url)["request"])
+    entry = cache.load(url, build_submit_body(url, make_settings(tmp_path))["request"])
     assert entry is not None, "未命中路径应写入归档"
     body = json.loads(entry.raw_json)
     assert "result" in body and body["result"]["utterances"], (
@@ -333,7 +334,7 @@ async def test_transcript_cache_hit_skips_the_network_entirely(tmp_path):
     这是本能力的核心断言。复用若改变了 ``auc_result``，历史基线与新运行就不可比了。
     """
     url = "https://x/hit.mp3"
-    params = build_submit_body(url)["request"]
+    params = build_submit_body(url, make_settings(tmp_path))["request"]
 
     # 先真实跑一次，拿到基准结果并落归档
     miss_transport = _StubTransport()
@@ -369,7 +370,7 @@ async def test_transcript_cache_is_keyed_on_recognition_params(tmp_path):
     await client.request("POST", SUBMIT, json_body={"file_url": url})
     await client.request("POST", QUERY, json_body={})
 
-    changed = dict(build_submit_body(url)["request"])
+    changed = dict(build_submit_body(url, make_settings(tmp_path))["request"])
     changed["model_version"] = "500"
     assert cache.load(url, changed) is None, "参数变更后必须未命中"
 
@@ -381,7 +382,7 @@ async def test_silent_audio_is_archived_and_reused(tmp_path):
     时会从「无有效内容」变成运行失败。
     """
     url = "https://x/silent.mp3"
-    params = build_submit_body(url)["request"]
+    params = build_submit_body(url, make_settings(tmp_path))["request"]
     cache = TranscriptCache(tmp_path / "cache")
 
     silent_first = _RecordingSilentTransport()

@@ -22,7 +22,9 @@ from pydantic import BaseModel, Field
 from .definitions import RunStatus
 from .logging_config import configure_logging
 from .runner import QueueFull, RunSlotUnavailable, Service, build_service
+from .workflow_scope import accepts_workflow
 from .settings import get_settings
+from .trace_api import register_trace_routes
 
 
 ENTRY_WORKFLOW_ID = "customer_profile_pipeline"
@@ -236,7 +238,8 @@ def create_app(service_factory: Any = None) -> FastAPI:
         slots = service.run_slots
         # 队列快照取自库，不是内存：worker 可能在另一个进程里，本进程无从知道它领走了什么。
         queue = (
-            await service.store.queue_snapshot() if service.store is not None else None
+            await service.store.queue_snapshot(workflow_scope=settings.workflow_scope)
+            if service.store is not None else None
         )
         quota = service.quota.snapshot() if service.quota is not None else {}
         return {
@@ -257,6 +260,8 @@ def create_app(service_factory: Any = None) -> FastAPI:
             "running_runs": queue["running"] if queue else 0,
             "interrupted_runs": queue["interrupted"] if queue else 0,
             "inline_worker": settings.inline_worker,
+            "workflow_scope": settings.workflow_scope,
+            "worker_concurrency": settings.worker_concurrency,
             "serve_ui": settings.serve_ui,
         }
 
@@ -278,6 +283,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
             }
             for definition in service.definitions.values()
             if not definition.is_synthetic
+            and accepts_workflow(service.settings.workflow_scope, definition.workflow_id)
         ]
 
     @app.get("/rules", tags=["meta"])
@@ -603,6 +609,8 @@ def create_app(service_factory: Any = None) -> FastAPI:
                 detail=f"运行 {run_id} 不是 interrupted 状态，无法人工终结",
             )
         return {"run_id": run_id, "abandoned": True}
+
+    register_trace_routes(app, get_service)
 
     # 静态挂载最后加：放在所有 API 路由注册之后，避免 ``/`` 的前缀匹配盖住 API。
     if service_factory is None:

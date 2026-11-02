@@ -70,6 +70,36 @@
       "path": "src/customer_profile/templates/chat_history_data__1778809002515.txt",
       "brand": "猛士",
       "reason": "LLM 节点「1779672287769 数据深度清洗」的提示词正文，缺省业务臂每次带聊天记录都会走到。「猛士」出现在清洗示例里，不是客户数据；删除会让该节点运行期找不到模板"
+    },
+    {
+      "path": "src/customer_profile/invitation_context.py",
+      "brand": "猛士",
+      "reason": "邀约上下文 brief 里写死的对客销售身份。2026-10-30 业务确认「邀约话术统一猛士品牌」，首邀与二次邀约的销售身份都是猛士；改成从知识包读取会与邀约模板口径脱钩"
+    },
+    {
+      "path": "src/customer_profile/templates/invitation__1780473244130.txt",
+      "brand": "猛士",
+      "reason": "LLM 节点「首邀策略」提示词正文，运行期生效。2026-10-30 业务确认将首邀销售身份统一为猛士（修订另记 runtime_revision），正文里的品牌名是销售身份与门店口径，不是竞品泄漏"
+    },
+    {
+      "path": "src/customer_profile/templates/invitation__17821167995750.txt",
+      "brand": "猛士",
+      "reason": "LLM 节点「通话总结与待办事项提取」提示词正文，运行期生效。「猛士」只出现在客户原话风格示例里，属客户自述内容样例，不是提示词自造的品牌口径"
+    },
+    {
+      "path": "src/customer_profile/templates/invitation__17821186748980.txt",
+      "brand": "猛士",
+      "reason": "LLM 节点「二次邀约策略」提示词正文，运行期生效。2026-10-30 业务确认将二次邀约销售身份统一为猛士（修订另记 runtime_revision），正文里的品牌名是销售身份与门店口径，不是竞品泄漏"
+    },
+    {
+      "path": "src/customer_profile/templates/invitation_audio__1773135369428.txt",
+      "brand": "猛士",
+      "reason": "LLM 节点「LLM 识别结果校对」的提示词正文，运行期生效。「猛士」出现在提示词自带的 ASR 示例转写「猛士汽车总部线上体验顾问」里，是讲解输出格式用的样例，不是客户数据"
+    },
+    {
+      "path": "src/customer_profile/templates/invitation_audio__17732152003520.txt",
+      "brand": "猛士",
+      "reason": "LLM 节点「录音无效性判断」的提示词正文，运行期生效。「猛士」同样只出现在输入格式示例的 ASR 示例转写里，与校对节点的示例同源，不是客户数据"
     }
   ]
 }

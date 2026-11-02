@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..definitions import RunStatus
+from ..workflow_scope import WorkflowScope, scope_predicate
 from .schema import (
     SCHEMA_STATEMENTS,
     RunRecordRow,
@@ -446,6 +447,107 @@ class Store:
             return None
         return _row_to_dict(rows[0], json_fields=("inputs_json", "outputs_json"))
 
+    async def trace_run_ids(
+        self,
+        *,
+        run_id: str | None = None,
+        workflow_id: str | None = None,
+        status: str | None = None,
+        business_ref: str | None = None,
+        created_after_ms: int | None = None,
+        created_before_ms: int | None = None,
+    ) -> list[str]:
+        """固定本次导出的运行集合；默认只选主任务，不受列表 500 条上限影响。"""
+        where, params = _run_filter_clause(
+            workflow_id=workflow_id,
+            status=status,
+            business_ref=business_ref,
+            include_children=run_id is not None,
+            created_after_ms=created_after_ms,
+            created_before_ms=created_before_ms,
+        )
+        if run_id is not None:
+            where += " AND run_id = ?" if where else "WHERE run_id = ?"
+            params.append(run_id)
+        rows = await asyncio.shield(self._read(
+            f"SELECT run_id FROM workflow_runs {where} "
+            "ORDER BY created_at_ms, run_id", params,
+        ))
+        return [row["run_id"] for row in rows]
+
+    async def execution_trace(self, run_id: str) -> dict[str, Any] | None:
+        """在一次只读事务中获取运行、全部后代、节点、请求尝试及当时的版本快照。"""
+        tree = (
+            "WITH RECURSIVE tree(run_id) AS ("
+            " SELECT run_id FROM workflow_runs WHERE run_id = ?"
+            " UNION SELECT child.run_id FROM workflow_runs AS child"
+            " JOIN tree ON child.parent_run_id = tree.run_id) "
+        )
+
+        def work(connection: sqlite3.Connection) -> dict[str, Any] | None:
+            connection.execute("BEGIN")
+            try:
+                captured_at_ms = _now_ms()
+                rows = connection.execute(
+                    tree + "SELECT run.* FROM workflow_runs AS run "
+                    "JOIN tree ON run.run_id = tree.run_id "
+                    "ORDER BY run.created_at_ms, run.run_id", (run_id,),
+                ).fetchall()
+                if not rows:
+                    return None
+                runs = {}
+                for row in rows:
+                    run = _row_to_dict(row, ("inputs_json", "outputs_json"))
+                    run["inputs"] = run.pop("inputs_json") or {}
+                    run["outputs"] = run.pop("outputs_json") or {}
+                    run["is_replay"] = bool(run["is_replay"])
+                    run.update(nodes=[], attempts=[], child_run_ids=[])
+                    runs[run["run_id"]] = run
+                for run in runs.values():
+                    if run["parent_run_id"] in runs:
+                        runs[run["parent_run_id"]]["child_run_ids"].append(run["run_id"])
+
+                nodes = connection.execute(
+                    tree + "SELECT node.* FROM node_executions AS node "
+                    "JOIN tree ON node.run_id = tree.run_id "
+                    "ORDER BY COALESCE(node.started_at_ms, 0), node.execution_id",
+                    (run_id,),
+                ).fetchall()
+                for row in nodes:
+                    runs[row["run_id"]]["nodes"].append(
+                        _row_to_dict(row, ("inputs_json", "outputs_json"))
+                    )
+                attempts = connection.execute(
+                    tree + "SELECT attempt.* FROM request_attempts AS attempt "
+                    "JOIN tree ON attempt.run_id = tree.run_id ORDER BY attempt.attempt_id",
+                    (run_id,),
+                ).fetchall()
+                for row in attempts:
+                    runs[row["run_id"]]["attempts"].append(
+                        _row_to_dict(row, ("request_json", "usage_json"))
+                    )
+                versions = connection.execute(
+                    tree + "SELECT version.* FROM definition_versions AS version "
+                    "WHERE version.version_id IN (SELECT run.definition_version_id "
+                    "FROM workflow_runs AS run JOIN tree ON run.run_id = tree.run_id)",
+                    (run_id,),
+                ).fetchall()
+                return {
+                    "root_run_id": run_id,
+                    "captured_at_ms": captured_at_ms,
+                    "runs": runs,
+                    "definitions": {
+                        str(row["version_id"]): _row_to_dict(
+                            row, ("definition_json", "template_hashes_json")
+                        ) for row in versions
+                    },
+                }
+            finally:
+                connection.rollback()
+
+        # 下载中断不应取消数据库线程正在完成的 Future。
+        return await asyncio.shield(self._run(work))
+
     async def list_runs(
         self,
         *,
@@ -505,7 +607,7 @@ class Store:
         )
         return int(rows[0]["n"]) if rows else 0
 
-    async def mark_running_as_interrupted(self) -> int:
+    async def mark_running_as_interrupted(self, *, workflow_scope: WorkflowScope = "all") -> int:
         """把残留的 ``running`` 运行标记为 ``interrupted``（§7.3）。
 
         **只标 ``running``，不标 ``queued``**（V0.5.2 修正）。此前两者一起标，会让
@@ -515,22 +617,28 @@ class Store:
 
         ``running`` 只标不续跑：进程中断不能证明外部副作用未发生（既定约束），因此这些运行**保留已完成结果**并交人工处理。
         """
-        rows = await self._read(
-            "SELECT run_id FROM workflow_runs WHERE status = ?", (RunStatus.RUNNING,)
-        )
-        run_ids = [r["run_id"] for r in rows]
-        for run_id in run_ids:
-            await self._write(
-                "UPDATE workflow_runs SET status = ?, error = COALESCE(error, ?) "
-                "WHERE run_id = ? AND status = ?",
-                (
-                    RunStatus.INTERRUPTED,
-                    "进程中断：运行中任务未完成，已完成结果已保留",
-                    run_id,
-                    RunStatus.RUNNING,
-                ),
+        predicate, params = scope_predicate(workflow_scope)
+
+        def work(connection: sqlite3.Connection) -> int:
+            # 只沿在跑运行的祖先查找主任务，避免恢复时遍历全部历史子流程。
+            # 同名共享子工作流必须按其主任务归属恢复。
+            cursor = connection.execute(
+                "WITH RECURSIVE lineage(run_id, parent_run_id, workflow_id) AS ("
+                " SELECT run_id, parent_run_id, workflow_id FROM workflow_runs WHERE status = ?"
+                " UNION SELECT lineage.run_id, parent.parent_run_id, parent.workflow_id"
+                " FROM workflow_runs parent JOIN lineage ON parent.run_id = lineage.parent_run_id"
+                ") UPDATE workflow_runs SET status = ?, error = COALESCE(error, ?)"
+                " WHERE status = ? AND run_id IN ("
+                f" SELECT run_id FROM lineage WHERE parent_run_id IS NULL AND {predicate})"
+                " RETURNING run_id",
+                (RunStatus.RUNNING, RunStatus.INTERRUPTED,
+                 "进程中断：运行中任务未完成，已完成结果已保留", RunStatus.RUNNING, *params),
             )
-        return len(run_ids)
+            marked = len(cursor.fetchall())
+            connection.commit()
+            return marked
+
+        return await self._run(work)
 
     # ------------------------------------------------------------ 队列（V0.5.2）
 
@@ -559,8 +667,27 @@ class Store:
         )
         await self.insert_run(row)
 
+    async def enqueue_run_once(self, run: RunRecordRow) -> bool:
+        """仅首次写入队列；重复请求绝不把 running/终态改回 queued。"""
+        now = _now_ms()
+
+        def work(connection: sqlite3.Connection) -> bool:
+            cursor = connection.execute(
+                "INSERT INTO workflow_runs (run_id, workflow_id, workflow_display_name, "
+                "business_ref, status, inputs_json, is_replay, queued_at_ms, created_at_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (run_id) DO NOTHING",
+                (run.run_id, run.workflow_id, run.workflow_display_name, run.business_ref,
+                 RunStatus.QUEUED, json_dumps(run.inputs), int(run.is_replay), now, now),
+            )
+            inserted = cursor.rowcount == 1
+            cursor.close()
+            connection.commit()
+            return inserted
+
+        return await self._run(work)
+
     async def claim_next_queued_run(
-        self, worker_id: str, *, lease_ms: int
+        self, worker_id: str, *, lease_ms: int, workflow_scope: WorkflowScope = "all"
     ) -> dict[str, Any] | None:
         """原子领取一个待跑运行；无待跑或已被别人领走时返回 ``None``。
 
@@ -573,6 +700,7 @@ class Store:
         ``RETURNING`` 需要 SQLite ≥ 3.35（本机实测 3.50.4）。
         """
         now = _now_ms()
+        predicate, params = scope_predicate(workflow_scope)
 
         def work(connection: sqlite3.Connection) -> dict[str, Any] | None:
             cursor = connection.execute(
@@ -581,7 +709,7 @@ class Store:
                 "    lease_expires_at_ms = ? "
                 "WHERE run_id = ("
                 "  SELECT run_id FROM workflow_runs "
-                "  WHERE status = ? AND parent_run_id IS NULL "
+                f"  WHERE status = ? AND parent_run_id IS NULL AND {predicate} "
                 "  ORDER BY created_at_ms LIMIT 1"
                 ") AND status = ? "
                 "RETURNING run_id, workflow_id, business_ref, inputs_json, "
@@ -593,6 +721,7 @@ class Store:
                     worker_id,
                     now + int(lease_ms),
                     RunStatus.QUEUED,
+                    *params,
                     RunStatus.QUEUED,
                 ),
             )
@@ -653,22 +782,24 @@ class Store:
 
         return await self._run(work)
 
-    async def queue_depth(self) -> int:
+    async def queue_depth(self, *, workflow_scope: WorkflowScope = "all") -> int:
         """待跑（``queued``）的主运行条数。提交侧的容量判断用它。"""
+        predicate, params = scope_predicate(workflow_scope)
         rows = await self._read(
             "SELECT COUNT(*) AS n FROM workflow_runs "
-            "WHERE status = ? AND parent_run_id IS NULL",
-            (RunStatus.QUEUED,),
+            f"WHERE status = ? AND parent_run_id IS NULL AND {predicate}",
+            (RunStatus.QUEUED, *params),
         )
         return int(rows[0]["n"]) if rows else 0
 
-    async def queue_snapshot(self) -> dict[str, int]:
+    async def queue_snapshot(self, *, workflow_scope: WorkflowScope = "all") -> dict[str, int]:
         """队列概览：待跑、在跑、中断待处理。供 ``GET /runtime`` 展示。"""
+        predicate, params = scope_predicate(workflow_scope)
         rows = await self._read(
             "SELECT status, COUNT(*) AS n FROM workflow_runs "
-            "WHERE parent_run_id IS NULL AND status IN (?, ?, ?) "
+            f"WHERE parent_run_id IS NULL AND {predicate} AND status IN (?, ?, ?) "
             "GROUP BY status",
-            (RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.INTERRUPTED),
+            (*params, RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.INTERRUPTED),
         )
         counts = {str(r["status"]): int(r["n"]) for r in rows}
         return {

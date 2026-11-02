@@ -34,6 +34,7 @@ from typing import Any, Mapping
 
 import httpx
 
+from ..settings import Settings
 from .http import HttpAttempt, _ms
 
 SUBMIT_PATH = "/submit_analyze"
@@ -43,9 +44,6 @@ QUERY_PATH = "/query_analyze"
 定义里写的仍是这两个路径（迁移前的定义的取值），由这里翻译成云服务的 ``/submit`` 与 ``/query``。
 留痕里记的也是这两个值，因此历史运行的 request_attempts 口径不变。
 """
-
-CLOUD_SUBMIT_PATH = "/submit"
-CLOUD_QUERY_PATH = "/query"
 
 OK = "20000000"
 IN_PROGRESS = frozenset({"20000001", "20000002"})
@@ -65,8 +63,28 @@ def _audio_format(file_url: str) -> str:
     return "wav"
 
 
-def build_submit_body(file_url: str) -> dict[str, Any]:
-    """提交请求体。字段与原 handler 逐项一致，避免行为漂移。"""
+def build_submit_body(file_url: str, settings: Settings) -> dict[str, Any]:
+    """按部署配置组装识别请求；缺省取值与原 handler 一致。"""
+    params = {
+        "model_name": settings.auc_model_name,
+        "enable_channel_split": settings.auc_enable_channel_split,
+        "enable_ddc": settings.auc_enable_ddc,
+        "enable_speaker_info": settings.auc_enable_speaker_info,
+        "enable_punc": settings.auc_enable_punc,
+        "enable_itn": settings.auc_enable_itn,
+        "show_speech_rate": settings.auc_show_speech_rate,
+        "show_volume": settings.auc_show_volume,
+        "enable_emotion_detection": settings.auc_enable_emotion_detection,
+        "enable_gender_detection": settings.auc_enable_gender_detection,
+        "corpus": {
+            "correct_table_name": settings.auc_corpus_correct_table_name,
+            "context": settings.auc_corpus_context,
+        },
+    }
+    if settings.auc_ssd_version is not None:
+        params["ssd_version"] = settings.auc_ssd_version
+    if settings.auc_model_version is not None:
+        params["model_version"] = settings.auc_model_version
     return {
         "user": {"uid": "fake_uid"},
         "audio": {
@@ -77,21 +95,7 @@ def build_submit_body(file_url: str) -> dict[str, Any]:
             "bits": 16,
             "channel": 2,
         },
-        "request": {
-            "model_name": "bigmodel",
-            "enable_channel_split": True,
-            "enable_ddc": True,
-            "enable_speaker_info": True,
-            "enable_punc": True,
-            "enable_itn": True,
-            "ssd_version": "200",
-            "model_version": "400",
-            "show_speech_rate": True,
-            "show_volume": True,
-            "enable_emotion_detection": True,
-            "enable_gender_detection": True,
-            "corpus": {"correct_table_name": "", "context": ""},
-        },
+        "request": params,
     }
 
 
@@ -299,7 +303,7 @@ class AucClient:
             raise AucCloudError("AUC 提交缺少 file_url")
 
         file_url = str(file_url)
-        body = build_submit_body(file_url)
+        body = build_submit_body(file_url, self._settings)
         params = body["request"]
         key = self._key(node_ref)
 
@@ -323,7 +327,7 @@ class AucClient:
 
         task_id = str(uuid.uuid4())
         response = await self._post(
-            CLOUD_SUBMIT_PATH, body, self._headers(task_id, submit=True)
+            self._settings.auc_submit_path, body, self._headers(task_id, submit=True)
         )
         attempt.status_code = response.status_code
         attempt.response_headers = _redact(dict(response.headers))
@@ -378,7 +382,7 @@ class AucClient:
         while True:
             poll_count += 1
             response = await self._post(
-                CLOUD_QUERY_PATH, {}, self._headers(task_id, submit=False)
+                self._settings.auc_query_path, {}, self._headers(task_id, submit=False)
             )
             code = response.headers.get("X-Api-Status-Code", "")
 

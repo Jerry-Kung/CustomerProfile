@@ -1,0 +1,2 @@
+# Dify 导入模板按原始换行留存，来源哈希不随检出平台变化。
+src/customer_profile/templates/invitation*.txt -text whitespace=-blank-at-eol,cr-at-eol

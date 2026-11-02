@@ -1,7 +1,7 @@
 # Customer Profile —— 运行镜像
 #
-# 一个镜像承载三个进程（API / worker / inbound），具体命令由 docker-compose 指定。
-# 三份几乎相同的镜像各自构建会互相漂移，因此只在 compose 里换 command。
+# 同一构建定义供两组 API/worker 使用，Compose 自动为每个服务命名镜像。
+# 按服务选择更新范围，另一组正在运行的镜像不受影响。
 #
 # 构建（在仓库根目录）：
 #     docker build -t customer-profile:latest .

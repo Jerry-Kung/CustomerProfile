@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -133,6 +134,9 @@ def estimate_prompt_tokens(payload: Mapping[str, Any]) -> int:
                     chars += len(str(part.get("text") or ""))
                 elif part.get("type") == "image_url":
                     images += 1
+    if payload.get("response_format", {}).get("type") == "json_schema":
+        # Schema 也占用输入 token，不能只预扣 messages 而漏算结构约束。
+        chars += len(json.dumps(payload["response_format"]["json_schema"], ensure_ascii=False))
     return max(1, chars // 2) + images * 1000
 
 
