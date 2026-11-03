@@ -392,6 +392,32 @@ RULES: tuple[Rule, ...] = (
             "tests/rules/test_spec.py::test_global_rule_not_folded_into_field_notes",
         ),
     ),
+    Rule(
+        id="SPEC-20",
+        version=1,
+        title="付款方式的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("payment_method",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal=(
+            "只有客户明确说贷款/按揭/分期/走金融，或提到月供、利率、免息、首付、"
+            "金融方案，或订单记录写明分期，才可记为贷款。**不得**把购车补贴、以旧换新、"
+            "优惠政策、砍价/比价/嫌贵、低收入或低消费档、车型价格标签当作贷款依据；"
+            "只由月供、利率、金融政策一类间接表述推出的，可以记为贷款但置信度要低，"
+            "并在说明里写「推断可能存在贷款倾向，但尚未确认」。以上都不成立时记全款。"
+        ),
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_finance.py::test_payment_note_rendered_inline",
+            "tests/rules/test_finance.py::test_price_signals_named_in_prompt_as_excluded",
+        ),
+    ),
 )
 
 CONSUMPTION_LEVEL_NOTE = "（消费等级分{bands}档，数字越大代表消费水平越高）"

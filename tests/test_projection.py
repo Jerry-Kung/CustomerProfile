@@ -479,7 +479,9 @@ def test_notes_updates_only_contain_backed_fields():
     result = proj.project([claim("occupation", "教师", channel="试驾录音信息")])
     keys = {u["attribute_key"] for u in result.notes_updates}
     # v3.5：姓名恒有交代（这里没有姓名断言，故为「未知」）。
-    assert keys == {"occupation", "customer_name"}
+    # 2026-11-03：付款方式未提及即按全款落值（PAY-02），因此它**有值但来自默认**，
+    # 不是「没有依据却写了一条」——见 test_finance.py 对该口径的正反例。
+    assert keys == {"occupation", "customer_name", "payment_method"}
     assert keys <= set(nc.ALL_KEYS)
 
 
@@ -560,7 +562,11 @@ def test_internal_only_fields_never_reach_notes_updates():
     assert result.facts.get("emotion") == ["straightforward", "hate_being_rushed"]
     assert result.facts.get("old_car_model") == "2019 别克"
     # 回传侧：只有契约字段能出去（姓名恒有交代，取值为「未知」）
-    assert {u["attribute_key"] for u in result.notes_updates} == {"core_concerns", "customer_name"}
+    assert {u["attribute_key"] for u in result.notes_updates} == {
+        "core_concerns",
+        "customer_name",
+        "payment_method",  # 2026-11-03：未提及即全款的默认值，见 PAY-02
+    }
 
 
 def test_structured_enum_serialized_as_json_string():

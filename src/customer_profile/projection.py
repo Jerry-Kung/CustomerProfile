@@ -50,6 +50,7 @@ from .rules import actions as rule_actions
 from .rules import default as default_rules
 from .rules.clusters import consistency as consistency_rules
 from .rules.clusters import identity as identity_rules
+from .rules.clusters import finance as finance_rules
 from .rules.clusters import income as income_rules
 from .rules.clusters import level as level_rules
 """档位→区间换算的正身已下沉到 :mod:`customer_profile.income_band`（取数节点也用它）。
@@ -233,6 +234,13 @@ SALESPERSON_MARKERS: tuple[str, ...] = (
 :data:`NAME_SOURCE_WHITELIST` 同口径。
 
 实测命中：``13435844484`` 的 ``customer_name`` 取值为「郑小姐（顾问自称，非客户姓名）」。
+"""
+
+DEFAULTED_KEYS: frozenset[str] = frozenset({"payment_method"})
+"""由业务默认值兜底的字段（见 ``rules.clusters.finance.PAY-02``）。
+
+它们不参与 L2 的「缺字段补全」：默认值已经在投影层落定，让兜底再补一次会把同一件事
+判两遍，而兜底只看事实表、看不到「一线反馈九成全款」这个先验。
 """
 
 AGGREGATE_TEXT_KEYS: frozenset[str] = frozenset(
@@ -453,6 +461,13 @@ class Projection:
     与 :attr:`rejected` 的分工：``rejected`` 是**没写进 facts** 的；
     ``downgraded`` 是**写进去了但置信档被拉低**的。两者都留痕——静默降级会让人
     误以为模型很有把握，而静默丢弃会让人误以为模型没提取到。
+    """
+
+    defaulted: set[str] = field(default_factory=set)
+    """由规则**默认值**填充的字段（不是客户说的、也不是模型推断的）。
+
+    ``payment_method`` 的「未提及即全款」走这条通道：取值要进 ``facts``（下游定级与
+    卡片都读它），但 Notes 的说明必须写成「这是默认」，不能借用一般推断的措辞。
     """
 
     rule_trace: list[dict[str, Any]] = field(default_factory=list)
@@ -865,6 +880,20 @@ def project(
         #      手机价**区间，不是收入。模型把它们当作收入写进 ``annual_income``，
         #      实测产出「中低端（8w-15w）」（13570263031：标签原文 4档收入 → 应 30-40万）。
         #      非收入标签整条拒收，而不是降级：它描述的根本不是这个字段。
+        # ---- 付款方式只认金融线索（2026-11-03 业务口径）：补贴、优惠、砍价、收入档
+        #      一类信号描述的是「价格敏感」，不是「打算怎么付款」。只由它们撑起的
+        #      贷款结论整条拒收，随后由 PAY-02 按全款默认——这与「宁空勿错」是同一
+        #      取向：贷款写错的代价（销售按贷款方案谈、客户全款成交后风控口径对不上）
+        #      高于漏记一条倾向。
+        # rule: PAY-01 价格与预算线索不是贷款依据
+        allowed, loan_actions = finance_rules.check_loan_evidence(attribute, group)
+        if loan_actions:
+            _run_rule_actions(result, loan_actions, table)
+            if not allowed:
+                # 全是价格线索：不写 facts，交给 PAY-02 的默认（见函数尾部）。
+                continue
+            group = allowed
+
         # rule: INCOME-02 收入字段只认收入标签
         allowed, income_actions = income_rules.check_income_tag(attribute, group)
         _run_rule_actions(result, income_actions, table)
@@ -980,6 +1009,19 @@ def project(
 
     # ---- f 跨字段规则
     _apply_cross_field_rules(result, context, disabled_rules=disabled_rules)
+
+    # ---- 付款方式默认（2026-11-03 用户口径）：一手与登记记录都没提贷款/分期，
+    #      按全款落值。**低置信 + 专用说明**——它是先验（一线反馈约九成全款），
+    #      不是客户表过态，销售点开必须能看出这一点。
+    #      ``payment_default_allowed`` 由装配层按分诊档位传入：``empty`` 档数据全空，
+    #      此时给「全款」等于凭空编一条结论，故不填（见 project_claims）。
+    # rule: PAY-02 未提及贷款即按全款
+    if context.get("payment_default_allowed", True) and finance_rules.should_default(
+        result.facts, claims
+    ):
+        _run_rule_actions(result, [finance_rules.default_full_payment_action()], table)
+        result.basis[finance_rules.FIELD] = INFERRED_LOW
+        result.defaulted.add(finance_rules.FIELD)
 
     # ---- 等级唯一化（跨产物字段）
     _unify_level(result, disabled_rules=disabled_rules)
@@ -1524,7 +1566,10 @@ def _to_notes_updates(
             continue
 
         sources = sorted(grouped.get(key) or [], key=lambda c: c.rank)
-        if key == "customer_name" and name_is_unresolved(result.facts.get(key)):
+        if key in result.defaulted:
+            # 默认值条目：说明必须写明「这是默认」，不能走一般推断的措辞。
+            detail = finance_rules.default_detail()
+        elif key == "customer_name" and name_is_unresolved(result.facts.get(key)):
             # 姓名查不到可靠来源：固定兜底值（「客户+手机号后四位」，无手机号则「未知」），
             # 并说清为什么没有——不写「据现有记录归纳」这种像是从记录里提取到了什么的措辞。
             detail = {
@@ -1626,6 +1671,10 @@ def build_l2_candidates(
     seen = {c["attribute_key"] for c in candidates}
     for key in nc.ALL_KEYS:
         if key in seen or key in covered or key in result.facts:
+            continue
+        if key in DEFAULTED_KEYS:
+            # 默认值字段不交兜底补全：投影层已经按「未提及即全款」落定过，让兜底
+            # 再猜一次等于把这条业务口径撤回，而且会补出与默认相反的值。
             continue
         candidates.append(
             {

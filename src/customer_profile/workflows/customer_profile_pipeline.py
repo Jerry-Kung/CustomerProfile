@@ -57,6 +57,7 @@ from .. import readable as rdb
 from .. import rules
 from ..definitions import WorkflowDef, make_node
 from ..rules.clusters import expression as expression_rules
+from ..rules.clusters import finance as finance_rules
 from ..rules.clusters import hard as hard_rules
 from ..rules import checker as rule_checker
 from . import ontology_payload
@@ -2296,9 +2297,14 @@ def project_claims(claims_json, tier: str = "sufficient") -> dict:
             intent_outcome = knowledge.intent.reroute_claims(ledger, pack)
             ledger = list(intent_outcome.claims)
 
+    # 付款方式默认（PAY-02）只在**有一手或登记记录**的档位生效：``empty`` 档数据全空，
+    # 此时落「全款」等于凭空编一条结论，不给。``thin`` 档照给——它只是记录稀疏，
+    # 仍有第三方画像与登记信息可依，先验在这里同样成立（用户口径 2026-11-03）。
+    projection_context = _projection_context(ledger)
+    projection_context["payment_default_allowed"] = tier != "empty"
     result = proj.project(
         ledger,
-        context=_projection_context(ledger),
+        context=projection_context,
         disabled_rules=_disabled_rule_ids(),
     )
 
@@ -2770,7 +2776,7 @@ def review_notes(notes_updates_json, facts_json, basis_json="{}", channels_json=
         state.notes, is_placeholder=inf.is_english_placeholder
     ) + expression_rules.check_placeholders(
         state.notes, is_placeholder=inf.is_english_placeholder
-    )
+    ) + finance_rules.check_weak_signal(state.notes)
     gate_actions = [item for item in gate_actions if item.rule in table]
     applied = rules.apply(state, gate_actions, max_rounds=1, registry=table)
 
