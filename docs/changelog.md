@@ -2,6 +2,26 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-11-03 — UAT 近 18 小时运行数据入库，作为业务优化主参考数据源
+
+从 UAT 取回 2026-11-02T16:00 至 11-03T10:10 窗口的全部画像运行 trace（导出包 304 MB）。
+
+- **规模**：792 次根运行 / 482 个号码 / 12582 次运行 / 169866 条节点执行 / 11192 次出网尝试。
+  窗口内同号码最多运行 9 次（202 个号码有重复），落目录时依次 `__run2`…`__run4`。
+- **新增入库器** `scripts/ingest_trace_export.py`：`GET /traces/export` 的 JSONL 每行一棵
+  根运行树，`runs` 是字典且自带 `parent_run_id`（旧格式要从 `node.sub_run_id` 反推）。
+  产出与 `ingest_uat_export.py` 同构，`compare_batches` / `rules_report` / `probe_*` /
+  `replay_from_archive` 都直接可用；定义快照按 `version_id` 去重存 `source/definitions.json`，
+  17 个版本哈希全部复算一致。
+- **落位** `experiments/uat_data/uat-traces-20261102-20261103/`（3.4 GB，不入库）。
+  `trace.db` 保留节点输入输出全文，未截断。
+- **缺省批次随迁**：`probe_checker` / `probe_rules_diff` / `snapshot_note_contract` /
+  `replay_from_archive` / `rules_report --cases-batch` 与 `tests/rules/test_checker.py`
+  指向的旧批次已随清理消失，一并改指新批次。
+- **已知缺口**：本批不含 `note-attributes` 请求（快照生成器改走 `--from-response`）；
+  5 个根运行在采集时仍在跑。
+- 回滚：无需回滚，纯数据入库；旧批次已手工归档至仓库外。
+
 ## 2026-11-03 — 付款方式改按「未提及即全款」判定
 
 一线反馈：真实购车客户约九成全款、一成贷款，而系统给出的贷款占比明显偏高。原因是

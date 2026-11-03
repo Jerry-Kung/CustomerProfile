@@ -37,7 +37,7 @@ from customer_profile.workflows.customer_profile_pipeline import (  # noqa: E402
     _blank_value,
 )
 
-DEFAULT_BATCH = REPO_ROOT / "experiments/uat_data/uat-18-20261026"
+DEFAULT_BATCH = REPO_ROOT / "experiments/uat_data/uat-traces-20261102-20261103"
 
 
 def _load(path: Path) -> Any:

@@ -66,7 +66,7 @@ from customer_profile.replay import ReplaySource, http_key  # noqa: E402
 from customer_profile.runner import build_service  # noqa: E402
 
 BATCH_ROOT = REPO_ROOT / "experiments" / "uat_data"
-DEFAULT_SOURCE = "uat-all-tasks-20261026-20261027"
+DEFAULT_SOURCE = "uat-traces-20261102-20261103"
 
 SKIP_TARGETS = ("/callback/update-profile", "/submit_analyze", "/query_analyze")
 """这些请求不进 HTTP fixture。

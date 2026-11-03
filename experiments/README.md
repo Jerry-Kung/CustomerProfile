@@ -17,8 +17,7 @@
 
 | 目录 | 内容 | 说明 |
 |---|---|---|
-| `uat_data/uat-all-tasks-20261026-20261027/` | **UAT 全量任务导出** 69 根运行 / 57 号码 | 由 `runtime-all-tasks-last24h-20261027-092607.zip` 整理入库，`scripts/ingest_uat_export.py` 可复现 |
-| `uat_data/uat-18-20261026/` | **UAT 快照归档** 18 根运行 / 16 号码 | 写回开启、无代码提交锚点，**不是受控基线**，见其 `README.md` |
+| `uat_data/uat-traces-20261102-20261103/` | **UAT traces 导出归档** 792 根运行 / 482 号码 / 12582 运行 | 2026-11-02T16:00 至 11-03T10:10 窗口，由 `scripts/ingest_trace_export.py` 整理；业务优化的主参考数据源 |
 | `uat_data/phones.txt` | 上述批次的号码总清单 | 人读用；按批次另见各自 `phones.txt` |
 | `batches/` | 本地跑批批次 | 由 `scripts/run_baseline.py` 生成，结构与 `uat_data/` 同构 |
 | `transcript_cache/` | 录音转写归档（58 条） | **跨批次共用**，与工作流逻辑无关，删掉等于毁掉复用设计 |
@@ -29,13 +28,19 @@
 ## 入库一批新的 UAT 数据
 
 ```
-# 1. 在内网按 runbooks/内网取数与本地复现.md 导出全量任务 JSON
-# 2. 本地整理入库（zip 原封复制进 source/）
+# 现行格式：运行台 GET /traces/export 的 zip（JSONL，每行一棵根运行树）
+python scripts/ingest_trace_export.py \
+  --zip <导出包>.zip \
+  --out-dir experiments/uat_data/<batch-id>
+
+# 旧格式：全量任务导出 all-tasks-complete.json（历史批次用）
 python scripts/ingest_uat_export.py \
   --export <解包目录>/all-tasks-complete.json \
   --out-dir experiments/uat_data/<batch-id> \
   --archive <导出包>.zip
 ```
+
+两者产出同构，后续工具不需要区分来源格式。`--dry-run` 只体检不落盘。
 
 ## 不保留什么
 

@@ -267,7 +267,7 @@ def test_rule_apply_is_noop_on_empty_verdict():
 # ---------------------------------------------------------------- 基线回放（离线）
 
 BASELINE = Path(__file__).resolve().parents[2] / (
-    "experiments/uat_data/uat-18-20261026"
+    "experiments/uat_data/uat-traces-20261102-20261103"
 )
 
 
@@ -298,7 +298,7 @@ def test_baseline_cases_without_fields_are_never_sent():
     assert facts_by_case, "基线批次读不到任何事实表"
     sent = {name: checker.briefs(facts) for name, facts in facts_by_case.items()}
     # 职业为占位串或不存在的案：不得送检
-    for name in ("15335772822", "15972379760", "18062597750"):
+    for name in ("13016467834", "13058621105", "13072734919"):
         if name in sent:
             assert sent[name] == [], f"{name} 的字段不足以判断，不该送检"
 
