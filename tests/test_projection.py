@@ -368,8 +368,12 @@ def test_multi_value_field_keeps_all():
 
 # ---------------------------------------------------------------- f 跨字段规则
 
-def test_old_car_forces_replacement():
-    """旧车证据 ⇒ 换购。
+def test_old_car_alone_does_not_force_replacement():
+    """**有旧车 ≠ 要置换**（2026-11-04 业务定稿）。
+
+    旧实现把 ``old_car_model`` 有值当成换购凭据，于是「客户家里有台酷路泽」这类纯拥车
+    叙述会把购车性质一路改成换购。客户名下有车，只是说他有一台车——卖不卖、抵不抵，
+    得他自己说。
 
     落点是**编外字段** ``purchase_nature``：v2 契约的 ``purchase_type`` 只剩
     「个户 / 公户」，把 ``replacement`` 写进去既非法、又会在回传时被静默丢弃。
@@ -380,7 +384,45 @@ def test_old_car_forces_replacement():
             claim("purchase_nature", "first"),
         ]
     )
+    assert result.facts.get("purchase_nature") == "first"
+
+
+def test_trade_in_signal_forces_replacement():
+    """客户明确要置换时，购车性质定为换购——这条改写仍然成立。"""
+    result = proj.project(
+        [
+            claim(
+                "trade_in_requirement",
+                '{"key": "yes", "input_value": "别克"}',
+                quote="我这台别克想置换了",
+            ),
+            claim("purchase_nature", "first", claim_id="c_002"),
+        ]
+    )
     assert result.facts.get("purchase_nature") == "replacement"
+
+
+def test_trade_in_model_requires_explicit_requirement():
+    """CONSIST-06：置换需求不成立时，置换车型整条拒收并转确认。
+
+    业务方报障的卡面形态有两种：置换需求=无而置换车型有值、置换需求整栏缺失而
+    置换车型有值。两者都是把「客户有旧车」当成了置换。这一条只看 facts，不猜原文。
+    """
+    result = proj.project(
+        [
+            claim("old_car_model", "丰田兰德酷路泽", quote="家里有台丰田酷路泽"),
+            claim(
+                "trade_in_model",
+                "丰田兰德酷路泽",
+                basis="inferred_high",
+                basis_of_inference=("客户家里有台丰田酷路泽",),
+            ),
+        ]
+    )
+    assert "trade_in_model" not in result.facts
+    assert any(
+        r.get("rule") == "f_trade_in_model_without_need" for r in result.rejected
+    )
 
 
 def test_trade_in_yes_implies_replacement():

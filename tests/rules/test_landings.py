@@ -52,6 +52,52 @@ def test_no_car_kept_without_evidence():
     assert not any(t.get("rule_id") == "CONSIST-05" for t in result.rule_trace)
 
 
+def test_trade_in_model_kept_with_requirement():
+    """CONSIST-06 的反例：置换需求成立时，置换车型照常写入。
+
+    判据只看「置换需求是不是 yes」，不看这句话是从哪来的——真置换客户被误杀等于把
+    最直接的成交线索丢掉。
+    """
+    result = proj.project(
+        [
+            claim(
+                "trade_in_requirement",
+                '{"key": "yes", "input_value": "问界"}',
+                quote="我这台问界想置换掉",
+            ),
+            claim(
+                "trade_in_model",
+                "问界M7",
+                quote="就这台问界M7，你们评估一下",
+            ),
+        ]
+    )
+    assert result.facts.get("trade_in_model") == "问界M7"
+    assert not any(
+        r.get("rule") == "f_trade_in_model_without_need" for r in result.rejected
+    )
+
+
+def test_trade_in_requirement_no_still_blocks_model():
+    """CONSIST-06：客户明确说「不置换」时，置换车型更不该留。
+
+    这一形态在 UAT 归档里有 38 例，说明文字多为「客户未提及旧车/置换」——把没提到
+    当成了没有，随后又补了一台车。
+    """
+    result = proj.project(
+        [
+            claim("trade_in_requirement", "no", quote="我这车不置换"),
+            claim(
+                "trade_in_model",
+                "极氪",
+                basis="inferred_low",
+                basis_of_inference=("现车为极氪",),
+            ),
+        ]
+    )
+    assert "trade_in_model" not in result.facts
+
+
 def test_single_level_is_not_touched():
     """LEVEL-01 的反例：只有一个来源给出等级时，不产生冲突、不改值、不转确认。"""
     result = proj.project([claim("deal_level", "B")])

@@ -243,6 +243,18 @@ DEFAULTED_KEYS: frozenset[str] = frozenset({"payment_method"})
 判两遍，而兜底只看事实表、看不到「一线反馈九成全款」这个先验。
 """
 
+NO_L2_FILL_KEYS: frozenset[str] = frozenset({"trade_in_model", "trade_in_requirement"})
+"""**不得**由 L2 缺字段补全的字段。
+
+置换相关字段是「客户说了才有」的：没有置换信号时正确答案是**留空**，而不是补一个
+最可能的车型。兜底提示词要求「像人看着已知信息做合理推测那样」补值，它能看到的只有
+「客户有台车」，补出来的必然是「把有旧车当成要置换」——正是业务方 2026-11-04 报障的
+形态。UAT 归档 ``uat-traces-20261102-20261103`` 里 147 例置换车型有 44 例是这么补出来的
+（置信 0.25，说明多为「无旧车」「未提及具体车型」一类否定串）。
+
+宁可留白转人工，也不让兜底替客户决定他要不要置换。
+"""
+
 AGGREGATE_TEXT_KEYS: frozenset[str] = frozenset(
     {
         "hobbies",
@@ -738,8 +750,11 @@ def project(
 
     - ``company_deregistered``：关联企业的登记状态是否为「注销」。
       已注销主体**不得**当作在职企业填入（基线 ``13926073386`` 即此缺陷）。
-    - ``has_old_car_evidence``：原文里是否出现旧车证据（用于补 ``old_car_model``
-      与纠正 ``purchase_nature``）。
+    - ``has_old_car_evidence``：原文里是否出现旧车证据。它只说明「客户名下有车」，
+      **不再**用于纠正 ``purchase_nature``——有旧车不等于要置换（2026-11-04）。
+    - ``has_trade_in_evidence``：原文/断言里是否有**肯定形态**的置换表述。``CONSIST-01``
+      只认这一个旁证。``CONSIST-05``（现车不得为「无车」）仍按两者之一判——它要证明的
+      是「客户名下有车」，拥车证据本身就够了，与「要不要交出去」无关。
     """
     context = dict(context or {})
     result = Projection()
@@ -1077,9 +1092,10 @@ def _run_rule_actions(
     result.rule_trace.extend(trace.asdict() for trace in applied.traces)
 
 
-# rule: CONSIST-01 有旧车 ⇔ 换购
+# rule: CONSIST-01 有置换意愿 ⇔ 换购
 # rule: CONSIST-03 已注销企业不得当作在职企业
 # rule: CONSIST-05 有置换凭据时不得是无车
+# rule: CONSIST-06 置换车型有值必须有置换需求
 def _apply_cross_field_rules(
     result: Projection,
     context: Mapping[str, Any],
@@ -1675,6 +1691,10 @@ def build_l2_candidates(
         if key in DEFAULTED_KEYS:
             # 默认值字段不交兜底补全：投影层已经按「未提及即全款」落定过，让兜底
             # 再猜一次等于把这条业务口径撤回，而且会补出与默认相反的值。
+            continue
+        if key in NO_L2_FILL_KEYS:
+            # 置换类字段同理：没有置换信号时正确答案是留空。兜底只看事实表，
+            # 它唯一能凭的就是「客户有台车」，补出来的必然是错误结论。
             continue
         candidates.append(
             {

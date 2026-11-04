@@ -1940,7 +1940,156 @@ OLD_CAR_ATTRIBUTES: frozenset[str] = frozenset(
 )
 """「有旧车」的旁证字段：任一条有值即说明客户在开（过）自己的车。"""
 
-TRADE_IN_MARKERS: tuple[str, ...] = ("置换", "有旧车")
+TRADE_IN_MARKERS: tuple[str, ...] = (
+    "置换",
+    "换购",
+    "以旧换新",
+    "拿旧车抵",
+    "把这台卖掉",
+    "回收",
+    "估价",
+    "评估",
+)
+"""置换交易的**肯定**表述。只有命中这里才算「客户要把旧车交出去」。
+
+业务口径（2026-11-04）：置换是交易动作，不是拥车状态。旧实现只认 ``("置换", "有旧车")``
+两个裸子串，于是「暂无明确置换需求」也命中——把否定句读成了肯定，随后 CONSIST-05
+又把「无车」改写成「有车」，一处误读连锁改掉两个字段。
+"""
+
+TRADE_IN_INDIRECT_MARKERS: tuple[str, ...] = (
+    "置换补贴",
+    "以旧换新优惠",
+    "置换优惠",
+    "置换政策",
+    "置换价",
+)
+"""**间接**信号：客户在问补贴/优惠，没说要置换（业务口径 2026-11-04）。
+
+「买车购置税全款，然后置换补贴也没有」是在抱怨拿不到补贴，不是说自己要把车交出去。
+这类句子只能作为**低置信**信源：没有排他信号时可以用来判「有置换意向」，但置信要低、
+说明里要写明是从补贴话题推的；**不得**据此写置换车型。判据见 :func:`_trade_in_signal_level`。
+"""
+
+TRADE_IN_EXCLUSIONS: tuple[str, ...] = (
+    "已经卖了",
+    "已经卖掉",
+    "刚卖了",
+    "刚卖掉",
+    "已经卖了",
+    "卖了旧车",
+    "旧车已卖",
+    "已卖掉",
+    "已售出",
+    "已经出售",
+    "已处置",
+    "已经处置",
+    "已报废",
+    "报废了",
+    "已经报废",
+    "已过户",
+    "已经过户",
+    "过户了",
+    "没有车了",
+    "无车可置换",
+)
+"""**排他**信号：客户那台车已经不在了，不存在可置换的旧车（业务口径 2026-11-04）。
+
+「客户刚卖了二手车」「那台车撞报废了」——车不在名下、也交不出去，置换需求不成立。
+这一档**优先级最高**：命中即判无置换意向，哪怕同一段话里还有「置换」「以旧换新」。
+实测 ``13797120317`` 两轮重放都因为漏了这一档而误判为有置换需求。
+"""
+
+TRADE_SIGNAL_DIRECT = "direct"
+TRADE_SIGNAL_INDIRECT = "indirect"
+TRADE_SIGNAL_NONE = "none"
+"""置换信号的三个档位。排他信号命中时一律 ``none``。"""
+
+TRADE_IN_NEGATIONS: tuple[str, ...] = (
+    "暂无",
+    "没有",
+    "无置换",
+    "不置换",
+    "不需要置换",
+    "不考虑置换",
+    "未提及",
+    "未明确",
+    "未涉及",
+    "没提",
+)
+"""否定/未提及表述：出现即**不构成**置换凭据。
+
+即使同句里有「置换」二字（「暂无置换需求」），也不算信号——客户说的是没有。
+"""
+
+TRADE_IN_MODEL_NEGATIONS: tuple[str, ...] = (
+    "无旧车",
+    "无置换",
+    "未提及",
+    "未明确",
+    "未知",
+    "不明",
+    "待确认",
+    "无车",
+    "不涉及",
+)
+"""置换车型里的**非车型**取值：否定、占位与「待确认」。
+
+它们不是一台车，不应被当作「客户要交出去的车型」，也不该据此立置换凭据。
+「待确认」是业务方定的多车甄别落值（2026-11-04），同样不是一台具体的车。
+"""
+
+
+def _trade_in_signal_level(text: str) -> str:
+    """把一段证据串判成置换信号的三个档位之一。
+
+    判序**从硬到软**，每一档命中即返回：
+
+    1. **排他**（``none``）——「已经卖了 / 报废了 / 已过户」：车不在了，没有可置换的旧车。
+       这一档压过其它一切，否则「客户刚卖了二手车，问一下置换补贴」会被读成要置换。
+    2. **否定**（``none``）——「暂无 / 没有 / 未提及」：客户说的是没有这回事。
+       不做「剥掉否定词再看」那种反推：剥完剩下的「明确置换需求」恰好会读成肯定。
+    3. **间接**（``indirect``）——只剩补贴/优惠类词：「置换补贴也没有」是在问价，
+       不是要置换。低置信可用，且不得据此写置换车型。
+    4. **直接**（``direct``）——「置换 / 换购 / 以旧换新 / 拿旧车抵 / 回收 / 估价」。
+
+    先判排他再判否定，是因为排他句里常同时带否定词以外的置换词；反过来先判直接信号，
+    「已经卖了旧车想置换」就会被误读。
+    """
+    normalized = str(text or "")
+    if not normalized:
+        return TRADE_SIGNAL_NONE
+    if any(phrase in normalized for phrase in TRADE_IN_EXCLUSIONS):
+        return TRADE_SIGNAL_NONE
+
+    # 先把间接词剥掉，剩下的才是「客户本人在说置换」的部分。
+    # 这一步不能省：「置换补贴也没有」里的「没有」否定的是**补贴**，不是置换意愿；
+    # 若拿整句去判否定，这句会被读成「不置换」，正好丢掉一个弱信号。
+    residual = normalized
+    for phrase in TRADE_IN_INDIRECT_MARKERS:
+        residual = residual.replace(phrase, "")
+
+    if any(marker in residual for marker in TRADE_IN_MARKERS):
+        # 直接信号成立时才看否定：「暂无明确置换需求」说的就是没有。
+        if any(phrase in residual for phrase in TRADE_IN_NEGATIONS):
+            return TRADE_SIGNAL_NONE
+        return TRADE_SIGNAL_DIRECT
+    if any(phrase in normalized for phrase in TRADE_IN_INDIRECT_MARKERS):
+        return TRADE_SIGNAL_INDIRECT
+    return TRADE_SIGNAL_NONE
+
+
+def _trade_in_signal(text: str) -> bool:
+    """是否有**可用的**置换信号（直接或间接）。排他与否定一律为假。"""
+    return _trade_in_signal_level(text) != TRADE_SIGNAL_NONE
+
+
+def _trade_in_model_value(text: str) -> bool:
+    """置换车型取值是否**真的是一台车**（不是否定串 / 占位 / 待确认）。"""
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    return not any(phrase in normalized for phrase in TRADE_IN_MODEL_NEGATIONS)
 
 
 def _has_test_drive(records: list[dict]) -> bool:
@@ -1976,8 +2125,10 @@ def _has_old_car(claims: list[dict]) -> bool:
             return True
         if attribute != "trade_in_requirement":
             continue
-        text = json.dumps(value, ensure_ascii=False, default=str).lower()
-        if "yes" in text or any(marker in text for marker in TRADE_IN_MARKERS):
+        text = json.dumps(value, ensure_ascii=False, default=str)
+        if '"yes"' in text or "'yes'" in text:
+            return True
+        if _trade_in_signal(text):
             return True
     return False
 
@@ -2094,11 +2245,18 @@ def _basis_of(raw: dict) -> str:
 
 
 def _projection_context(claims) -> dict:
-    """从断言账本读投影所需的旁证（原文级事实，不从字段值反推）。"""
+    """从断言账本读投影所需的旁证（原文级事实，不从字段值反推）。
+
+    两个旁证**必须分开**（2026-11-04）：``has_old_car_evidence`` 只说「客户有车」，
+    ``has_trade_in_evidence`` 才说「客户要把车交出去」。旧实现把两者合成一个
+    ``old_car`` 标志，于是任何一句「我家里有台酷路泽」都能把它立起来，CONSIST-01
+    随即把购车性质改成换购、CONSIST-05 再把「无车」改写掉。
+    """
     from customer_profile.rules.clusters import consistency as consistency_rules
 
     deregistered = False
     old_car = False
+    trade_in = False
     for claim in claims:
         text = json.dumps(claim.value, ensure_ascii=False, default=str)
         if claim.attribute in {"company", "company_type"} and any(
@@ -2118,9 +2276,26 @@ def _projection_context(claims) -> dict:
             if any(phrase in text for phrase in consistency_rules.DEPOSIT_PHRASES):
                 continue
             old_car = True
-        if claim.attribute == "trade_in_requirement" and ("有旧车" in text or "置换" in text):
+        if claim.attribute == "trade_in_requirement":
+            # 只有**肯定**形态才算置换凭据。旧判据是裸子串「置换」，于是
+            # 「暂无明确置换需求」「没有置换」这类否定句也被当成了凭据。
+            if _is_placeholder_value(claim.value):
+                continue
+            if _trade_in_signal(text):
+                trade_in = True
+                old_car = True
+        if claim.attribute == "trade_in_model":
+            # 置换车型本身也是旁证：能落到这个字段，说明 L1 读到了「要交出去的那台」。
+            # 占位与否定形态除外——「无旧车」不是一台车。
+            if _is_placeholder_value(claim.value) or not _trade_in_model_value(text):
+                continue
+            trade_in = True
             old_car = True
-    return {"company_deregistered": deregistered, "has_old_car_evidence": old_car}
+    return {
+        "company_deregistered": deregistered,
+        "has_old_car_evidence": old_car,
+        "has_trade_in_evidence": trade_in,
+    }
 
 
 def _thin_keeps(channels: list[str], basis: str) -> bool:
