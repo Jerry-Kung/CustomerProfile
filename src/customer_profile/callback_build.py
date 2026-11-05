@@ -128,6 +128,19 @@ def _label(attribute: str, raw: Any) -> str:
         display = inf.display_map(attribute).get(text)
         if display:
             return str(display)
+        # 「肯定 + 补充值」的内联写法：``yes（品牌）``。L1 会把契约里 ``yes`` 的
+        # ``input_value``（旧车品牌）写进同一个串，而不是结构化取值。不拆开翻译，
+        # 这个内部形态就会原样印到卡片上。拆出来只翻译前半段的键。
+        # 括号里若只是同一个展示名（``power（动力）``），不再重复一次——
+        # 这类写法是模型给键名补的中文注，译完就是「动力（动力）」。
+        head, sep, tail = text.partition("（")
+        if sep and head.strip():
+            display = inf.display_map(attribute).get(head.strip())
+            if display:
+                detail = tail.rstrip("）").strip()
+                if not detail or detail == str(display):
+                    return str(display)
+                return f"{display}（{detail}）"
         # 结构化枚举（如 trade_in_requirement）取值是 dict，取其 key 的展示名。
         for item in _as_list(raw):
             if isinstance(item, dict):
@@ -188,8 +201,12 @@ class _FactView:
         facts: Mapping[str, Any],
         notes: Sequence[Any],
         claims: Sequence[Any] = (),
+        to_confirm: Sequence[Any] = (),
     ) -> None:
         self.facts: Mapping[str, Any] = facts
+        self._confirm: list[Mapping[str, Any]] = [
+            entry for entry in to_confirm if isinstance(entry, Mapping)
+        ]
         self._notes: dict[str, dict[str, Any]] = {}
         for entry in notes:
             if not isinstance(entry, dict):
@@ -207,6 +224,20 @@ class _FactView:
             if not attribute:
                 continue
             self._claims.setdefault(attribute, []).append(_claim_from_payload(entry))
+
+    def confirm_for(self, *attributes: str) -> list[Mapping[str, Any]]:
+        """取这批字段上「需要销售确认」的条目。
+
+        ``to_confirm`` 是投影层「无法坐实、留白交人补」的产物。它此前只到
+        ``L2_PROJECT`` 的输出为止，回传体完全不读，于是销售看到的是一条空白字段，
+        不知道是「没查到」还是「查到了但对不上」。这里把它接到卡片上。
+        """
+        wanted = set(attributes)
+        return [
+            entry
+            for entry in self._confirm
+            if _as_text(entry.get("attribute_key")) in wanted
+        ]
 
     def has(self, attribute: str) -> bool:
         value = self.facts.get(attribute)
@@ -847,6 +878,104 @@ def _category_visit(view: _FactView) -> list[dict[str, Any]]:
     return items
 
 
+CONFIRM_FIELDS: Mapping[str, tuple[str, ...]] = {
+    CATEGORY_COMPARE: ("intended_model",),
+    CATEGORY_VEHICLE: ("current_vehicle_info", "old_car_model"),
+    CATEGORY_CHANGE: ("trade_in_requirement", "trade_in_model", "purchase_nature"),
+}
+"""哪些字段的「待确认」值得写进卡片，以及挂在哪个分类下。
+
+**只收客户明确表达过东西的字段**。``to_confirm`` 每案动辄十几条，绝大多数是
+「身份字段仅由社交自呈现支撑」这类**没有可用信息**的条目——它们说的是「这条线索
+不够硬」，销售照着也补不出东西，全推到卡片上只会把真正需要问的那条埋掉。
+
+这三组不同：客户说了某台车、说了要置换、说了现在开什么，管线却判不实。
+空白字段会让销售以为「客户没提」，而实际上客户提了、只是没能落到确定取值上。
+"""
+
+_CONFIRM_NAMES: Mapping[str, str] = {
+    # 卡片的「换车动因」分类里这一项一直写作「购车性质」（见 ``_category_change``），
+    # 沿用同一说法，免得同一条信息在卡片上有两个名字。
+    "purchase_nature": "购车性质",
+}
+"""待确认标签里字段的叫法，与卡片上已有的说法对齐；未列出的走契约中文名。"""
+
+CONFIRM_SPECULATION_PHRASES: tuple[str, ...] = (
+    "社交",
+    "预测",
+    "不构成客户事实",
+    "未经客户确认",
+)
+"""**凭据不足型**的确认，不进卡片。
+
+它们描述的是「这条信息不够硬」，不是「客户说了但我们对不上」。后者才是销售能
+当场问清楚的；前者问出来也只是让客户重复一遍他本来就说过的话。
+"""
+
+
+def _confirm_items(
+    view: _FactView, category: str, rank_start: int
+) -> list[dict[str, Any]]:
+    """把某分类下客户的「待确认」渲染成带前缀的标签。
+
+    文案由管线口径转成销售口径：写「客户提到的车型需确认」，不写字段键名、
+    不写规则编号——卡片是给销售看的（``docs/README.md`` 的对客产出口径）。
+    """
+    attributes = CONFIRM_FIELDS.get(category) or ()
+    if not attributes:
+        return []
+    items: list[dict[str, Any]] = []
+    for entry in view.confirm_for(*attributes):
+        reason = _sales_text(entry.get("reason") or "")
+        if any(phrase in reason for phrase in CONFIRM_SPECULATION_PHRASES):
+            continue
+        action = _sales_text(entry.get("suggested_action") or "")
+        label = _confirm_label(entry)
+        if not label:
+            continue
+        detail = {
+            "summary": reason or "客户资料里有这条信息，但还不能确定具体取值",
+            "steps": [action] if action else ["与客户确认后补全这条信息"],
+            "evidence": [],
+            "confidence": 0.3,
+        }
+        items.append(
+            _item(
+                "confirm",
+                f"{category}:{label}",
+                label,
+                detail,
+                rank_start + len(items),
+                extra_digest=reason,
+            )
+        )
+    return items
+
+
+def _confirm_label(entry: Mapping[str, Any]) -> str:
+    """待确认条目的展示文案：``待确认：意向车型（客户提到「X700 Ultra」）``。
+
+    客户提到的那个取值本身就是最有用的信息——销售拿着它去问一句就能确认，
+    而只写「意向车型待确认」等于让他从头再问一遍。
+    """
+    attribute = _as_text(entry.get("attribute_key"))
+    name = _CONFIRM_NAMES.get(attribute) or (inf.name_of(attribute) if attribute else "")
+    if not name:
+        return ""
+    # 候选值同样要过一遍展示名翻译：``yes（品牌）`` 是**内部枚举形态**，原样印在
+    # 卡片上等于把契约取值端给销售看。翻不过去的（``未知``、``未知渠道`` 一类占位）
+    # 直接丢掉——它们不是客户说的话，留着只会让标签变成「客户提到『未知』」。
+    candidates = [_label(attribute, item) for item in _as_list(entry.get("candidates"))]
+    candidates = [
+        item
+        for item in candidates
+        if item and item not in ("未知", "无", "未提及", "未提供")
+    ]
+    if candidates:
+        return f"待确认：{name}（客户提到「{'、'.join(candidates)}」）"
+    return f"待确认：{name}"
+
+
 def _category_vehicle(view: _FactView) -> list[dict[str, Any]]:
     """当前用车：契约的 ``current_vehicle_info`` + 编外三个车型/车龄字段。
 
@@ -876,6 +1005,8 @@ def _category_vehicle(view: _FactView) -> list[dict[str, Any]]:
             _item("vehicle", attribute, f"{inf.name_of(attribute)}：{text}",
                   view.detail(attribute), len(items) + 1, extra_digest=text)
         )
+    # 现车/旧车上「客户说了但对不上」的条目：见 :data:`CONFIRM_FIELDS`。
+    items.extend(_confirm_items(view, CATEGORY_VEHICLE, len(items) + 1))
     return items
 
 
@@ -890,6 +1021,9 @@ def _category_change(view: _FactView) -> list[dict[str, Any]]:
     nature = _as_text(view.raw("purchase_nature"))
     items: list[dict[str, Any]] = []
     if nature != REPLACEMENT_PURCHASE:
+        # **不是换购也要看有没有待确认**：客户说了要置换、管线却判不实时，
+        # 这里正是销售该看到它的地方。直接返回会把唯一一条提示也丢掉。
+        items.extend(_confirm_items(view, CATEGORY_CHANGE, 1))
         return items
     label = _label("purchase_nature", nature) or "换购"
     items.append(
@@ -905,6 +1039,7 @@ def _category_change(view: _FactView) -> list[dict[str, Any]]:
             _item("change", "pain_points", text, view.detail("pain_points"),
                   len(items) + 1, extra_digest=text)
         )
+    items.extend(_confirm_items(view, CATEGORY_CHANGE, len(items) + 1))
     return items
 
 
@@ -923,6 +1058,7 @@ def _category_compare(view: _FactView) -> list[dict[str, Any]]:
                 _item("compare", attribute, f"{prefix}{text}",
                       view.detail(attribute), len(items) + 1, extra_digest=text)
             )
+    items.extend(_confirm_items(view, CATEGORY_COMPARE, len(items) + 1))
     return items
 
 
@@ -1218,6 +1354,7 @@ def build_analysis_result(
     notes_updates_json: Any = "[]",
     express_json: Any = "{}",
     claims_json: Any = "{}",
+    to_confirm_json: Any = "[]",
 ) -> str:
     """把一份已定稿的事实装成回传请求体（顶层三键），返回 **JSON 字符串**。
 
@@ -1255,7 +1392,10 @@ def build_analysis_result(
         express = {}
 
     claims = _claims(_payload(claims_json))
-    view = _FactView(facts, notes, claims)
+    confirm = _payload(to_confirm_json)
+    if not isinstance(confirm, (list, tuple)):
+        confirm = []
+    view = _FactView(facts, notes, claims, confirm)
 
     analysis_result: dict[str, Any] = {
         "profile_summary": build_profile_summary(view),
@@ -1305,6 +1445,7 @@ def main(
     notes_updates_json: Any = "[]",
     express_json: Any = "{}",
     claims_json: Any = "{}",
+    to_confirm_json: Any = "[]",
 ) -> dict[str, Any]:
     """工作流 ``code`` 节点的入口（返回 ``{出参名: 值}``，由执行器逐字段取出）。
 
@@ -1315,7 +1456,13 @@ def main(
     """
     return {
         "callback_json": build_analysis_result(
-            phone, batch_id, facts_json, notes_updates_json, express_json, claims_json
+            phone,
+            batch_id,
+            facts_json,
+            notes_updates_json,
+            express_json,
+            claims_json,
+            to_confirm_json,
         )
     }
 

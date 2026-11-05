@@ -179,3 +179,26 @@ def test_pipeline_disables_kb02_by_rule_switch(monkeypatch):
     monkeypatch.setattr(pipe, "_disabled_rule_ids", lambda: ("KB-02",))
     result = pipe.project_claims(claims)
     assert "坦克700" in json.loads(result["facts_json"])["intended_model"]
+
+
+# ---------------------------------------------------------------- 档位：不得误杀
+
+def test_model_with_trim_stays_intended(pack):
+    """「猛士X700 Ultra」是在售车型的档位，必须留在意向位，不得当成型号不明剔除。
+
+    这是 2026-11-04 UAT 报障的直接回归：推理链写明「意向车型已明确为X700 Ultra」，
+    Notes 的意向车型却整条为空。
+    """
+    outcome = intent.reroute_claims([make_claim("intended_model", "猛士X700 Ultra")], pack)
+    assert values_of(outcome, "intended_model") == ["猛士X700 Ultra"]
+    assert not outcome.touched
+    assert not outcome.to_confirm
+
+
+def test_ambiguous_trim_stays_intended_and_asks_which_series(pack):
+    """``Ultra`` 属于多款在售车型：留在意向位（不丢），并请人确认车系（不替客户挑）。"""
+    outcome = intent.reroute_claims([make_claim("intended_model", "Ultra")], pack)
+    assert values_of(outcome, "intended_model") == ["Ultra"]
+    assert values_of(outcome, "competing_model") == []
+    assert len(outcome.to_confirm) == 1
+    assert "多款在售车型" in outcome.to_confirm[0]["reason"]

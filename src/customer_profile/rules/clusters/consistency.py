@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 
 from ..actions import Action
 from ..registry import Rule
+from . import hard as hard_rules
 
 RULES: tuple[Rule, ...] = (
     Rule(
@@ -133,8 +134,74 @@ RULES: tuple[Rule, ...] = (
 # 检查函数：只产出动作，不改任何状态
 # ====================================================================
 
-NO_OLD_CAR_VALUES: frozenset[str] = frozenset({"无", "没有", "无旧车"})
-"""旧车字段里表示「没有旧车」的写法。它们出现时**不构成**换购凭据。"""
+NO_OLD_CAR_VALUES: frozenset[str] = frozenset(
+    {
+        "无",
+        "没有",
+        "无旧车",
+        "无车",
+        "没有车",
+        "暂无",
+        "暂无车",
+        "未知",
+        "未提供",
+        "未提及",
+        "未知车型",
+        "不清楚",
+        "不详",
+        "不明",
+    }
+)
+"""旧车字段里**不是一台车**的写法。它们出现时**不构成**拥车凭据。
+
+「未知」与「未提供」必须在这里：L1 在没有任何旧车线索时就会这样写。把它们当成
+「客户有台车」，下游 CONSIST-05 会把「现车信息=无车」改写成「有车」——凭据是空的，
+改出来的结论却是确定的（UAT ``13720382502`` 的复查就是这样发现现车字段被污染的）。
+"""
+
+NO_OLD_CAR_PREFIXES: tuple[str, ...] = ("无", "没有", "未", "暂无", "不清", "不详", "不明")
+"""否定/未知形态的**前缀**。用前缀而不是全等，是因为 L1 会补括号说明：
+``无（第三方预测倾向无车）``、``无（倾向无旧车）`` 都不是一台车。真实车型名不会以
+这些字起头。"""
+
+
+def has_old_car_value(value: Any) -> bool:
+    """``old_car_model`` 这类取值是否**真的说明客户名下有车**。
+
+    四道关，任一不过即不算凭据：空值 → 通用占位串（``hard.is_placeholder``）→
+    否定/未知形态（含前缀形态）→ 下单词。四条合起来才叫「有一台车」，缺一条就会把
+    一个占位串当成拥车证据，进而改写别的字段。
+    """
+    # 结构化取值（``{"key": "no"}``）与列表先按片段拆开再判：它们 ``str()`` 之后
+    # 既不等于「无」也不以否字起头，只看整串会漏。
+    if isinstance(value, Mapping):
+        parts = [_text(value.get("key")), _text(value.get("input_value"))]
+    elif isinstance(value, (list, tuple, set)):
+        parts = [_text(item) for item in value]
+    else:
+        text = _text(value)
+        if not text:
+            return False
+        parts = _value_fragments(text)
+    parts = [part for part in parts if part]
+    if not parts:
+        return False
+    return not all(_fragment_is_not_a_car(part) for part in parts)
+
+
+def _fragment_is_not_a_car(part: str) -> bool:
+    """单个片段的「不是一台车」判定。空片段也算——多值里的一项为空不影响其余项。"""
+    if not part:
+        return True
+    if hard_rules.is_placeholder(part):
+        return True
+    if part in NO_OLD_CAR_VALUES:
+        return True
+    if part.startswith(NO_OLD_CAR_PREFIXES):
+        return True
+    if any(phrase in part for phrase in DEPOSIT_PHRASES):
+        return True
+    return False
 
 DEPOSIT_PHRASES: tuple[str, ...] = (
     "小订",
@@ -245,9 +312,18 @@ def _text(value: Any) -> str:
 
 
 def _trade_in_yes(value: Any) -> bool:
-    if value == "yes":
-        return True
-    return isinstance(value, dict) and value.get("key") == "yes"
+    """置换需求是否为**肯定**形态。
+
+    ``yes（长安）`` 这类「肯定 + 品牌」是契约里 ``yes`` 项的 ``input_value`` 正常写法
+    （契约：``yes`` 带一个旧车品牌输入框），必须与裸 ``yes`` 同权。只看全等会把 39 例
+    真实置换判成「无凭据」，随后 CONSIST-01 把购车性质撤回、并把客户的置换线索抹掉。
+    判据取「整串以 yes 起头」，仍不看「no」以外的任何取值——``yes（否）`` 这类自相矛盾
+    的写法不在这里兜底。
+    """
+    if isinstance(value, dict):
+        value = value.get("key")
+    text = _text(value).lower()
+    return text == "yes" or text.startswith("yes（") or text.startswith("yes(")
 
 
 def _is_no_car_value(value: Any) -> bool:
@@ -299,8 +375,9 @@ def check_cross_field(
     # 会把购车性质一路改成换购——而客户从没说过要把那台车交出去。UAT 归档
     # （``uat-traces-20261102-20261103``）里 147 例置换车型有一半是这么来的。
     # 现在只认 ``trade_in_requirement=yes`` 与原文里的置换凭据。
-    old_car = _text(facts.get("old_car_model"))
-    has_old_car = bool(old_car) and old_car not in NO_OLD_CAR_VALUES
+    # 「未知」「未提供」「无（倾向无旧车）」都不是一台车。判据收敛到 :func:`has_old_car_value`，
+    # CONSIST-05 也用它——同一条证据在两处得出不同结论，正是旧实现的问题。
+    has_old_car = has_old_car_value(facts.get("old_car_model"))
     has_old_car = has_old_car or bool(context.get("has_old_car_evidence"))
     # ``trade_in_requirement=yes`` **本身就是**「有旧车」的凭据，与旧车证据同权。
     # 这里**不**清除 ``trade_in_requirement``——清除它会抹掉置换的唯一凭据。

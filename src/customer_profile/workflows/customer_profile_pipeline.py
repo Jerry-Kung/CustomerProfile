@@ -2115,13 +2115,18 @@ def _has_old_car(claims: list[dict]) -> bool:
 
     投影层（:func:`_projection_context`）早已按 :func:`hard_rules.is_placeholder`
     排除占位值，两处判据必须同形：否则同一张卡上会同时出现「无旧车」与「有驾照」。
+    现在两处都调 :func:`consistency.has_old_car_value`，不再各写一份。
     """
+    from customer_profile.rules.clusters import consistency as consistency_rules
+
     for claim in claims:
         attribute = str(claim.get("attribute") or "")
         value = claim.get("value")
         if _blank_value(value) or _is_placeholder_value(value):
             continue
         if attribute in OLD_CAR_ATTRIBUTES:
+            if not consistency_rules.has_old_car_value(value):
+                continue
             return True
         if attribute != "trade_in_requirement":
             continue
@@ -2264,16 +2269,14 @@ def _projection_context(claims) -> dict:
         ):
             deregistered = True
         if claim.attribute in {"old_car_model", "owned_brand_model", "owned_car_age"}:
-            # **「无」不是旧车证据**：客户原话「目前无车」「没有旧车」时 L1 仍可能给出
-            # ``old_car_model="无"``。只看「属性出现过」会把首购客户改写成换购，
-            # 卡片上凭空多出一条「购车性质：换购」。占位取值一律不算凭据。
+            # **「无」「未知」「未提供」都不是旧车证据**：客户原话「目前无车」「没有旧车」
+            # 时 L1 仍可能给出 ``old_car_model="无"``，没线索时给「未知」。只看「属性
+            # 出现过」会把首购客户改写成换购，卡片上凭空多出一条「购车性质：换购」。
             #
-            # **下单词也不是旧车证据**（CONSIST-04 同口径）：含小订/大定的拥车断言
-            # 在 a2 段被整条拒收，但它若先在这里立了「有旧车」，CONSIST-01 仍会把
-            # 购车性质改写成换购——旁证必须与断言过滤看同一件事。
-            if _is_placeholder_value(claim.value):
-                continue
-            if any(phrase in text for phrase in consistency_rules.DEPOSIT_PHRASES):
+            # **下单词也不是旧车证据**（CONSIST-04 同口径）。⚠️ 旧车是否成立的判定必须
+            # 与 CONSIST-05 同形：两处对同一条证据得出不同结论，就会一边判「有车」、
+            # 一边把现车改写成「有车」，而凭据本身是空的。
+            if not consistency_rules.has_old_car_value(claim.value):
                 continue
             old_car = True
         if claim.attribute == "trade_in_requirement":
@@ -4119,6 +4122,10 @@ WORKFLOW = WorkflowDef(
                 # ``reasoning_chain`` 与 ``basis_of_inference`` 送到出口，卡片才写得出
                 # 销售读得懂的推导链（2026-10-29 可读性整改）。
                 "claims_json": (L1_INJECT, "claims_json"),
+                # 投影层「无法坐实、留白交人补」的条目。此前它只到 L2 的输出为止、
+                # 回传体不读，于是客户说了某项信息而管线判不实时，销售只看得到一条
+                # 空白，分不清是「客户没提」还是「提了但对不上」。
+                "to_confirm_json": (L2_ENUM_MAP, "to_confirm_json"),
             },
             outputs=("callback_json",),
             # 指向 ``main`` 而不是 ``build_analysis_result``：后者返回的是 JSON **字符串**，

@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping, Sequence
 
 from .pack import EMPTY_PACK, ModelEntry, Pack
-from .resolve import resolve_model
+from .resolve import resolve_model, trim_names
 
 _TEXT_KEYS = ("intended_model", "competing_model", "test_driven_models", "old_car_model",
               "owned_brand_model")
@@ -63,6 +63,17 @@ def render_brand_brief(pack: Pack | None = None) -> str:
             models.append(entry.canonical_name)
     if models:
         lines.append("在售车型：" + "、".join(models))
+    # 档位也是「称谓」而不是参数：客户与留资记录说的是「X700 Ultra」这种车型 + 档位，
+    # 不写出来，L1 会以为闭集只认车系名，进而把档位省掉或改写。
+    trims: list[str] = []
+    for entry in resolved.models:
+        if entry.status == "discontinued":
+            continue
+        names = [item for item in trim_names(entry) if " " in item or len(item) > 3]
+        if names:
+            trims.append(f"{entry.canonical_name}：{'、'.join(names)}")
+    if trims:
+        lines.append("各车型档位（客户说的「某车型 + 档位」同样属意向车型）：" + "；".join(trims))
 
     lines.extend(
         [

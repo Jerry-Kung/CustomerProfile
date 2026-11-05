@@ -87,3 +87,46 @@ def test_empty_pack_never_matches():
 def test_canonical_model_name_normalizes_alias(pack):
     assert resolve.canonical_model_name("m817", pack) == "猛士M817"
     assert resolve.canonical_model_name("不存在的车", pack) is None
+
+
+# ---------------------------------------------------------------- 档位（版本）
+
+def test_model_with_trim_suffix_resolves(pack):
+    """「车型 + 档位」是客户与留资最常见的写法，必须落回车系。
+
+    UAT 归档里 792 案有 456 例的意向车型是这么被闭集剔除的——值本身完全正确。
+    """
+    assert resolve.resolve_model("猛士X700 Ultra", pack) == "dfms-x700"
+    assert resolve.resolve_model("X700 Ultra", pack) == "dfms-x700"
+    assert resolve.resolve_model("M817 MAX+", pack) == "dfms-m817"
+    assert resolve.resolve_model("猛士917 增程基础版", pack) == "dfms-917"
+
+
+def test_trim_suffix_is_case_and_space_insensitive(pack):
+    assert resolve.resolve_model(" x700   ultra ", pack) == "dfms-x700"
+    assert resolve.resolve_model("X700 ULTRA", pack) == "dfms-x700"
+
+
+def test_ambiguous_trim_alone_does_not_pick_a_model(pack):
+    """``Ultra`` 同时是 X700 与 M817 的档位：认哪一款都是猜。"""
+    assert resolve.resolve_model("Ultra", pack) is None
+    assert resolve.resolve_model("Max+", pack) is None
+
+
+def test_unambiguous_trim_alone_resolves(pack):
+    assert resolve.resolve_model("Mate", pack) == "dfms-m817"
+    assert resolve.resolve_model("增程基础版", pack) == "dfms-917"
+
+
+def test_ambiguous_trim_is_still_our_brand(pack):
+    """认不出是哪一款，但它确实是我们的在售档位——绝不能判成竞品或陌生称谓。"""
+    assert resolve.is_our_trim("Ultra", pack) is True
+    assert resolve.resolve_brand("Ultra", pack) == "our"
+    assert resolve.is_our_brand("Ultra", pack) is True
+
+
+def test_trim_does_not_open_the_door_to_fuzzy_matching(pack):
+    """档位只认知识包里写明的名字：近似写法仍然不命中。"""
+    assert resolve.resolve_model("X700 Super", pack) is None
+    assert resolve.resolve_model("猛士老款917特别版", pack) is None
+    assert resolve.resolve_model("坦克700", pack) is None
