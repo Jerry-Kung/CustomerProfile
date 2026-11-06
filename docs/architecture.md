@@ -111,6 +111,17 @@ TPM 用「出网前按 prompt 长度预扣 + 拿到 usage 后校正」（差异 
 两条刻意的口径：**子运行与父运行共表**（树形自引用便于下钻）；**定义快照随运行一起存**
 （V0.4 的「历史运行显示旧图」依赖它）。
 
+### 5.1 载荷两段存放（存储瘦身）
+
+`node_executions` / `request_attempts` 的载荷列与 `workflow_runs.outputs_json` **不长期留在库里**：
+根运行收尾时按整棵树打成 `DATA_DIR/trace-archives/YYYY-MM-DD/<run_id>.json.gz`，写盘成功后
+才清空这些列，并在 `workflow_runs.payload_state` 上记 `packed`（另有 `in_db` 未搬运、
+`purged` 存量已清理）。读路径（详情、图、尝试、导出）在服务端按包回填，**接口形状不变**。
+
+当前只实现 `high` / `low` 两档（`TRACE_PERSIST_MODE`）；`none` 会被配置层拒绝启动。
+包目录**必须落在持久卷内**——清空后的那份数据没有第二个副本。筛选依据与体积见
+`design/存储瘦身方案.md`，实施口径见 `feature-storage-opt/`。
+
 `node_executions.attempt_count` 是**派生列**（收尾时数来源表），不是自增。自增强调
 「每次尝试恰好加一」，一旦某条路径漏记就永久偏移且从行上看不出错。
 

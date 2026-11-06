@@ -2,6 +2,28 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-11-06 — 留痕存储瘦身：骨架 + 运行包
+
+SQLite 从「什么都存」变成「只存骨架」。18 小时 UAT 样本实测载荷占 98.5%，其中节点输出
+一项就占 59.8%；剪完之后每主任务从约 2.1 MB 降到 `high` 约 509 KB、`low` 约 84 KB。
+
+- **两段存放**：根运行收尾时把整棵树裁成 `trace-archives/YYYY-MM-DD/<run_id>.json.gz`，
+  写盘成功后才清空库内载荷列，状态记在 `workflow_runs.payload_state`。先写后清是硬约束：
+  包写失败就保留库内副本，绝不出现「两边都没有」。
+- **两档口径**：`high` 保留节点输入输出与完整请求体；`low` 只留外部响应原文、根运行输出、
+  取数层原样输入与 10 个诊断字段。`none` 档本轮不实现，配置层直接拒绝。
+- **读路径不变形**：`/runs/{id}`、`/graph`、节点尝试、`/traces/export` 在服务端按包回填，
+  接口形状与改造前一致；另增 `payload_state` / `payload_missing` / `payload_truncated`，
+  把「证据缺失」与「没有产出」分开。
+- **顺带删掉的冗余**：`end` 节点输出（与运行输出逐字节相同）不再入包；子运行入参不再重复
+  携带整份 `customer_data`；`data:` 图片/录音换成长度 + 哈希 + 来源地址。
+- **取数链**：快照脚本升到 `format: 2`，`.db` 与 `.archives/` 必须一起搬，缺包以退出码 3
+  报错；新增 `fetch_run_archive.py` 按案取包、`purge_legacy_payloads.py` 存量就地清理
+  （不迁移，保留根输出）。包 30 天后由 worker 按天清理，骨架永久保留。
+- **库维护**：存量库 `VACUUM`（63.5 MB → 9.6 MB），新库开 `auto_vacuum=INCREMENTAL`。
+
+设计见 `docs/feature-storage-opt/`，测量与取舍见 `docs/design/存储瘦身方案.md`。
+
 ## 2026-11-05 — 待确认项上卡片（购车决策）
 
 同批报障的第三层：前两条修完之后，剩下的是「转确认没有出口」。`to_confirm` 由投影层

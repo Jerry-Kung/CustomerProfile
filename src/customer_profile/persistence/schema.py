@@ -50,7 +50,10 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         claimed_at_ms     INTEGER,
         claimed_by        TEXT,
         lease_expires_at_ms INTEGER,
-        created_at_ms     INTEGER NOT NULL
+        created_at_ms     INTEGER NOT NULL,
+        payload_state     TEXT,
+        payload_mode      TEXT,
+        archived_at_ms    INTEGER
     )
     """,
     """

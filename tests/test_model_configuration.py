@@ -203,3 +203,53 @@ def test_api_paths_cannot_override_configured_host(field, path):
 def test_asr_model_name_cannot_be_empty():
     with pytest.raises(ValidationError):
         Settings(_env_file=None, auc_model_name="  ")
+
+
+# ---------------------------------------------------------------- 留痕留存档位
+
+
+def test_trace_persist_mode_defaults_to_high():
+    settings = Settings(_env_file=None)
+    assert settings.trace_persist_mode == "high"
+    assert settings.trace_archive_compress_level == 6
+    assert settings.trace_retention_days == 30
+
+
+def test_trace_persist_mode_accepts_case_and_whitespace():
+    for raw in ("LOW", " low ", "High"):
+        settings = Settings(_env_file=None, trace_persist_mode=raw)
+        assert settings.trace_persist_mode == raw.strip().lower()
+
+
+@pytest.mark.parametrize("mode", ["none", "NONE", "medium", "off"])
+def test_trace_persist_mode_rejects_unknown_values(mode):
+    """不静默回落：写错档位却照常启动，是最难查的一类配置问题。"""
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None, trace_persist_mode=mode)
+    message = str(excinfo.value)
+    assert "high" in message and "low" in message
+
+
+def test_legacy_boolean_flag_maps_to_new_modes():
+    off = Settings(_env_file=None, trace_persist_enabled="false")
+    on = Settings(_env_file=None, trace_persist_enabled="true")
+    assert off.trace_persist_mode == "low"
+    assert on.trace_persist_mode == "high"
+
+
+def test_explicit_mode_wins_over_legacy_flag():
+    settings = Settings(_env_file=None, trace_persist_enabled="false", trace_persist_mode="high")
+    assert settings.trace_persist_mode == "high"
+
+
+def test_archive_dir_defaults_under_data_dir(tmp_path):
+    settings = Settings(_env_file=None, data_dir=tmp_path)
+    assert settings.trace_archive_path == tmp_path / "trace-archives"
+    explicit = Settings(_env_file=None, data_dir=tmp_path, trace_archive_dir=tmp_path / "x")
+    assert explicit.trace_archive_path == tmp_path / "x"
+
+
+def test_ensure_dirs_creates_archive_dir(tmp_path):
+    settings = Settings(_env_file=None, data_dir=tmp_path / "d")
+    settings.ensure_dirs()
+    assert (tmp_path / "d" / "trace-archives").is_dir()

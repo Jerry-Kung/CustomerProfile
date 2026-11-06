@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from pathlib import Path
 from typing import Any, Mapping
 
 from loguru import logger
@@ -55,12 +57,28 @@ class RunTracker:
         is_replay: bool = False,
         code_commit: str | None = None,
         fail_soft: bool = True,
+        persist_mode: str | None = None,
+        archive_dir: Path | None = None,
+        compress_level: int = 6,
     ) -> None:
         self.store = store
         self.is_replay = is_replay
         self.code_commit = code_commit
         self.fail_soft = fail_soft
         self._version_ids: dict[str, int] = {}
+
+        self.persist_mode = persist_mode
+        """留痕留存档位；``None`` 表示不打包（单测与不需要归档的调用方）。
+
+        **缺省 None 是刻意的**：打包会清空库内载荷并写文件，不适合作为任何调用方的
+        隐性行为。只有正式装配路径（``runner.build_service``）才按配置打开。"""
+        self.archive_dir = archive_dir
+        self.compress_level = compress_level
+        self._media_index: dict[str, str] = {}
+        """本进程内的媒体索引：``sha256(原始字节) → 下载时的请求地址``。
+
+        写包时把 ``data:`` URI 换成引用要靠它。**只在内存里**、按进程收集；
+        查不到就写 ``url: null`` 并计数，不猜一个地址出来。"""
 
     # ------------------------------------------------------------ 版本快照
 
@@ -125,6 +143,10 @@ class RunTracker:
             )
         except Exception as exc:
             self._report("run_finished", run.run_id, exc, run_id=run.run_id)
+            return
+        # 只有根运行收尾才搬整棵树——子运行结束只是树的一枝，此时子树还没跑完。
+        if self.persist_mode and getattr(run, "parent_run_id", None) is None:
+            await self.archive_tree(run.run_id)
 
     # ------------------------------------------------------------ 节点层
 
@@ -273,6 +295,8 @@ class RunTracker:
                 usage_obj = getattr(attempt, "usage", None)
                 usage = usage_obj.asdict() if usage_obj is not None else None
 
+            self._index_media(attempt)
+
             await self.store.insert_attempt(
                 run_id=run_id,
                 node_id=node_id,
@@ -318,6 +342,56 @@ class RunTracker:
                 run_id=getattr(node_ref, "run_id", None),
                 node_id=getattr(node_ref, "node_id", None),
             )
+
+    def _index_media(self, attempt: Any) -> None:
+        """记下「这份字节是从哪个地址下载来的」，供写包时把 data URI 换回 URL。
+
+        盘上唯一可靠的对应关系就在下载那一刻：``response_bytes`` 与随后生成的
+        ``data:...;base64,`` 是同一份字节，按 sha256 即可对上。这里只记 http 下载的
+        地址；LLM 请求里的图片引用不单独记——它们的来源同样是个 http 下载。
+
+        地址按**服务相对路径**留（http 留痕本来就按相对路径寻址），不是完整 URL：
+        完整 URL 带环境差异，换环境后反而对不上。
+        """
+        raw = getattr(attempt, "response_bytes", None)
+        url = getattr(attempt, "url", None)
+        if not raw or not url:
+            return
+        try:
+            digest = hashlib.sha256(raw).hexdigest()
+        except TypeError:
+            return
+        self._media_index.setdefault(digest, str(url))
+
+    async def archive_tree(self, root_run_id: str) -> None:
+        """把整棵运行树搬进包；失败**不抛**，库内载荷保持原样。
+
+        留痕是观测手段，不能因为归档写不出来就让业务运行失败。失败时状态停在
+        ``in_db``，由补收尾扫描（worker 定时任务）重试。
+        """
+        if not self.persist_mode or self.archive_dir is None:
+            return
+        try:
+            written = await self.store.finalize_tree(
+                root_run_id,
+                mode=self.persist_mode,
+                archive_dir=self.archive_dir,
+                media_index=dict(self._media_index),
+                code_commit=self.code_commit,
+                compress_level=self.compress_level,
+            )
+        except Exception as exc:
+            self._report("archive_tree", root_run_id, exc, run_id=root_run_id)
+            return
+        logger.bind(run_id=root_run_id).info(
+            "运行树已归档，档位={}，包={}，大小={} KB，运行={}，节点={}，尝试={}",
+            written.get("mode"),
+            written.get("path"),
+            round(int(written.get("bytes") or 0) / 1024, 1),
+            (written.get("counts") or {}).get("runs"),
+            (written.get("counts") or {}).get("nodes"),
+            (written.get("counts") or {}).get("attempts"),
+        )
 
     # ------------------------------------------------------------ 内部
 

@@ -21,12 +21,16 @@ import queue
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from loguru import logger
+
 from ..definitions import RunStatus
 from ..workflow_scope import WorkflowScope, scope_predicate
+from . import archive
 from .schema import (
     SCHEMA_STATEMENTS,
     RunRecordRow,
@@ -36,6 +40,22 @@ from .schema import (
 
 _SHUTDOWN = object()
 """投进命令队列即要求工作线程退出。"""
+
+_CACHE_MISS = object()
+"""包缓存里「没有这一项」的哨兵。用 ``None`` 不行——``None`` 本身就是
+「读过、但读不到」的结果，两者混在一起会让每个缺失的包都被反复重读并重复记日志。"""
+
+PAYLOAD_IN_DB = "in_db"
+"""载荷仍在库内：本进程未收尾、崩溃遗留，或存量旧行。"""
+
+PAYLOAD_PACKED = "packed"
+"""载荷已搬进包，库内载荷列为空。"""
+
+PAYLOAD_PURGED = "purged"
+"""存量清理：载荷已丢弃且没有包，只剩骨架与根输出。"""
+
+PAYLOAD_STATES = (PAYLOAD_IN_DB, PAYLOAD_PACKED, PAYLOAD_PURGED)
+"""合法取值。读写两侧共用，避免各写一份字面量。"""
 
 
 DEFAULT_RUN_ORDER = "created_desc"
@@ -156,6 +176,10 @@ class _ConnectionThread:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             connection = sqlite3.connect(self._path)
             connection.row_factory = sqlite3.Row
+            # 增量回收空闲页。留痕的载荷在收尾时被清空（存储瘦身），回收要跟着走，
+            # 否则删掉的行只会进 freelist、文件永不缩小。**必须在建表之前设置**：
+            # auto_vacuum 只在建库时生效，对既有库要另行 VACUUM 才切换模式。
+            connection.execute("PRAGMA auto_vacuum=INCREMENTAL")
             # WAL 让读写互不阻塞；foreign_keys 默认关闭，需显式打开
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA foreign_keys=ON")
@@ -190,10 +214,22 @@ class _ConnectionThread:
 class Store:
     """留痕存储。所有方法都是协程，实际 sqlite 调用在专属线程内执行。"""
 
-    def __init__(self, path: Path | str, *, busy_timeout_ms: int = 5000) -> None:
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        busy_timeout_ms: int = 5000,
+        archive_dir: Path | str | None = None,
+    ) -> None:
         self.path = Path(path)
         self._thread: _ConnectionThread | None = None
         self._busy_timeout_ms = busy_timeout_ms
+        self.archive_dir = Path(archive_dir) if archive_dir else None
+        """运行时数据包目录（存储瘦身）。``None`` 表示不读包——此时 ``packed`` 的
+        行会如实返回空载荷并标 ``payload_missing``，不会静默当成「没有输出」。"""
+        self._payload_cache: "OrderedDict[str, dict[str, Any] | None]" = OrderedDict()
+        self._payload_cache_size = 4
+        """按根运行缓存已解析的包。包解压后约数 MB，宁可重复解也不常驻太多。"""
 
     # ------------------------------------------------------------ 生命周期
 
@@ -440,12 +476,25 @@ class Store:
         return bool(await self._run(work))
 
     async def get_run(self, run_id: str) -> dict[str, Any] | None:
+        """一行运行记录，载荷按需从包回填。
+
+        ``payload_state`` 与 ``payload_missing`` 一并带出：调用方据此区分「这次运行
+        本来就没有输出」与「输出在包里 / 包丢了」。前端可以忽略它们，但接口不能不说。
+        """
         rows = await self._read(
             "SELECT * FROM workflow_runs WHERE run_id = ?", (run_id,)
         )
         if not rows:
             return None
-        return _row_to_dict(rows[0], json_fields=("inputs_json", "outputs_json"))
+        data = _row_to_dict(rows[0], json_fields=("inputs_json", "outputs_json"))
+        state, overlay, missing = await self.payload_overlay(run_id)
+        data["payload_state"] = state
+        data["payload_missing"] = missing
+        if overlay and overlay.get("run"):
+            packed = overlay["run"]
+            data["inputs_json"] = packed.get("inputs") or {}
+            data["outputs_json"] = packed.get("outputs") or {}
+        return data
 
     async def trace_run_ids(
         self,
@@ -546,7 +595,319 @@ class Store:
                 connection.rollback()
 
         # 下载中断不应取消数据库线程正在完成的 Future。
-        return await asyncio.shield(self._run(work))
+        trace = await asyncio.shield(self._run(work))
+        if trace is not None:
+            trace = await self._backfill_trace(trace)
+        return trace
+
+    # ------------------------------------------------------------ 载荷回填（存储瘦身）
+
+    async def _backfill_trace(self, trace: dict[str, Any]) -> dict[str, Any]:
+        """整棵树按包回填。导出与「搬运前的读」都经过这里。
+
+        只在根运行标记为 ``packed`` 时动手：``in_db`` 的树本来就在库里，多此一举会
+        平白解一次包；``purged`` 的树没有包，回了也是空。
+        """
+        root_id = trace.get("root_run_id")
+        root = trace["runs"].get(root_id) or {}
+        state = root.get("payload_state")
+        trace["payload_state"] = state or PAYLOAD_IN_DB
+        if state != PAYLOAD_PACKED:
+            return trace
+
+        package = await self._package_for(root_id)
+        if package is None:
+            trace["payload_missing"] = True
+            return trace
+        trace["payload_missing"] = False
+        # 导出侧据此判断本次导出的完整度（high=full / low=sliced）。
+        trace["payload_mode"] = (package.get("manifest") or {}).get("persist_mode")
+
+        packed_runs = {r.get("run_id"): r for r in package.get("runs") or []}
+        nodes_by_run: dict[str, dict[Any, dict[str, Any]]] = {}
+        for node in package.get("nodes") or []:
+            nodes_by_run.setdefault(node.get("run_id"), {})[node.get("execution_id")] = node
+        attempts_by_run: dict[str, dict[Any, dict[str, Any]]] = {}
+        for attempt in package.get("attempts") or []:
+            attempts_by_run.setdefault(attempt.get("run_id"), {})[attempt.get("attempt_id")] = attempt
+
+        for run_id, run in trace["runs"].items():
+            packed = packed_runs.get(run_id)
+            if packed is not None:
+                run["inputs"] = packed.get("inputs") or {}
+                run["outputs"] = packed.get("outputs") or {}
+            packed_nodes = nodes_by_run.get(run_id, {})
+            for node in run.get("nodes") or []:
+                item = packed_nodes.get(node.get("execution_id"))
+                if item is None:
+                    continue
+                node["inputs_json"] = item.get("inputs_json")
+                node["outputs_json"] = item.get("outputs_json")
+                if item.get("payload_truncated"):
+                    node["payload_truncated"] = item["payload_truncated"]
+            packed_attempts = attempts_by_run.get(run_id, {})
+            for attempt in run.get("attempts") or []:
+                item = packed_attempts.get(attempt.get("attempt_id"))
+                if item is None:
+                    continue
+                attempt["request_json"] = item.get("request_json")
+                attempt["response_text"] = item.get("response_text")
+                attempt["usage_json"] = item.get("usage_json")
+            self._apply_end_node_fallback(run.get("nodes") or [], run.get("outputs"))
+        return trace
+
+
+    async def _run_row(self, run_id: str) -> dict[str, Any] | None:
+        """取一行运行骨架（不做包回填）。回填逻辑自己要用，不能递归进 get_run。"""
+        rows = await self._read(
+            "SELECT * FROM workflow_runs WHERE run_id = ?", (run_id,)
+        )
+        return _row_to_dict(rows[0]) if rows else None
+
+    async def _root_run_id(self, run_id: str) -> str:
+        """沿 ``parent_run_id`` 上溯到根运行。树只有一两层，但迭代会加深。"""
+        def work(connection: sqlite3.Connection) -> str:
+            row = connection.execute(
+                "WITH RECURSIVE up(run_id, parent_run_id) AS ("
+                " SELECT run_id, parent_run_id FROM workflow_runs WHERE run_id = ?"
+                " UNION SELECT p.run_id, p.parent_run_id FROM workflow_runs p"
+                " JOIN up ON p.run_id = up.parent_run_id) "
+                "SELECT run_id FROM up WHERE parent_run_id IS NULL LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            return str(row["run_id"]) if row is not None else run_id
+
+        return await self._run(work)
+
+    async def _package_for(self, root_run_id: str) -> dict[str, Any] | None:
+        """读回并缓存一棵运行树的包。读不到返回 ``None``（调用方据此标缺失）。
+
+        **不抛异常**：包缺失或损坏是「证据没了」，不是「这次请求失败」。让接口继续
+        返回骨架、并在响应里标 ``payload_missing``，比直接 500 有用得多。
+        """
+        cached = self._payload_cache.get(root_run_id, _CACHE_MISS)
+        if cached is not _CACHE_MISS:
+            self._payload_cache.move_to_end(root_run_id)
+            return cached
+
+        package: dict[str, Any] | None = None
+        if self.archive_dir is not None:
+            root = await self._run_row(root_run_id)
+            created_at = (root or {}).get("created_at_ms")
+            target = archive.package_path(self.archive_dir, root_run_id, created_at)
+            try:
+                package = await asyncio.to_thread(archive.read_package, target)
+            except FileNotFoundError:
+                logger.error(
+                    "留痕包缺失：{}（运行 {} 的载荷已不在库内，也无法从包读回）",
+                    target, root_run_id,
+                )
+            except Exception as exc:  # 损坏、版本不兼容等
+                logger.error(
+                    "留痕包读取失败：{}（{}: {}）",
+                    target, type(exc).__name__, exc,
+                )
+
+        self._payload_cache[root_run_id] = package
+        self._payload_cache.move_to_end(root_run_id)
+        while len(self._payload_cache) > self._payload_cache_size:
+            self._payload_cache.popitem(last=False)
+        return package
+
+    async def payload_overlay(
+        self, run_id: str
+    ) -> tuple[str | None, dict[str, Any] | None, bool]:
+        """给一个运行算出 (payload_state, overlay, payload_missing)。
+
+        ``overlay`` 的形状是 ``{"run": {...}, "nodes": {execution_id: {...}},
+        "attempts": {attempt_id: {...}}}``；``None`` 表示不需要回填——载荷还在库里
+        （``in_db``）或者已经丢弃且没有包（``purged``）。
+        """
+        row = await self._run_row(run_id)
+        if row is None:
+            return None, None, False
+        state = row.get("payload_state") or PAYLOAD_IN_DB
+        if state != PAYLOAD_PACKED:
+            return state, None, False
+
+        root_run_id = await self._root_run_id(run_id)
+        package = await self._package_for(root_run_id)
+        if package is None:
+            return state, None, True
+
+        overlay: dict[str, Any] = {"run": None, "nodes": {}, "attempts": {}}
+        for run in package.get("runs") or []:
+            if run.get("run_id") == run_id:
+                overlay["run"] = run
+                break
+        for node in package.get("nodes") or []:
+            if node.get("run_id") == run_id:
+                overlay["nodes"][node.get("execution_id")] = node
+        for attempt in package.get("attempts") or []:
+            if attempt.get("run_id") == run_id:
+                overlay["attempts"][attempt.get("attempt_id")] = attempt
+        return state, overlay, False
+
+    @staticmethod
+    def _apply_end_node_fallback(
+        nodes: Sequence[dict[str, Any]], run_outputs: Mapping[str, Any] | None
+    ) -> None:
+        """``end`` 节点的输出在包里不单存，读回时用所在运行的输出补上。
+
+        这不算「猜」：调度层本来就是把这些出口节点的输出合并成运行输出的，
+        两者在打包前逐字节相同（抽样 60/60）。
+        """
+        for node in nodes:
+            if node.get("node_type") == archive.END_NODE_TYPE and not node.get("outputs_json"):
+                node["outputs_json"] = dict(run_outputs or {})
+
+    # ------------------------------------------------------------ 载荷搬运（存储瘦身）
+
+    async def finalize_tree(
+        self,
+        root_run_id: str,
+        *,
+        mode: str,
+        archive_dir: Path,
+        media_index: Mapping[str, str] | None = None,
+        code_commit: str | None = None,
+        compress_level: int = 6,
+    ) -> dict[str, Any]:
+        """把一棵运行树的运行时数据搬进包，成功后清空库内载荷。
+
+        **顺序是这里唯一的硬约束**：先读树 → 裁剪 → 写盘（含 fsync）→ 成功后才在
+        写事务里清空。任何一步失败都把异常抛给调用方，库内载荷保持原样、状态仍是
+        ``in_db``。反过来做（先清后写）一旦写盘失败就没有第二份副本了。
+
+        返回包的写入结果（路径、字节数、sha256），便于调用方记日志。
+        """
+        trace = await self.execution_trace(root_run_id)
+        if trace is None:
+            raise LookupError(f"运行 {root_run_id} 不存在或已无记录")
+
+        package = archive.build_package(
+            trace, mode=mode, media_index=media_index, code_commit=code_commit
+        )
+        root = trace["runs"].get(root_run_id) or {}
+        target = archive.package_path(
+            archive_dir, root_run_id, root.get("created_at_ms")
+        )
+        written = await asyncio.to_thread(
+            archive.write_package, package, target, compress_level=compress_level
+        )
+
+        run_ids = list(trace["runs"])
+        await self._run(self._clear_payloads(run_ids, root_run_id, mode))
+        written["mode"] = mode
+        written["counts"] = package["manifest"]["counts"]
+        return written
+
+    @staticmethod
+    def _clear_payloads(
+        run_ids: Sequence[str], root_run_id: str, mode: str
+    ) -> Callable[[sqlite3.Connection], None]:
+        """清空这棵树各行的载荷列，并标上 ``packed``。
+
+        标记写到树里**每一行**而不只是根运行：直接按 run_id 打开某个子运行时，
+        读路径同样要知道它的载荷在包里，而不是「列是空的 = 没有输出」。
+        """
+        def work(connection: sqlite3.Connection) -> None:
+            now = _now_ms()
+            try:
+                connection.execute("BEGIN")
+                for run_id in run_ids:
+                    connection.execute(
+                        "UPDATE node_executions SET inputs_json = NULL, "
+                        "outputs_json = NULL WHERE run_id = ?",
+                        (run_id,),
+                    )
+                    connection.execute(
+                        "UPDATE request_attempts SET request_json = NULL, "
+                        "response_text = NULL, usage_json = NULL WHERE run_id = ?",
+                        (run_id,),
+                    )
+                    connection.execute(
+                        "UPDATE workflow_runs SET outputs_json = NULL, "
+                        "payload_state = ?, payload_mode = ?, archived_at_ms = ? "
+                        "WHERE run_id = ?",
+                        (PAYLOAD_PACKED, mode, now, run_id),
+                    )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+        return work
+
+    async def payload_kinds(self, run_ids: Sequence[str]) -> set[str]:
+        """一批根运行的载荷完整度：``full`` / ``sliced`` / ``skeleton``。
+
+        导出响应头在推流前就要定，因此不能边流边算。这里一次查完：
+        ``purged`` 或没有包 → skeleton；``low`` 档 → sliced；其余 → full。
+        """
+        if not run_ids:
+            return {"full"}
+        marks = ",".join("?" for _ in run_ids)
+        rows = await self._read(
+            f"SELECT payload_state, payload_mode FROM workflow_runs "
+            f"WHERE run_id IN ({marks})",
+            list(run_ids),
+        )
+        kinds: set[str] = set()
+        for row in rows:
+            state = row["payload_state"]
+            if state == PAYLOAD_PURGED:
+                kinds.add("skeleton")
+            elif state == PAYLOAD_PACKED and (row["payload_mode"] or "").lower() == "low":
+                kinds.add("sliced")
+            else:
+                kinds.add("full")
+        return kinds or {"full"}
+
+    async def purge_tree_payloads(self, root_run_id: str) -> int:
+        """存量处置：就地清空一棵树的载荷并标 ``purged``，不动根运行输出。
+
+        与 :meth:`finalize_tree` 的区别是**不写包**。用于「旧数据不迁移」的一次性清理：
+        旧行的问题已经查过，为它们再建一套回灌通道不划算（设计稿 §11.1）。
+        根运行的 ``outputs_json`` 保留——那是我们当时真正写出去的东西。
+        """
+        trace = await self.execution_trace(root_run_id)
+        if trace is None:
+            return 0
+        run_ids = list(trace["runs"])
+
+        def work(connection: sqlite3.Connection) -> int:
+            now = _now_ms()
+            try:
+                connection.execute("BEGIN")
+                for run_id in run_ids:
+                    connection.execute(
+                        "UPDATE node_executions SET inputs_json = NULL, "
+                        "outputs_json = NULL WHERE run_id = ?",
+                        (run_id,),
+                    )
+                    connection.execute(
+                        "UPDATE request_attempts SET request_json = NULL, "
+                        "response_text = NULL, usage_json = NULL WHERE run_id = ?",
+                        (run_id,),
+                    )
+                    if run_id != root_run_id:
+                        connection.execute(
+                            "UPDATE workflow_runs SET outputs_json = NULL WHERE run_id = ?",
+                            (run_id,),
+                        )
+                    connection.execute(
+                        "UPDATE workflow_runs SET payload_state = ?, archived_at_ms = ? "
+                        "WHERE run_id = ? AND payload_state IS NULL",
+                        (PAYLOAD_PURGED, now, run_id),
+                    )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+            return len(run_ids)
+
+        return int(await self._run(work))
 
     async def list_runs(
         self,
@@ -877,14 +1238,44 @@ class Store:
         )
 
     async def list_node_executions(self, run_id: str) -> list[dict[str, Any]]:
+        """节点执行明细，载荷按需从包回填。
+
+        ``end`` 节点的输出不单独入包（与运行输出逐字节相同），回填时用运行输出补上，
+        否则详情页里出口节点会显示成「没有输出」。
+        """
         rows = await self._read(
             "SELECT * FROM node_executions WHERE run_id = ? "
             "ORDER BY COALESCE(started_at_ms, 0), execution_id",
             (run_id,),
         )
-        return [
+        nodes = [
             _row_to_dict(r, json_fields=("inputs_json", "outputs_json")) for r in rows
         ]
+        state, overlay, missing = await self.payload_overlay(run_id)
+        if overlay:
+            packed = overlay["nodes"]
+            for node in nodes:
+                item = packed.get(node.get("execution_id"))
+                if item is None:
+                    continue
+                node["inputs_json"] = item.get("inputs_json")
+                node["outputs_json"] = item.get("outputs_json")
+                if item.get("payload_truncated"):
+                    node["payload_truncated"] = item["payload_truncated"]
+            if missing:
+                for node in nodes:
+                    node["payload_missing"] = True
+            run_row = await self._run_row(run_id)
+            run_outputs = None
+            if overlay.get("run") is not None:
+                run_outputs = overlay["run"].get("outputs")
+            elif run_row is not None:
+                run_outputs = json_loads(run_row.get("outputs_json"))
+            self._apply_end_node_fallback(nodes, run_outputs)
+        elif missing:
+            for node in nodes:
+                node["payload_missing"] = True
+        return nodes
 
     # ------------------------------------------------------------ 请求尝试
 
@@ -963,9 +1354,26 @@ class Store:
             "ORDER BY attempt_id",
             params,
         )
-        return [
+        attempts = [
             _row_to_dict(r, json_fields=("request_json", "usage_json")) for r in rows
         ]
+        state, overlay, missing = await self.payload_overlay(run_id)
+        if overlay:
+            packed = overlay["attempts"]
+            for attempt in attempts:
+                item = packed.get(attempt.get("attempt_id"))
+                if item is None:
+                    continue
+                attempt["request_json"] = item.get("request_json")
+                attempt["response_text"] = item.get("response_text")
+                attempt["usage_json"] = item.get("usage_json")
+            if missing:
+                for attempt in attempts:
+                    attempt["payload_missing"] = True
+        elif missing:
+            for attempt in attempts:
+                attempt["payload_missing"] = True
+        return attempts
 
     async def count_attempts(
         self,
@@ -1013,6 +1421,11 @@ _ADDED_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         ("claimed_at_ms", "INTEGER"),
         ("claimed_by", "TEXT"),
         ("lease_expires_at_ms", "INTEGER"),
+        # 存储瘦身：载荷搬进包之后的状态标记。没有它，读路径无法区分
+        # 「已搬进包」与「本来就没有」，而那正是最容易被误读成「管线没产出」的情形。
+        ("payload_state", "TEXT"),
+        ("payload_mode", "TEXT"),
+        ("archived_at_ms", "INTEGER"),
     ),
     "request_attempts": (
         ("anomaly", "TEXT"),

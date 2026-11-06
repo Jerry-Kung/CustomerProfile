@@ -569,7 +569,9 @@ def test_script_contract_rejects_missing_phone_step():
 def test_prompt_sources_and_authorized_revisions_are_available_without_downloads():
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads(
-        (root / "docs/reference/invitation-workflow-sources.json").read_text()
+        (root / "docs/reference/invitation-workflow-sources.json").read_text(
+            encoding="utf-8"
+        )
     )
     repo = TemplateRepository()
     for entry in manifest["templates"]:

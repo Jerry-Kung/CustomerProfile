@@ -253,3 +253,36 @@ async def test_existing_read_routes_remain_available_and_no_store_returns_503(tr
     with monkeypatch.context() as patch:
         patch.setattr(service, "store", None)
         assert (await client.get("/traces/export")).status_code == 503
+
+
+# ---------------------------------------------------------------- 载荷完整度响应头
+
+
+async def test_export_header_is_full_for_in_db_runs(trace_env):
+    client, service = trace_env
+    await add_run(service.store, "r-full")
+    response = await client.get("/traces/export", params={"run_id": "r-full"})
+    assert response.status_code == 200
+    assert response.headers["x-trace-payload"] == "full"
+
+
+async def test_export_header_is_skeleton_for_purged_runs(trace_env):
+    client, service = trace_env
+    await add_run(service.store, "r-gone")
+    await service.store.purge_tree_payloads("r-gone")
+    response = await client.get("/traces/export", params={"run_id": "r-gone"})
+    assert response.status_code == 200
+    assert response.headers["x-trace-payload"] == "skeleton"
+    line = json.loads(response.text.splitlines()[0])
+    assert line["payload_state"] == "purged"
+
+
+async def test_export_header_takes_the_conservative_kind(trace_env):
+    """混装批次按最不完整的那一档标注——把 low 当 full 用是最危险的误读。"""
+    client, service = trace_env
+    await add_run(service.store, "r-a", created=100)
+    await add_run(service.store, "r-b", created=200)
+    await service.store.purge_tree_payloads("r-b")
+    response = await client.get("/traces/export")
+    assert response.status_code == 200
+    assert response.headers["x-trace-payload"] == "skeleton"

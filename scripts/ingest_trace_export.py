@@ -100,6 +100,23 @@ def _phone_of(business_ref: str | None) -> str:
 
 # ---------------------------------------------------------------- 转换
 
+def _payload_kind(record: dict[str, Any], root: dict[str, Any]) -> str:
+    """一份导出记录的载荷完整度：``full`` / ``sliced`` / ``skeleton``。
+
+    导出端点按同一口径写过 ``X-Trace-Payload``，这里逐行复核：批次可能由多次导出拼接
+    而成，只看响应头会把混装批次误当成统一档位。
+    """
+    if record.get("payload_missing") or record.get("payload_state") == "purged":
+        return "skeleton"
+    if (record.get("payload_mode") or "").lower() == "low":
+        return "sliced"
+    for run in (record.get("runs") or {}).values():
+        for node in run.get("nodes") or []:
+            if node.get("payload_truncated") == "low":
+                return "sliced"
+    return "full"
+
+
 def _depths(root_id: str, runs: dict[str, dict[str, Any]]) -> dict[str, int]:
     """按 ``parent_run_id`` 逐层推导深度；无父节点的非根运行记 -1。"""
     children: dict[str, list[str]] = defaultdict(list)
@@ -327,7 +344,28 @@ def _summary_md(batch_id: str, rows: list[dict[str, Any]], counts: dict[str, int
     return "\n".join(lines) + "\n"
 
 
-def _batch_readme(batch_id: str, counts: dict[str, int], source: dict[str, Any]) -> str:
+def _payload_note(kinds: dict[str, int]) -> str:
+    """批次头部的载荷说明。全 ``full`` 时不加噪音，其余两种各说清少了什么。"""
+    parts = []
+    if kinds.get("sliced"):
+        parts.append(
+            f"{kinds['sliced']} 次为 `low` 档：只有外部响应原文、根输出与诊断切片，"
+            "**不含完整节点输出与 LLM 请求体**，不要拿它做新旧两版的逐节点对比"
+        )
+    if kinds.get("skeleton"):
+        parts.append(
+            f"{kinds['skeleton']} 次只有骨架（存量已清理或包丢失），节点与尝试载荷为空是"
+            "「证据缺失」而不是「管线没有产出」"
+        )
+    return ("- **载荷完整度**：" + "；".join(parts) + "\n") if parts else ""
+
+
+def _batch_readme(
+    batch_id: str,
+    counts: dict[str, int],
+    source: dict[str, Any],
+    payload_kinds: dict[str, int] | None = None,
+) -> str:
     return f"""# {batch_id} —— UAT traces 导出归档
 
 > 本目录是 `experiments/uat_data/` 下的 UAT 运行数据，**整体被 gitignore**，不入库。
@@ -340,7 +378,7 @@ def _batch_readme(batch_id: str, counts: dict[str, int], source: dict[str, Any])
 - **规模**：{counts['root_tasks']} 次根运行，{counts['unique_phones']} 个唯一手机号，
   {counts['runs']} 次运行，{counts['nodes']} 条节点执行，{counts['attempts']} 次出网尝试
 - **代码版本**：未知（导出不携带 `code_commit`）
-
+{_payload_note(payload_kinds or {})}
 ## 这不是受控基线
 
 写回开启（update-profile 请求真实写入 UAT 画像库）；导出窗口内没有失败形态的对照，
@@ -393,8 +431,10 @@ def ingest(zip_path: Path | None, jsonl_path: Path | None, out_dir: Path,
     # 第一遍：按根运行开始时刻排序（__run2 的编号必须按时间先后）。
     order: list[tuple[int, int, dict]] = []
     definitions: dict[int, dict] = {}
+    payload_kinds: Counter[str] = Counter()
     for idx, record in enumerate(_iter_records(stream)):
         root = record["runs"][record["root_run_id"]]
+        payload_kinds[_payload_kind(record, root)] += 1
         order.append((int(root.get("started_at_ms") or 0), idx, record))
         for version_id, snapshot in (record.get("definitions") or {}).items():
             definitions.setdefault(int(version_id), snapshot)
@@ -588,6 +628,8 @@ def ingest(zip_path: Path | None, jsonl_path: Path | None, out_dir: Path,
         "root_run_count": len(order),
         "duplicate_phones": duplicates,
         "counts": counts,
+        "payload_kinds": dict(payload_kinds),
+        "payload_complete": set(payload_kinds) <= {"full"},
         "trace_db": "batch-local（由导出重建，非原库拷贝）" if make_trace_db else None,
         "trace_db_counts": trace_counts,
         "writeback_status_codes": dict(writeback_status),
@@ -617,7 +659,8 @@ def ingest(zip_path: Path | None, jsonl_path: Path | None, out_dir: Path,
     }
     _dump(out_dir / "manifest.json", manifest)
     (out_dir / "README.md").write_text(
-        _batch_readme(batch_id, counts, source_block), encoding="utf-8", newline="\n"
+        _batch_readme(batch_id, counts, source_block, payload_kinds),
+        encoding="utf-8", newline="\n",
     )
     return {"batch_id": batch_id, "counts": counts, "trace_db_counts": trace_counts,
             "unique_phones": len(phones), "out_dir": str(out_dir)}

@@ -110,6 +110,14 @@ class RunDetail(RunSummary):
     nodes: list[dict[str, Any]] = Field(default_factory=list)
     attempts: list[dict[str, Any]] = Field(default_factory=list)
     child_run_ids: list[str] = Field(default_factory=list)
+    payload_state: str | None = Field(
+        default=None,
+        description="运行时数据在哪：in_db / packed（在包里）/ purged（清理丢弃）",
+    )
+    payload_missing: bool = Field(
+        default=False,
+        description="标记为 packed 但包读不到。为真时节点载荷为空是「证据缺失」，不是「没有产出」",
+    )
 
 
 class RunGraph(BaseModel):
@@ -130,6 +138,11 @@ class RunGraph(BaseModel):
         default_factory=dict, description="触发节点 ID → 子运行摘要"
     )
     is_replay: bool = False
+    payload_state: str | None = Field(
+        default=None,
+        description="运行时数据在哪：in_db / packed（在包里）/ purged（清理丢弃）",
+    )
+    payload_missing: bool = False
 
 
 def create_app(service_factory: Any = None) -> FastAPI:
@@ -500,6 +513,8 @@ def create_app(service_factory: Any = None) -> FastAPI:
             nodes=nodes,
             attempts=attempts,
             child_run_ids=[child["run_id"] for child in children],
+            payload_state=row.get("payload_state"),
+            payload_missing=bool(row.get("payload_missing")),
         )
 
     @app.get("/runs/{run_id}/graph", response_model=RunGraph, tags=["runs"])
@@ -545,6 +560,8 @@ def create_app(service_factory: Any = None) -> FastAPI:
             nodes=nodes,
             child_runs=child_by_node,
             is_replay=bool(row.get("is_replay")),
+            payload_state=row.get("payload_state"),
+            payload_missing=bool(row.get("payload_missing")),
         )
 
     @app.get("/runs/{run_id}/nodes/{node_id}/attempts", tags=["runs"])

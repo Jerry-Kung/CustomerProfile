@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
+import time
 from typing import Any
 
 from loguru import logger
@@ -42,6 +43,8 @@ class Worker:
         self._consumers: list[asyncio.Task[None]] = []
         self._executions: set[asyncio.Task[None]] = set()
         self._execution_error: BaseException | None = None
+        self._last_retention_ms: int | None = None
+        """上次跑保留期清理的时刻。按天节流，不引入外部 cron。"""
 
     # ------------------------------------------------------------ 生命周期
 
@@ -123,7 +126,22 @@ class Worker:
             self._execution_error = self._execution_error or error
             self.request_stop()
 
+    async def _maybe_run_retention(self) -> None:
+        """按天清理过期包。**只删包，不删骨架**，也不碰正在写的树。"""
+        from .persistence import retention
+
+        now_ms = int(time.time() * 1000)
+        if not retention.should_run(self._last_retention_ms, now_ms=now_ms):
+            return
+        self._last_retention_ms = now_ms
+        try:
+            await asyncio.to_thread(retention.run_once, self.settings)
+        except Exception as exc:
+            # 清理失败不该让 worker 退出：包多一点只是占空间，停了就不干活了。
+            logger.warning("留痕包保留期清理失败：{}: {}", type(exc).__name__, exc)
+
     async def _wait_for_work(self) -> None:
+        await self._maybe_run_retention()
         try:
             await asyncio.wait_for(
                 self._stopping.wait(), timeout=self.settings.worker_poll_interval_ms / 1000
