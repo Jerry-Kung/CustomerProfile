@@ -1,7 +1,8 @@
-"""Opt-in cross-repository test using real native routes, SQLite and mock upstreams.
+"""Opt-in adapter test using real native routes, SQLite and mock upstreams.
 
 Run with CustomerProfile's development Python (its runtime dependencies are needed),
-RUN_NATIVE_INVITATION_CONTRACT=1 and CUSTOMERPROFILE_SOURCE_ROOT set to that checkout.
+RUN_NATIVE_INVITATION_CONTRACT=1. The monorepo execution module is selected by default;
+CUSTOMERPROFILE_SOURCE_ROOT can select another checkout.
 No network connection, production configuration or MySQL database is used.
 """
 
@@ -19,7 +20,7 @@ from src.infrastructure.invitation_runner.client import InvitationRunnerClient
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_NATIVE_INVITATION_CONTRACT") != "1",
-    reason="requires explicitly selected CustomerProfile source checkout",
+    reason="offline native invitation integration is opt-in",
 )
 
 
@@ -27,7 +28,9 @@ pytestmark = pytest.mark.skipif(
 def test_backend_adapter_against_real_customerprofile_inbound_and_worker(
     tmp_path, monkeypatch, file_count
 ):
-    root = Path(os.environ["CUSTOMERPROFILE_SOURCE_ROOT"]).resolve()
+    root = Path(
+        os.environ.get("CUSTOMERPROFILE_SOURCE_ROOT") or Path(__file__).resolve().parents[4]
+    ).resolve()
     monkeypatch.syspath_prepend(str(root / "src"))
     from customer_profile.inbound import create_inbound_app
     from customer_profile.runner import build_service

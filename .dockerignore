@@ -13,6 +13,17 @@
 !tests/fixtures/
 !tests/fixtures/replay/
 !tests/fixtures/replay/human_corrected_info.json
+!services/
+!services/task-backend/
+!services/task-backend/pyproject.toml
+!services/task-backend/src/
+!services/task-backend/src/**
+!services/task-backend/contracts/
+!services/task-backend/contracts/**
+!services/task-backend/db/
+!services/task-backend/db/**
+!scripts/
+!scripts/container-entrypoint.sh
 
 **/__pycache__/
 **/*.py[cod]
@@ -22,3 +33,5 @@
 **/*.db-wal
 **/*.db-shm
 **/*.log
+**/*.egg-info/
+**/.DS_Store

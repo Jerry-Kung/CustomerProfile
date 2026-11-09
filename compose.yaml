@@ -1,8 +1,10 @@
 name: customer-profile
 
 x-service: &service
+  image: ${CP_IMAGE:?Run scripts/release.py or set CP_IMAGE to a versioned image}
   build:
     context: .
+  pull_policy: never
   init: true
   restart: unless-stopped
   env_file:
@@ -20,6 +22,35 @@ x-environment: &environment
   WORKER_CONCURRENCY: ""
   # Two execution processes split the configured global LLM RPM/TPM budget.
   WORKER_REPLICAS: "2"
+
+x-task-environment: &task-environment
+  PYTHONPATH: /app/services/task-backend
+  PATH: /opt/task-venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+  LOG_DIR: /app/logs
+
+x-task: &task
+  image: ${CP_IMAGE:?Run scripts/release.py or set CP_IMAGE to a versioned image}
+  build:
+    context: .
+  pull_policy: never
+  init: true
+  working_dir: /app/services/task-backend
+  env_file:
+    - ${TASK_ENV_FILE:-./services/task-backend/.env}
+  environment: *task-environment
+  volumes:
+    - task-logs:/app/logs
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  restart: unless-stopped
+
+x-task-worker: &task-worker
+  <<: *task
+  command: ["customer-profile-worker"]
+  depends_on:
+    task-api:
+      condition: service_healthy
+  stop_grace_period: 60s
 
 services:
   api:
@@ -91,5 +122,97 @@ services:
       INTERRUPT_ON_START: "true"
     stop_grace_period: 60m
 
+  task-migrate:
+    <<: *task
+    profiles: ["maintenance"]
+    command: ["customer-profile-migrate"]
+    restart: "no"
+
+  task-api:
+    <<: *task
+    command: ["customer-profile-api"]
+    environment:
+      <<: *task-environment
+      API_HOST: 0.0.0.0
+      API_PORT: "${TASK_API_PORT:-18008}"
+    ports:
+      - "${TASK_HOST_API_PORT:-${HOST_API_PORT:-18008}}:${TASK_API_PORT:-18008}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ['API_PORT']+'/ready',timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  qingtian-worker:
+    <<: *task-worker
+    environment:
+      <<: *task-environment
+      WORKFLOW_PLATFORM: qingtian
+      WORKER_ROLE: local
+      WORKFLOW_TARGET_ID: "${QINGTIAN_WORKER_TARGET_ID:-local-default}"
+      WORKFLOW_TARGET_REVISION: "${QINGTIAN_WORKER_TARGET_REVISION:-${LOCAL_WORKFLOW_TARGET_REVISION:-v1}}"
+      WORKER_TARGET_MODE: "${QINGTIAN_WORKER_TARGET_MODE:-${LOCAL_WORKER_TARGET_MODE:-draining}}"
+      WORKER_TASK_TYPES: "${QINGTIAN_WORKER_TASK_TYPES:-customer_profile}"
+      WORKER_WORK_ENVS: "${QINGTIAN_WORKER_WORK_ENVS:-test,production}"
+      WORKER_CONCURRENCY: "${QINGTIAN_WORKER_CONCURRENCY:-1}"
+
+  commercial-worker:
+    <<: *task-worker
+    environment:
+      <<: *task-environment
+      WORKFLOW_PLATFORM: qingtian
+      WORKER_ROLE: commercial
+      WORKFLOW_TARGET_ID: "${COMMERCIAL_WORKER_TARGET_ID:-commercial-default}"
+      WORKFLOW_TARGET_REVISION: "${COMMERCIAL_WORKER_TARGET_REVISION:-${COMMERCIAL_1_WORKFLOW_TARGET_REVISION:-v1}}"
+      WORKER_TARGET_MODE: "${COMMERCIAL_WORKER_TARGET_MODE:-${COMMERCIAL_1_WORKER_TARGET_MODE:-draining}}"
+      WORKER_TASK_TYPES: "${COMMERCIAL_WORKER_TASK_TYPES:-customer_profile}"
+      WORKER_WORK_ENVS: "${COMMERCIAL_WORKER_WORK_ENVS:-test,production}"
+      WORKER_CONCURRENCY: "${COMMERCIAL_WORKER_CONCURRENCY:-1}"
+      QINGTIAN_API_KEY_TEST: "${QINGTIAN_COMMERCIAL_API_KEY_TEST:-}"
+      QINGTIAN_API_KEY_PRODUCTION: "${QINGTIAN_COMMERCIAL_API_KEY_PRODUCTION:-}"
+
+  profile-runner-worker:
+    <<: *task-worker
+    depends_on:
+      task-api:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    environment:
+      <<: *task-environment
+      WORKFLOW_PLATFORM: runner
+      WORKER_ROLE: local
+      WORKFLOW_TARGET_ID: "${PROFILE_RUNNER_TARGET_ID:-profile-runner-production}"
+      WORKFLOW_TARGET_REVISION: "${PROFILE_RUNNER_TARGET_REVISION:-v1}"
+      WORKER_TASK_TYPES: "${PROFILE_RUNNER_TASK_TYPES:-customer_profile}"
+      WORKER_WORK_ENVS: "${PROFILE_RUNNER_WORK_ENVS:-production}"
+      WORKER_TARGET_MODE: "${PROFILE_RUNNER_TARGET_MODE:-active}"
+      WORKER_CONCURRENCY: "${PROFILE_RUNNER_CONCURRENCY:-5}"
+      PROFILE_RUNNER_BASE_URL_TEST: "${PROFILE_RUNNER_BASE_URL_TEST:-}"
+      PROFILE_RUNNER_BASE_URL_PRODUCTION: "${PROFILE_RUNNER_BASE_URL_PRODUCTION:-http://api:${API_PORT:-18173}}"
+
+  invitation-runner-worker:
+    <<: *task-worker
+    profiles: ["invitation-runner"]
+    depends_on:
+      task-api:
+        condition: service_healthy
+      inbound:
+        condition: service_healthy
+    environment:
+      <<: *task-environment
+      WORKFLOW_PLATFORM: invitation_runner
+      WORKER_ROLE: local
+      WORKFLOW_TARGET_ID: "${INVITATION_RUNNER_TARGET_ID:-invitation-runner-test}"
+      WORKFLOW_TARGET_REVISION: "${INVITATION_RUNNER_TARGET_REVISION:-v1}"
+      WORKER_TASK_TYPES: invitation_strategy
+      WORKER_WORK_ENVS: "${INVITATION_RUNNER_WORK_ENVS:-test}"
+      WORKER_TARGET_MODE: "${INVITATION_RUNNER_TARGET_MODE:-active}"
+      WORKER_CONCURRENCY: "${INVITATION_RUNNER_CONCURRENCY:-5}"
+      INVITATION_RUNNER_BASE_URL_TEST: "${INVITATION_RUNNER_BASE_URL_TEST:-http://inbound:${INBOUND_PORT:-8099}}"
+      INVITATION_RUNNER_BASE_URL_PRODUCTION: "${INVITATION_RUNNER_BASE_URL_PRODUCTION:-}"
+
 volumes:
   profile-data:
+  task-logs:

@@ -66,7 +66,7 @@ async def test_standalone_worker_does_not_create_an_inline_consumer(
 
 
 @pytest.mark.parametrize("obsolete_concurrency", [1, 20])
-def test_compose_follows_backend_dispatch_and_names_images_automatically(
+def test_compose_follows_backend_dispatch_with_one_image(
     tmp_path, obsolete_concurrency
 ):
     if not shutil.which("docker"):
@@ -74,7 +74,7 @@ def test_compose_follows_backend_dispatch_and_names_images_automatically(
     root = Path(__file__).resolve().parents[1]
     env_file = tmp_path / "worker env"
     env_file.write_text(
-        # 旧配置即使还在 env 中，也不能继续构成第二套业务限制或覆盖构建命名。
+        # 执行进程跟随 backend 派发，旧的分组镜像配置也由统一镜像版本取代。
         f"PROFILE_WORKER_CONCURRENCY={obsolete_concurrency}\nINVITATION_WORKER_CONCURRENCY=5\n"
         "PROFILE_IMAGE=obsolete-profile\nINVITATION_IMAGE=obsolete-invitation\n"
         "LLM_RPM_LIMIT=100\nLLM_TPM_LIMIT=2000\n",
@@ -88,6 +88,8 @@ def test_compose_follows_backend_dispatch_and_names_images_automatically(
         )
     }
     runtime["CP_ENV_FILE"] = str(env_file)
+    runtime["TASK_ENV_FILE"] = str(root / "services/task-backend/.env.example")
+    runtime["CP_IMAGE"] = "customer-profile-unified:20261109-150000-test"
     result = subprocess.run(
         [
             "docker",
@@ -129,7 +131,7 @@ def test_compose_follows_backend_dispatch_and_names_images_automatically(
         assert settings.interrupt_on_start
         assert "depends_on" not in services[name]
         assert "ports" not in services[name]
-    assert all("image" not in service for service in services.values())
+    assert {service["image"] for service in services.values()} == {runtime["CP_IMAGE"]}
     result = subprocess.run(
         [
             "docker",
@@ -147,9 +149,9 @@ def test_compose_follows_backend_dispatch_and_names_images_automatically(
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, "自动镜像命名校验失败（不输出凭据）"
-    images = {line.split(":")[0] for line in result.stdout.splitlines() if line}
-    assert images == {"customer-profile-" + name for name in services}
+    assert result.returncode == 0, "统一镜像版本校验失败（不输出凭据）"
+    images = {line for line in result.stdout.splitlines() if line}
+    assert images == {runtime["CP_IMAGE"]}
     for name in ("api", "inbound"):
         assert services[name]["environment"]["INTERRUPT_ON_START"] == "false"
         assert services[name]["environment"]["INLINE_WORKER"] == "false"
