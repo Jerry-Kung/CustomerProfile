@@ -112,8 +112,8 @@ def test_compose_follows_backend_dispatch_with_one_image(
     services = json.loads(result.stdout)["services"]
     assert "worker" not in services, "旧的全任务消费者不能继续作为默认服务启动"
     for name, scope in (
-        ("profile-worker", "profile"),
-        ("invitation-worker", "invitation"),
+        ("runtime-profile-worker", "profile"),
+        ("runtime-invitation-worker", "invitation"),
     ):
         settings = Settings(
             _env_file=None,
@@ -152,11 +152,11 @@ def test_compose_follows_backend_dispatch_with_one_image(
     assert result.returncode == 0, "统一镜像版本校验失败（不输出凭据）"
     images = {line for line in result.stdout.splitlines() if line}
     assert images == {runtime["CP_IMAGE"]}
-    for name in ("api", "inbound"):
+    for name in ("runtime-profile-api", "runtime-invitation-api"):
         assert services[name]["environment"]["INTERRUPT_ON_START"] == "false"
         assert services[name]["environment"]["INLINE_WORKER"] == "false"
-    assert services["api"]["environment"]["WORKFLOW_SCOPE"] == "profile"
-    assert services["inbound"]["environment"]["WORKFLOW_SCOPE"] == "invitation"
+    assert services["runtime-profile-api"]["environment"]["WORKFLOW_SCOPE"] == "profile"
+    assert services["runtime-invitation-api"]["environment"]["WORKFLOW_SCOPE"] == "invitation"
 
 
 async def test_worker_entrypoint_recovers_only_its_scope_and_only_once(

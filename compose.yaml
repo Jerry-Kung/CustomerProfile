@@ -44,13 +44,18 @@ x-task-worker: &task-worker
   <<: *task
   command: ["/opt/task-venv/bin/customer-profile-worker"]
   depends_on:
-    task-api:
+    backend-api:
       condition: service_healthy
   stop_grace_period: 60s
 
 services:
-  api:
+  runtime-profile-api:
+    container_name: runtime-profile-api-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *service
+    # Preserve the original internal hostname during the naming transition.
+    networks:
+      default:
+        aliases: [api]
     # Build once; all other services use this same image.
     build:
       context: .
@@ -78,7 +83,8 @@ services:
       start_period: 30s
       retries: 3
 
-  profile-worker:
+  runtime-profile-worker:
+    container_name: runtime-profile-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *service
     command: ["python", "-m", "customer_profile.worker"]
     environment:
@@ -89,7 +95,11 @@ services:
     # lets the current workflow finish before Docker may force termination.
     stop_grace_period: 60m
 
-  inbound:
+  runtime-invitation-api:
+    container_name: runtime-invitation-api-${COMPOSE_PROJECT_NAME:-customer-profile}
+    networks:
+      default:
+        aliases: [inbound]
     <<: *service
     command: ["python", "-m", "customer_profile.inbound"]
     environment:
@@ -112,7 +122,8 @@ services:
       start_period: 30s
       retries: 3
 
-  invitation-worker:
+  runtime-invitation-worker:
+    container_name: runtime-invitation-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *service
     command: ["python", "-m", "customer_profile.worker"]
     environment:
@@ -121,13 +132,15 @@ services:
       INTERRUPT_ON_START: "true"
     stop_grace_period: 60m
 
-  task-migrate:
+  backend-migrate:
+    container_name: backend-migrate-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *task
     profiles: ["maintenance"]
     command: ["/opt/task-venv/bin/customer-profile-migrate"]
     restart: "no"
 
-  task-api:
+  backend-api:
+    container_name: backend-api-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *task
     command: ["/opt/task-venv/bin/customer-profile-api"]
     environment:
@@ -143,7 +156,8 @@ services:
       start_period: 30s
       retries: 3
 
-  qingtian-worker:
+  backend-qingtian-worker:
+    container_name: backend-qingtian-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *task-worker
     environment:
       <<: *task-environment
@@ -156,7 +170,8 @@ services:
       WORKER_WORK_ENVS: "${QINGTIAN_WORKER_WORK_ENVS:-test,production}"
       WORKER_CONCURRENCY: "${QINGTIAN_WORKER_CONCURRENCY:-1}"
 
-  commercial-worker:
+  backend-commercial-worker:
+    container_name: backend-commercial-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *task-worker
     environment:
       <<: *task-environment
@@ -171,12 +186,13 @@ services:
       QINGTIAN_API_KEY_TEST: "${QINGTIAN_COMMERCIAL_API_KEY_TEST:-}"
       QINGTIAN_API_KEY_PRODUCTION: "${QINGTIAN_COMMERCIAL_API_KEY_PRODUCTION:-}"
 
-  profile-runner-worker:
+  backend-profile-worker:
+    container_name: backend-profile-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *task-worker
     depends_on:
-      task-api:
+      backend-api:
         condition: service_healthy
-      api:
+      runtime-profile-api:
         condition: service_healthy
     environment:
       <<: *task-environment
@@ -189,15 +205,16 @@ services:
       WORKER_TARGET_MODE: "${PROFILE_RUNNER_TARGET_MODE:-active}"
       WORKER_CONCURRENCY: "${PROFILE_RUNNER_CONCURRENCY:-5}"
       PROFILE_RUNNER_BASE_URL_TEST: "${PROFILE_RUNNER_BASE_URL_TEST:-}"
-      PROFILE_RUNNER_BASE_URL_PRODUCTION: "${PROFILE_RUNNER_BASE_URL_PRODUCTION:-http://api:${API_PORT:-18173}}"
+      PROFILE_RUNNER_BASE_URL_PRODUCTION: "${PROFILE_RUNNER_BASE_URL_PRODUCTION:-http://runtime-profile-api:${API_PORT:-18173}}"
 
-  invitation-runner-worker:
+  backend-invitation-worker:
+    container_name: backend-invitation-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *task-worker
     profiles: ["invitation-runner"]
     depends_on:
-      task-api:
+      backend-api:
         condition: service_healthy
-      inbound:
+      runtime-invitation-api:
         condition: service_healthy
     environment:
       <<: *task-environment
@@ -209,7 +226,7 @@ services:
       WORKER_WORK_ENVS: "${INVITATION_RUNNER_WORK_ENVS:-test}"
       WORKER_TARGET_MODE: "${INVITATION_RUNNER_TARGET_MODE:-active}"
       WORKER_CONCURRENCY: "${INVITATION_RUNNER_CONCURRENCY:-5}"
-      INVITATION_RUNNER_BASE_URL_TEST: "${INVITATION_RUNNER_BASE_URL_TEST:-http://inbound:${INBOUND_PORT:-8099}}"
+      INVITATION_RUNNER_BASE_URL_TEST: "${INVITATION_RUNNER_BASE_URL_TEST:-http://runtime-invitation-api:${INBOUND_PORT:-8099}}"
       INVITATION_RUNNER_BASE_URL_PRODUCTION: "${INVITATION_RUNNER_BASE_URL_PRODUCTION:-}"
 
 volumes:

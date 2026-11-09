@@ -30,12 +30,12 @@
 cp .env.example .env          # 然后填入真实端点与凭据
 # 填写后端 MySQL、目标和业务回调配置
 docker compose --profile invitation-runner config -q
-docker compose build api
-# 仅首次新建 MySQL 库时执行：docker compose run --rm --no-deps task-migrate
+docker compose build runtime-profile-api
+# 仅首次新建 MySQL 库时执行：docker compose run --rm --no-deps backend-migrate
 docker compose --profile invitation-runner up -d --no-build --wait
 ```
 
-所有服务共用 `customer-profile-unified:uat`；只有 `api` 声明构建，其他服务直接使用同一镜像。
+所有服务共用 `customer-profile-unified:uat`；只有 `runtime-profile-api` 声明构建，其他服务直接使用同一镜像。
 已有 001–008 后端库无需执行迁移。更新前先暂停派发并等待执行 Worker 完成。
 两仓部署首次切换、分组发布和恢复步骤见 [统一镜像发布](docs/runbooks/统一镜像发布.md)。
 

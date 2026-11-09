@@ -36,23 +36,28 @@ def test_one_image_with_separate_credentials_ports_and_existing_history_volume(t
     configuration = json.loads(result.stdout)
     services = configuration["services"]
     assert len(services) == 10
+    for name, service in services.items():
+        assert name.startswith(("backend-", "runtime-"))
+        assert service["container_name"] == f"{name}-customer-profile"
+    assert "api" in services["runtime-profile-api"]["networks"]["default"]["aliases"]
+    assert "inbound" in services["runtime-invitation-api"]["networks"]["default"]["aliases"]
     assert {service["image"] for service in services.values()} == {image}
-    assert {name for name, service in services.items() if "build" in service} == {"api"}
-    for name in ["task-api", "task-migrate", "qingtian-worker", "commercial-worker", "profile-runner-worker", "invitation-runner-worker"]:
+    assert {name for name, service in services.items() if "build" in service} == {"runtime-profile-api"}
+    for name in ["backend-api", "backend-migrate", "backend-qingtian-worker", "backend-commercial-worker", "backend-profile-worker", "backend-invitation-worker"]:
         assert services[name]["command"][0].startswith("/opt/task-venv/bin/customer-profile-")
-    assert services["api"]["environment"]["PROFILE_API_KEY"] == "runtime-fixture-key"
-    assert services["task-api"]["environment"]["PROFILE_API_KEY"] == "task-fixture-key"
-    assert services["api"]["environment"]["API_PORT"] == "18175"
-    assert services["task-api"]["environment"]["API_PORT"] == "18009"
-    assert services["task-api"]["ports"][0]["published"] == "18007"
-    assert services["profile-worker"]["environment"]["WORKER_CONCURRENCY"] == ""
-    assert services["profile-runner-worker"]["environment"]["WORKER_CONCURRENCY"] == "5"
-    assert services["task-api"]["working_dir"] == "/app/services/task-backend"
-    assert services["task-api"]["environment"]["PYTHONPATH"] == "/app/services/task-backend"
+    assert services["runtime-profile-api"]["environment"]["PROFILE_API_KEY"] == "runtime-fixture-key"
+    assert services["backend-api"]["environment"]["PROFILE_API_KEY"] == "task-fixture-key"
+    assert services["runtime-profile-api"]["environment"]["API_PORT"] == "18175"
+    assert services["backend-api"]["environment"]["API_PORT"] == "18009"
+    assert services["backend-api"]["ports"][0]["published"] == "18007"
+    assert services["runtime-profile-worker"]["environment"]["WORKER_CONCURRENCY"] == ""
+    assert services["backend-profile-worker"]["environment"]["WORKER_CONCURRENCY"] == "5"
+    assert services["backend-api"]["working_dir"] == "/app/services/task-backend"
+    assert services["backend-api"]["environment"]["PYTHONPATH"] == "/app/services/task-backend"
     assert configuration["volumes"]["profile-data"]["name"] == "customer-profile_profile-data"
-    assert services["api"]["environment"]["INTERRUPT_ON_START"] == "false"
-    assert services["profile-worker"]["stop_grace_period"] == "1h0m0s"
-    assert services["invitation-worker"]["stop_grace_period"] == "1h0m0s"
+    assert services["runtime-profile-api"]["environment"]["INTERRUPT_ON_START"] == "false"
+    assert services["runtime-profile-worker"]["stop_grace_period"] == "1h0m0s"
+    assert services["runtime-invitation-worker"]["stop_grace_period"] == "1h0m0s"
 
 
 @pytest.mark.parametrize("custom_file", [False, True])
@@ -84,15 +89,17 @@ def test_one_env_file_preserves_project_ports_and_worker_scopes(tmp_path, custom
     config = json.loads(result.stdout)
     services = config["services"]
     assert {service["image"] for service in services.values()} == {"customer-profile-unified:uat"}
-    assert {name for name, service in services.items() if "build" in service} == {"api"}
+    assert {name for name, service in services.items() if "build" in service} == {"runtime-profile-api"}
     assert config["name"] == "customer-profile-runner"
+    for name, service in services.items():
+        assert service["container_name"] == f"{name}-customer-profile-runner"
     assert config["volumes"]["profile-data"]["name"] == "customer-profile-runner_profile-data"
-    assert services["api"]["environment"]["API_PORT"] == "18173"
-    assert services["api"]["ports"][0]["published"] == "18000"
-    assert services["task-api"]["environment"]["API_PORT"] == "18008"
-    assert services["task-api"]["ports"][0]["published"] == "18007"
-    assert services["task-api"]["environment"]["MYSQL_PASSWORD"] == "mysql-fixture-key"
-    assert services["profile-worker"]["environment"]["WORKER_CONCURRENCY"] == ""
-    assert services["profile-runner-worker"]["environment"]["WORKER_CONCURRENCY"] == "5"
-    assert services["invitation-runner-worker"]["environment"]["WORKFLOW_TARGET_ID"] == "invitation-runner-uat"
-    assert services["invitation-runner-worker"]["environment"]["WORKER_WORK_ENVS"] == "test,production"
+    assert services["runtime-profile-api"]["environment"]["API_PORT"] == "18173"
+    assert services["runtime-profile-api"]["ports"][0]["published"] == "18000"
+    assert services["backend-api"]["environment"]["API_PORT"] == "18008"
+    assert services["backend-api"]["ports"][0]["published"] == "18007"
+    assert services["backend-api"]["environment"]["MYSQL_PASSWORD"] == "mysql-fixture-key"
+    assert services["runtime-profile-worker"]["environment"]["WORKER_CONCURRENCY"] == ""
+    assert services["backend-profile-worker"]["environment"]["WORKER_CONCURRENCY"] == "5"
+    assert services["backend-invitation-worker"]["environment"]["WORKFLOW_TARGET_ID"] == "invitation-runner-uat"
+    assert services["backend-invitation-worker"]["environment"]["WORKER_WORK_ENVS"] == "test,production"

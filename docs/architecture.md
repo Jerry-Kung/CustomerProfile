@@ -25,12 +25,12 @@
 
 ```mermaid
 flowchart LR
-    BP[backend 画像组] --> PA[api / 18000]
-    BI[backend 邀约组] --> IA[inbound / 8099]
+    BP[backend 画像组] --> PA[runtime-profile-api / 18000]
+    BI[backend 邀约组] --> IA[runtime-invitation-api / 8099]
     PA --> DB[(原 SQLite 数据卷)]
     IA --> DB
-    DB -->|画像根任务| PW[profile-worker / 执行已派发画像]
-    DB -->|邀约根任务| IW[invitation-worker / 执行已派发邀约]
+    DB -->|画像根任务| PW[runtime-profile-worker / 执行已派发画像]
+    DB -->|邀约根任务| IW[runtime-invitation-worker / 执行已派发邀约]
 ```
 
 两个 API 都只提交、查询，不执行或恢复任务。画像和邀约进程分别使用 `profile / invitation`
@@ -41,8 +41,8 @@ flowchart LR
 留在 MySQL 等待。执行层不再配置第二套每类任务数量上限，接收后按派发任务自动启动；
 SQLite 仍负责可靠接单、记录运行身份与状态，接单和执行之间可以短暂处于 queued。
 
-使用 Docker Compose 构建共用镜像，更新邀约时联动 `inbound / invitation-worker / invitation-runner-worker`，
-更新画像时联动 `api / profile-worker / profile-runner-worker`。运行记录保存各服务实际采用的镜像。
+使用 Docker Compose 构建共用镜像，更新邀约时联动 `runtime-invitation-api / runtime-invitation-worker / backend-invitation-worker`，
+更新画像时联动 `runtime-profile-api / runtime-profile-worker / backend-profile-worker`。运行记录保存各服务实际采用的镜像。
 两组仍共享持久化格式，公共数据库契约变化须兼容旧版本，
 这类基础层升级可能需要联合发布。部署与首次从旧 worker 切换见运行指南。
 
