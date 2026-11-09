@@ -552,11 +552,31 @@ def test_project_claims_empty_tier_outputs_only_name():
     assert notes[0]["attribute_value"] == "未知"
 
 
-def test_project_claims_old_car_forces_replacement():
-    """旧车证据 ⇒ 换购（基线多案正文写了旧车却仍填首购）。"""
+def test_project_claims_old_car_alone_keeps_first_purchase():
+    """**旧车证据不等于换购**（2026-11-04 口径调整）。
+
+    旧用例断言「旧车 ⇒ 换购」，那是把拥车状态当成了置换交易。客户名下有 2019 年的别克，
+    不等于他会把别克交出去——他可能增购、也可能是家里另一台车。购车性质维持 L1 给的首购，
+    直到客户说出置换类的话。
+    """
     result = pipe.project_claims(
         claims_json(
             claim(attribute="old_car_model", value="2019 别克", anchor="旧车是2019年的别克"),
+            claim(attribute="purchase_nature", value="first", claim_id="c_002", anchor="第一次买车"),
+        )
+    )
+    assert json.loads(result["facts_json"]).get("purchase_nature") == "first"
+
+
+def test_project_claims_trade_in_signal_forces_replacement():
+    """客户明确说要把旧车交出去时，购车性质仍定为换购。"""
+    result = pipe.project_claims(
+        claims_json(
+            claim(
+                attribute="trade_in_requirement",
+                value='{"key": "yes", "input_value": "别克"}',
+                anchor="我这台别克想置换掉",
+            ),
             claim(attribute="purchase_nature", value="first", claim_id="c_002", anchor="第一次买车"),
         )
     )

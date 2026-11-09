@@ -425,7 +425,7 @@ def main() -> int:
     parser.add_argument("--batch", action="append", default=[])
     parser.add_argument("--root", default=str(BATCH_ROOT))
     parser.add_argument("--zero-batches", type=int, default=3)
-    parser.add_argument("--cases-batch", default="uat-18-20261026")
+    parser.add_argument("--cases-batch", default="uat-traces-20261102-20261103")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 

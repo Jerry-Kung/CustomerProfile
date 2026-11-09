@@ -36,9 +36,11 @@ def _express(**sections) -> str:
     return json.dumps({"analysis_result": sections}, ensure_ascii=False)
 
 
-def _build(facts="{}", notes="[]", express="{}", claims="{}"):
+def _build(facts="{}", notes="[]", express="{}", claims="{}", to_confirm="[]"):
     return json.loads(
-        cb.build_analysis_result("13500000000", "b-1", facts, notes, express, claims)
+        cb.build_analysis_result(
+            "13500000000", "b-1", facts, notes, express, claims, to_confirm
+        )
     )
 
 
@@ -829,3 +831,171 @@ def test_display_name_is_the_business_test_arm_but_workflow_id_is_frozen():
     assert pipe.WORKFLOW.display_name == "业务测试臂"
     assert pipe.WORKFLOW_ID == "customer_profile_pipeline"
     assert pipe.WORKFLOW.workflow_id == "customer_profile_pipeline"
+
+
+# ---------------------------------------------------------------- 待确认项上卡（2026-11-05）
+
+def _confirm(*entries) -> str:
+    return json.dumps(list(entries), ensure_ascii=False)
+
+
+def test_intended_model_confirm_lands_in_compare_category():
+    """客户说的车型对不上在售清单时，卡片上要有一句「待确认」，而不是一条空白。
+
+    `to_confirm` 此前只到投影层输出为止、回传体不读——销售看到的是一条空字段，
+    分不清「客户没提」与「提了但对不上」。这条钉住它接到了哪个分类、写成了什么话。
+    """
+    payload = _build(
+        facts=_facts(purchase_type="personal"),
+        to_confirm=_confirm(
+            {
+                "attribute_key": "intended_model",
+                "candidates": ["猛士X700 Ultra"],
+                "reason": "客户提到的车型不在当前在售清单内",
+                "suggested_action": "与客户确认其意向车型是否为其提到的这一款",
+            }
+        ),
+    )
+    labels = [i["label"] for i in _categories(payload)["对比车型"]]
+    assert labels == ["待确认：意向车型（客户提到「猛士X700 Ultra」）"]
+
+
+def test_confirm_item_is_low_confidence_and_explains_the_next_step():
+    """待确认项不是一条结论：置信度取低档，``steps`` 写明该去问什么。"""
+    payload = _build(
+        facts=_facts(),
+        to_confirm=_confirm(
+            {
+                "attribute_key": "trade_in_requirement",
+                "candidates": ["yes（长安）"],
+                "reason": "取值无法归一到契约枚举",
+                "suggested_action": "人工确认后补填合法枚举键",
+            }
+        ),
+    )
+    item = _categories(payload)["换车动因"][0]
+    assert item["label"].startswith("待确认：置换需求")
+    assert item["reasoning_detail"]["confidence"] < 0.5
+    assert item["reasoning_detail"]["steps"]
+
+
+def test_speculation_confirm_stays_off_the_card():
+    """「凭据不足」型确认**不进卡片**。
+
+    这类条目说的是「这条线索不够硬」，销售照着补不出东西；每案十几条全推上去，
+    会把真正需要当场问清的那条埋掉。
+    """
+    payload = _build(
+        facts=_facts(purchase_type="personal"),
+        to_confirm=_confirm(
+            {
+                "attribute_key": "current_vehicle_info",
+                "candidates": ["未知"],
+                "reason": "身份字段仅由社交自呈现支撑，不构成客户事实",
+                "suggested_action": "向客户或销售确认后补充",
+            }
+        ),
+    )
+    assert not any(
+        "待确认" in i["label"] for items in _categories(payload).values() for i in items
+    )
+
+
+def test_confirm_replaces_the_change_filler():
+    """有真实待确认项时，不得再给「暂无换车动因」——两者不能并存。"""
+    payload = _build(
+        facts=_facts(purchase_type="personal"),
+        to_confirm=_confirm(
+            {
+                "attribute_key": "trade_in_model",
+                "candidates": ["丰田酷路泽"],
+                "reason": "置换需求未成立，置换车型不得填写",
+                "suggested_action": "确认客户是否打算把现有车辆置换掉",
+            }
+        ),
+    )
+    labels = [i["label"] for i in _categories(payload)["换车动因"]]
+    assert "暂无换车动因" not in labels
+    assert any(label.startswith("待确认：置换车型") for label in labels)
+
+
+def test_confirm_ids_are_unique_against_real_items():
+    """待确认项的 id 必须落在同一 id 空间里且不与真实条目相撞（契约要求全局唯一）。"""
+    payload = _build(
+        facts=_facts(competing_model="豹8", intended_model="猛士M817"),
+        to_confirm=_confirm(
+            {
+                "attribute_key": "intended_model",
+                "candidates": ["某不知名牌子X9"],
+                "reason": "客户提到的车型不在当前在售清单内",
+                "suggested_action": "与客户确认",
+            }
+        ),
+    )
+    ids = [i["id"] for items in _categories(payload).values() for i in items]
+    assert len(ids) == len(set(ids))
+    assert any(i["id"].startswith("confirm-") for items in _categories(payload).values() for i in items)
+
+
+def test_callback_build_node_receives_to_confirm():
+    """接线守卫：节点必须把 ``to_confirm_json`` 接进来，否则上面几条在真实运行里不生效。"""
+    from customer_profile.workflows import customer_profile_pipeline as pipe
+
+    nodes = {n.node_id: n for n in pipe.WORKFLOW.nodes}
+    build = nodes[pipe.CALLBACK_BUILD]
+    sources = {b.target: tuple(b.source) for b in build.bindings}
+    assert sources["to_confirm_json"] == (pipe.L2_ENUM_MAP, "to_confirm_json")
+
+
+def test_confirm_label_translates_inline_enum_form():
+    """``yes（长安）`` 是契约里 ``yes`` 项带品牌输入框的**内部形态**，不能原样印到卡片上。
+
+    L1 会把它写成一个串而不是结构化取值；不拆开翻译，销售看到的就是「客户提到『yes（品牌）』」。
+    """
+    payload = _build(
+        facts=_facts(),
+        to_confirm=_confirm(
+            {
+                "attribute_key": "trade_in_requirement",
+                "candidates": ["yes（长安）"],
+                "reason": "取值无法归一到契约枚举",
+                "suggested_action": "确认客户是否打算把现有车辆置换掉",
+            }
+        ),
+    )
+    labels = [i["label"] for i in _categories(payload)["换车动因"]]
+    assert labels == ["待确认：置换需求（客户提到「有（长安）」）"]
+    assert not any("yes" in label for label in labels)
+
+
+def test_confirm_label_drops_placeholder_candidates():
+    """占位候选值不进标签：「客户提到『未知』」等于没说。"""
+    payload = _build(
+        facts=_facts(),
+        to_confirm=_confirm(
+            {
+                "attribute_key": "intended_model",
+                "candidates": ["未知"],
+                "reason": "客户提到的车型不在当前在售清单内",
+                "suggested_action": "与客户确认",
+            }
+        ),
+    )
+    labels = [i["label"] for i in _categories(payload)["对比车型"]]
+    assert labels == ["待确认：意向车型"]
+
+
+def test_confirm_label_reuses_the_card_wording_for_purchase_nature():
+    """「换车动因」分类里这一项一直叫「购车性质」，待确认标签沿用同一说法。"""
+    payload = _build(
+        facts=_facts(),
+        to_confirm=_confirm(
+            {
+                "attribute_key": "purchase_nature",
+                "reason": "换购与其证据不一致",
+                "suggested_action": "确认客户是否打算把现有车辆置换掉",
+            }
+        ),
+    )
+    labels = [i["label"] for i in _categories(payload)["换车动因"]]
+    assert labels == ["待确认：购车性质"]

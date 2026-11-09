@@ -463,7 +463,10 @@ async def build_service(
     tracker: RunTracker | None = None
     if enable_store:
         store = Store(
-            _database_path(settings), busy_timeout_ms=settings.sqlite_busy_timeout_ms
+            _database_path(settings),
+            busy_timeout_ms=settings.sqlite_busy_timeout_ms,
+            # 读路径要按包回填载荷（存储瘦身）。目录与写入侧同源，两侧都从配置取。
+            archive_dir=settings.trace_archive_path,
         )
         store.connect()
         if settings.interrupt_on_start and recover_running_runs:
@@ -476,6 +479,11 @@ async def build_service(
             # 留痕里必须能看出来，否则会被当成真实链路的结果引用。
             is_replay=replay is not None or http_replay is not None,
             code_commit=_code_commit(),
+            # 运行时数据在根运行收尾时打包（存储瘦身）。档位与目录来自配置，
+            # 缺省不在本进程内关闭——单测与不需要归档的调用方直接构造 RunTracker。
+            persist_mode=settings.trace_persist_mode,
+            archive_dir=settings.trace_archive_path,
+            compress_level=settings.trace_archive_compress_level,
         )
 
     runtime = NodeRuntime(

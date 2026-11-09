@@ -21,6 +21,10 @@
 | 非本方车型 + 拿来比较 | ``competing_brand`` / ``competing_model`` | 竞品位 |
 | 非本方车型 + 客户已拥有 | ``old_car_model`` / ``owned_brand_model`` | 自用车优先 |
 
+**档位（版本）属于意向车型。** 留资里写的是「意向车型：Ultra / 意向车系：X700」这类
+车型 + 档位的形式，闭集必须认得出「<车型> <档位>」这类写法。档位名同时属于多款车型时
+（``Ultra`` 既是 X700 也是 M817 的档位），留在意向位并请人确认车系，不替客户挑一款。
+
 **本方车型永不进竞品位，非本方车型永不进意向位。** 两条边界互补，把四类字段划成
 互斥的四个格子。
 
@@ -50,7 +54,7 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from .pack import EMPTY_PACK, Pack
-from .resolve import resolve_brand, resolve_model
+from .resolve import is_our_trim, model_prefix_of, resolve_brand, resolve_model
 
 INTENDED = "intended_model"
 COMPETING_MODEL = "competing_model"
@@ -188,7 +192,7 @@ def reroute_claims(claims: Sequence[Any], pack: Pack | None = None) -> IntentOut
         items = (
             [_text(item) for item in raw_value if _text(item)]
             if isinstance(raw_value, (list, tuple))
-            else [_text(raw_value)]
+            else _split_items(_text(raw_value))
         )
         items = [item for item in items if item]
         if not items:
@@ -213,12 +217,41 @@ def reroute_claims(claims: Sequence[Any], pack: Pack | None = None) -> IntentOut
                 keep_items.append(text)
                 continue
 
+            # 歧义档位：``Ultra`` / ``Max+`` 这类档位名同时属于多款在售车型。认不出
+            # 是哪一款，但**它确实是我们的在售档位**——留在意向位并请人确认车系，
+            # 既不像陌生称谓那样丢掉，也不替客户挑一款。
+            if is_our_trim(text, resolved):
+                keep_items.append(text)
+                outcome.to_confirm.append(
+                    {
+                        "attribute_key": INTENDED,
+                        "candidates": [text],
+                        "reason": "客户说的车型版本对应多款在售车型，未能确定是哪一款",
+                        "suggested_action": "与客户确认具体车系（如 X700 还是 M817）后补全车型",
+                    }
+                )
+                continue
+
             brand = resolve_brand(text, resolved)
             if brand is None and _mentions_our_brand(text, resolved):
                 brand = "our"
 
+            if brand == "our" and model_prefix_of(text, resolved) is not None:
+                # 车型名认得出、后面的版本写法不认识（知识包没列这个档位名）。
+                # 它仍然是我们的车：留在意向位，只请人确认版本，不整条丢掉。
+                keep_items.append(text)
+                outcome.to_confirm.append(
+                    {
+                        "attribute_key": INTENDED,
+                        "candidates": [text],
+                        "reason": "车型可确认，版本写法不在当前档位清单中",
+                        "suggested_action": "与客户确认具体版本后补全档位",
+                    }
+                )
+                continue
+
             if brand == "our":
-                # 本方品牌，但型号不在售（如「老款 917 特别版」）
+                # 本方品牌，但型号不在售（如「老款 X系列特别版」）
                 outcome.dropped.append(
                     {
                         "value": text,
@@ -280,6 +313,16 @@ def reroute_claims(claims: Sequence[Any], pack: Pack | None = None) -> IntentOut
 
     outcome.claims = kept
     return outcome
+
+
+def _split_items(text: str) -> list[str]:
+    """多值串按分隔符拆开。``intended_model`` 是聚合字段，「在 A、B 之间比」是常态，
+    模型也常把它写成 ``A||B`` 一条。不拆开的话整条会被当成一个陌生称谓，
+    把里面**在售的那几台**一并丢掉。
+    """
+    if "||" not in text:
+        return [text] if text else []
+    return [part.strip() for part in text.split("||") if part.strip()]
 
 
 def _with_attribute(claim: Any, attribute: str) -> Any:

@@ -119,3 +119,23 @@ def test_budget_parsing_does_not_crash_on_noise(pack):
 def test_owned_car_also_selects_entry(pack):
     """自用车也要给资料：销售需要知道客户现在开什么、要不要置换。"""
     assert views.mentioned_models({"old_car_model": "猛士917"}, pack) == ["dfms-917"]
+
+
+# ================================================================
+# K3 · 档位称谓
+# ================================================================
+
+def test_brief_lists_trims_as_names(pack):
+    """档位是**称谓**不是参数：不写出来，L1 会把「X700 Ultra」当成型号不明。"""
+    text = views.render_brand_brief(pack)
+    assert "各车型档位" in text
+    for entry in pack.models:
+        for config in entry.configs:
+            assert config.name.split()[-1] in text
+
+
+def test_brief_still_does_not_leak_prices_after_trims(pack):
+    """档位只给名字，不带价格——K3「只给称谓不给参数」的边界不变。"""
+    text = views.render_brand_brief(pack)
+    assert "万元" not in text
+    assert "21.98" not in text and "27.98" not in text

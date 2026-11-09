@@ -333,8 +333,6 @@ RULES: tuple[Rule, ...] = (
             "old_car_model",
             "owned_brand_model",
             "owned_car_age",
-            "trade_in_model",
-            "current_vehicle_info",
         ),
         stages=("extract",),
         severity="warn",
@@ -390,6 +388,69 @@ RULES: tuple[Rule, ...] = (
         tests=(
             "tests/rules/test_spec.py::test_global_rule_rendered_separately",
             "tests/rules/test_spec.py::test_global_rule_not_folded_into_field_notes",
+        ),
+    ),
+    Rule(
+        id="SPEC-20",
+        version=1,
+        title="付款方式的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("payment_method",),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal=(
+            "只有客户明确说贷款/按揭/分期/走金融，或提到月供、利率、免息、首付、"
+            "金融方案，或订单记录写明分期，才可记为贷款。**不得**把购车补贴、以旧换新、"
+            "优惠政策、砍价/比价/嫌贵、低收入或低消费档、车型价格标签当作贷款依据；"
+            "只由月供、利率、金融政策一类间接表述推出的，可以记为贷款但置信度要低，"
+            "并在说明里写「推断可能存在贷款倾向，但尚未确认」。以上都不成立时记全款。"
+        ),
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_finance.py::test_payment_note_rendered_inline",
+            "tests/rules/test_finance.py::test_price_signals_named_in_prompt_as_excluded",
+        ),
+    ),
+    Rule(
+        id="SPEC-21",
+        version=1,
+        title="置换需求与置换车型的取证范围",
+        content_kind="spec",
+        channels=("prompt",),
+        scope=("trade_in_requirement", "trade_in_model"),
+        stages=("extract",),
+        severity="warn",
+        default_action="annotate",
+        message_internal=(
+            "「置换」指置换交易：客户下单买新车时把**自己那台旧车**交出去，用评估价抵扣车款，"
+            "可能另有一笔置换补贴。**只有**客户明确说出「置换」「换购」「以旧换新」「拿旧车抵」"
+            "「把这台卖掉换」「回收」「评估一下我这台」，或销售在跟进记录里登记了置换意向，"
+            "才算有置换需求；否则本字段不输出，**不得**写「无」（客户没提不等于客户说不置换）。"
+            "**客户有旧车不等于客户要置换**，增购也不等于置换——客户只是提到自己有什么车时，"
+            "那台车属于旧车/现车信息，不是置换车型。置换车型只能写**客户明确要交出去的那一台**；"
+            "客户有多台旧车又看不出是哪一台时，写「待确认」，**不得**把旧车清单全部并列写入，"
+            "也**不得**凭猜测挑一台。意向车型、对比车型、试驾过的车型都**不得**写进置换车型。"
+            "小订/大定的车型也不是置换车型——那是购车阶段的下单动作。"
+            "**客户的车已经卖掉、过户、报废或已处置的不算可置换的旧车**：那台车不在他名下、也交不出去，"
+            "置换需求不成立，本字段不输出——这条排除优先于其它一切信号，"
+            "哪怕同一段话里出现了「置换」「以旧换新」字样也一样。"
+            "「置换补贴」「以旧换新优惠」「置换政策」这类只说明客户在**问价**，是**间接**信号："
+            "在没有任何排他信号时，可以据此判有置换意向，但必须标低置信，"
+            "并在说明里写明这是从补贴/优惠话题推断的、未经客户确认；"
+            "仅有间接信号时**不得**写置换车型。"
+        ),
+        message_customer="",
+        owner="business",
+        status="active",
+        cluster=CLUSTER,
+        tests=(
+            "tests/rules/test_spec.py::test_trade_in_note_states_signal_requirement",
+            "tests/rules/test_spec.py::test_trade_in_note_rendered_under_requirement_field",
         ),
     ),
 )

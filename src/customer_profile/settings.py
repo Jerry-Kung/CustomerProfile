@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
@@ -399,6 +399,80 @@ class Settings(BaseSettings):
     sqlite_busy_timeout_ms: int = 5000
     """SQLite 写冲突的等待时长。API 与 worker 双进程共库后必需，否则写相遇会直接报 database is locked。"""
 
+    # ------------------------------------------------------------ 留痕存储瘦身
+    trace_persist_mode: Literal["high", "low"] = "high"
+    """留痕运行时数据的留存档位（``TRACE_PERSIST_MODE``）。
+
+    - ``high``：包内保留节点输入输出与完整请求体；
+    - ``low``：只留外部响应原文、根输出、``pipeline_l0_records`` 的原样输入与诊断切片。
+
+    **只接受这两个值。** ``none`` 与任何拼写错误都直接拒绝启动，不回落缺省——
+    「以为开了 low 其实还在存全量」和「以为存了其实什么都没有」都是最难查的一类问题。
+    方案稿里的 ``none`` 档本轮未实现，配置层明确拒绝而不是静默当成别的东西。
+    """
+
+    trace_archive_dir: Path | None = None
+    """运行时数据包（``*.json.gz``）的存放目录。
+
+    缺省 ``<DATA_DIR>/trace-archives``。**必须落在持久卷内**：容器重建后包就没了，
+    而库里那部分载荷在打包成功后已被清空。"""
+
+    trace_retention_days: int = 30
+    """包文件的保留天数。骨架（运行、节点、尝试的非载荷列）永久保留。"""
+
+    trace_archive_compress_level: int = 6
+    """包内 gzip 压缩级别。缺省 6 是体积与耗时的折中。"""
+
+    @field_validator("trace_persist_mode", mode="before")
+    @classmethod
+    def _validate_trace_mode(cls, value: Any) -> str:
+        """非法档位拒绝启动；旧的布尔开关映射到新档位。"""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return "high"
+        text = str(value).strip().lower()
+        if text in ("high", "low"):
+            return text
+        if text == "none":
+            raise ValueError(
+                "TRACE_PERSIST_MODE=none 本轮未实现；请使用 high 或 low"
+            )
+        raise ValueError(
+            f"未知的 TRACE_PERSIST_MODE={value!r}；只接受 high / low"
+            "（不静默回落，避免「以为换了档位其实没换」）"
+        )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_persist_flag(cls, data: Any) -> Any:
+        """兼容旧的 ``TRACE_PERSIST_ENABLED`` 布尔开关：true → high，false → low。
+
+        两者同时给出时以 ``TRACE_PERSIST_MODE`` 为准。旧变量只是过渡，不写进文档的
+        配置表，免得后来的人以为它还能长期使用。
+        """
+        if not isinstance(data, Mapping):
+            return data
+        if data.get("trace_persist_mode"):
+            return data
+        legacy = data.get("trace_persist_enabled")
+        if legacy is None:
+            return data
+        text = str(legacy).strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            merged = dict(data)
+            merged["trace_persist_mode"] = "high"
+            return merged
+        if text in ("0", "false", "no", "off"):
+            merged = dict(data)
+            merged["trace_persist_mode"] = "low"
+            return merged
+        return data
+
+    @property
+    def trace_archive_path(self) -> Path:
+        """包目录的解析结果：显式配置优先，否则落在数据目录下。"""
+        base = self.trace_archive_dir
+        return Path(base) if base else self.data_dir / "trace-archives"
+
     @field_validator(
         "llm_rpm_limit",
         "llm_tpm_limit",
@@ -540,6 +614,7 @@ class Settings(BaseSettings):
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.trace_archive_path.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)

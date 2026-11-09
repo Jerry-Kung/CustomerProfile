@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 CLUSTER_MODULES: tuple[str, ...] = (
     "identity",
     "income",
+    "finance",
     "consistency",
     "level",
     "hard",
@@ -31,6 +32,7 @@ CLUSTER_MODULES: tuple[str, ...] = (
 CLUSTER_TITLES: dict[str, str] = {
     "identity": "身份与归属",
     "income": "收入",
+    "finance": "付款方式",
     "consistency": "跨字段一致性",
     "level": "商机等级",
     "hard": "形态与占位",

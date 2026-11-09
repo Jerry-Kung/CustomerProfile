@@ -11,19 +11,24 @@ from typing import Any, Mapping, Sequence
 
 from ..actions import Action
 from ..registry import Rule
+from . import hard as hard_rules
 
 RULES: tuple[Rule, ...] = (
     Rule(
         id="CONSIST-01",
         version=1,
-        title="有旧车 ⇔ 换购",
+        title="有置换意愿 ⇔ 换购",
         content_kind="consistency",
         channels=("code",),
         scope=("purchase_nature", "old_car_model", "trade_in_requirement"),
         stages=("project",),
         severity="repair",
         default_action="rewrite",
-        message_internal="旧车或置换意愿任一成立即定换购；声称换购却无凭据则撤销并转确认",
+        message_internal=(
+            "置换意愿成立即定换购；声称换购却无置换凭据则撤销并转确认。"
+            "**有旧车不是置换凭据**：客户名下有车不等于会把那台车交出去，"
+            "增购更不是换购。"
+        ),
         message_customer="确认客户是否有旧车置换",
         owner="engineering",
         status="active",
@@ -98,6 +103,30 @@ RULES: tuple[Rule, ...] = (
             "tests/rules/test_landings.py::test_owned_car_claim_kept_when_not_a_deposit",
         ),
     ),
+    Rule(
+        id="CONSIST-06",
+        version=1,
+        title="置换车型有值必须有置换需求",
+        content_kind="consistency",
+        channels=("code",),
+        scope=("trade_in_model", "trade_in_requirement"),
+        stages=("project",),
+        severity="repair",
+        default_action="reject",
+        message_internal=(
+            "置换车型只有在置换需求成立（客户明确要置换）时才可写；"
+            "置换需求不是 yes 而置换车型有值：整车拒收并转确认。"
+            "客户有旧车、多处提到自己的车、或其它字段能推出「他有一台车」都不构成置换凭据。"
+        ),
+        message_customer="客户是否打算把现有车辆置换掉，请核实",
+        owner="business",
+        status="active",
+        cluster="consistency",
+        tests=(
+            "tests/test_projection.py::test_trade_in_model_requires_explicit_requirement",
+            "tests/rules/test_landings.py::test_trade_in_model_kept_with_requirement",
+        ),
+    ),
 )
 
 
@@ -105,8 +134,74 @@ RULES: tuple[Rule, ...] = (
 # 检查函数：只产出动作，不改任何状态
 # ====================================================================
 
-NO_OLD_CAR_VALUES: frozenset[str] = frozenset({"无", "没有", "无旧车"})
-"""旧车字段里表示「没有旧车」的写法。它们出现时**不构成**换购凭据。"""
+NO_OLD_CAR_VALUES: frozenset[str] = frozenset(
+    {
+        "无",
+        "没有",
+        "无旧车",
+        "无车",
+        "没有车",
+        "暂无",
+        "暂无车",
+        "未知",
+        "未提供",
+        "未提及",
+        "未知车型",
+        "不清楚",
+        "不详",
+        "不明",
+    }
+)
+"""旧车字段里**不是一台车**的写法。它们出现时**不构成**拥车凭据。
+
+「未知」与「未提供」必须在这里：L1 在没有任何旧车线索时就会这样写。把它们当成
+「客户有台车」，下游 CONSIST-05 会把「现车信息=无车」改写成「有车」——凭据是空的，
+改出来的结论却是确定的（UAT ``13720382502`` 的复查就是这样发现现车字段被污染的）。
+"""
+
+NO_OLD_CAR_PREFIXES: tuple[str, ...] = ("无", "没有", "未", "暂无", "不清", "不详", "不明")
+"""否定/未知形态的**前缀**。用前缀而不是全等，是因为 L1 会补括号说明：
+``无（第三方预测倾向无车）``、``无（倾向无旧车）`` 都不是一台车。真实车型名不会以
+这些字起头。"""
+
+
+def has_old_car_value(value: Any) -> bool:
+    """``old_car_model`` 这类取值是否**真的说明客户名下有车**。
+
+    四道关，任一不过即不算凭据：空值 → 通用占位串（``hard.is_placeholder``）→
+    否定/未知形态（含前缀形态）→ 下单词。四条合起来才叫「有一台车」，缺一条就会把
+    一个占位串当成拥车证据，进而改写别的字段。
+    """
+    # 结构化取值（``{"key": "no"}``）与列表先按片段拆开再判：它们 ``str()`` 之后
+    # 既不等于「无」也不以否字起头，只看整串会漏。
+    if isinstance(value, Mapping):
+        parts = [_text(value.get("key")), _text(value.get("input_value"))]
+    elif isinstance(value, (list, tuple, set)):
+        parts = [_text(item) for item in value]
+    else:
+        text = _text(value)
+        if not text:
+            return False
+        parts = _value_fragments(text)
+    parts = [part for part in parts if part]
+    if not parts:
+        return False
+    return not all(_fragment_is_not_a_car(part) for part in parts)
+
+
+def _fragment_is_not_a_car(part: str) -> bool:
+    """单个片段的「不是一台车」判定。空片段也算——多值里的一项为空不影响其余项。"""
+    if not part:
+        return True
+    if hard_rules.is_placeholder(part):
+        return True
+    if part in NO_OLD_CAR_VALUES:
+        return True
+    if part.startswith(NO_OLD_CAR_PREFIXES):
+        return True
+    if any(phrase in part for phrase in DEPOSIT_PHRASES):
+        return True
+    return False
 
 DEPOSIT_PHRASES: tuple[str, ...] = (
     "小订",
@@ -217,9 +312,18 @@ def _text(value: Any) -> str:
 
 
 def _trade_in_yes(value: Any) -> bool:
-    if value == "yes":
-        return True
-    return isinstance(value, dict) and value.get("key") == "yes"
+    """置换需求是否为**肯定**形态。
+
+    ``yes（长安）`` 这类「肯定 + 品牌」是契约里 ``yes`` 项的 ``input_value`` 正常写法
+    （契约：``yes`` 带一个旧车品牌输入框），必须与裸 ``yes`` 同权。只看全等会把 39 例
+    真实置换判成「无凭据」，随后 CONSIST-01 把购车性质撤回、并把客户的置换线索抹掉。
+    判据取「整串以 yes 起头」，仍不看「no」以外的任何取值——``yes（否）`` 这类自相矛盾
+    的写法不在这里兜底。
+    """
+    if isinstance(value, dict):
+        value = value.get("key")
+    text = _text(value).lower()
+    return text == "yes" or text.startswith("yes（") or text.startswith("yes(")
 
 
 def _is_no_car_value(value: Any) -> bool:
@@ -264,39 +368,47 @@ def check_cross_field(
     """
     actions: list[Action] = []
 
-    # —— CONSIST-01：旧车 ⇔ 换购
-    old_car = _text(facts.get("old_car_model"))
-    has_old_car = bool(old_car) and old_car not in NO_OLD_CAR_VALUES
+    # —— CONSIST-01：有置换意愿 ⇔ 换购
+    #
+    # **有旧车不是置换凭据**（2026-11-04 业务定稿）。旧实现的判据是
+    # ``has_old_car or trade_in_yes``，于是「客户家里有台酷路泽」这类纯拥车叙述
+    # 会把购车性质一路改成换购——而客户从没说过要把那台车交出去。UAT 归档
+    # （``uat-traces-20261102-20261103``）里 147 例置换车型有一半是这么来的。
+    # 现在只认 ``trade_in_requirement=yes`` 与原文里的置换凭据。
+    # 「未知」「未提供」「无（倾向无旧车）」都不是一台车。判据收敛到 :func:`has_old_car_value`，
+    # CONSIST-05 也用它——同一条证据在两处得出不同结论，正是旧实现的问题。
+    has_old_car = has_old_car_value(facts.get("old_car_model"))
     has_old_car = has_old_car or bool(context.get("has_old_car_evidence"))
     # ``trade_in_requirement=yes`` **本身就是**「有旧车」的凭据，与旧车证据同权。
     # 这里**不**清除 ``trade_in_requirement``——清除它会抹掉置换的唯一凭据。
     trade_in_yes = _trade_in_yes(facts.get("trade_in_requirement"))
-    if (has_old_car or trade_in_yes) and facts.get("purchase_nature") != "replacement":
+    trade_in_signal = trade_in_yes or bool(context.get("has_trade_in_evidence"))
+    if trade_in_signal and facts.get("purchase_nature") != "replacement":
         actions.append(
             Action(
                 rule="CONSIST-01",
                 attribute="purchase_nature",
                 action="rewrite",
                 severity="repair",
-                reason="有旧车证据或置换意愿，购车性质定为换购",
+                reason="客户明确有置换意愿，购车性质定为换购",
                 value="replacement",
                 # 这是**确定性改写**：证据就在 facts 里，改完仍是事实，不降档。
                 affects_basis=False,
             )
         )
-    if not (has_old_car or trade_in_yes) and facts.get("purchase_nature") == "replacement":
+    if not trade_in_signal and facts.get("purchase_nature") == "replacement":
         actions.append(
             Action(
                 rule="CONSIST-01",
                 attribute="purchase_nature",
                 action="reject",
                 severity="repair",
-                reason="声称换购但无旧车证据支撑",
+                reason="声称换购但无置换凭据支撑",
                 payload={
                     "attribute": "purchase_nature",
                     "value": "replacement",
                     "rule": "f_trade_in",
-                    "reason": "声称换购但无旧车证据支撑",
+                    "reason": "声称换购但无置换凭据支撑",
                 },
             )
         )
@@ -307,11 +419,11 @@ def check_cross_field(
                 action="require_confirm",
                 severity="repair",
                 reason="换购与其证据不一致",
-                customer_reason="确认客户是否有旧车置换",
+                customer_reason="确认客户是否打算把现有车辆置换掉",
                 payload={
                     "attribute_key": "purchase_nature",
                     "reason": "换购与其证据不一致",
-                    "suggested_action": "确认客户是否有旧车置换",
+                    "suggested_action": "确认客户是否打算把现有车辆置换掉",
                 },
             )
         )
@@ -359,6 +471,29 @@ def check_cross_field(
                     "value": no_car,
                     "rule": "f_no_car_conflict",
                     "reason": "有旧车或置换凭据，现车信息不可能是无车",
+                },
+            )
+        )
+
+    # —— CONSIST-06：置换车型有值必须有置换需求
+    #
+    # 业务方报障的卡面矛盾有两种形态：一是「置换需求=无」而「置换车型=某旧车车型」，
+    # 二是置换需求整栏缺失、置换车型却填了一台。两者都是把「客户有旧车」当成了置换。
+    # 这一条只看 facts，不猜原文——置换需求不是 yes，置换车型就没有立身之处。
+    if "trade_in_model" in facts and not _trade_in_yes(facts.get("trade_in_requirement")):
+        actions.append(
+            Action(
+                rule="CONSIST-06",
+                attribute="trade_in_model",
+                action="reject",
+                severity="repair",
+                reason="置换需求未成立，置换车型不得填写",
+                customer_reason="客户是否打算把现有车辆置换掉，请核实",
+                payload={
+                    "attribute": "trade_in_model",
+                    "value": facts["trade_in_model"],
+                    "rule": "f_trade_in_model_without_need",
+                    "reason": "置换需求未成立，置换车型不得填写",
                 },
             )
         )

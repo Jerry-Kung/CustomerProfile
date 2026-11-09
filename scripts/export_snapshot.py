@@ -23,17 +23,22 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
 import json
+import os
+import shutil
 import sqlite3
 import subprocess
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = REPO_ROOT / "data" / "customer_profile.db"
+DEFAULT_ARCHIVE_DIR = REPO_ROOT / "data" / "trace-archives"
 
 TABLES = ("workflow_runs", "node_executions", "request_attempts", "definition_versions")
 """按依赖顺序排列：运行 → 节点/尝试 → 定义快照。"""
@@ -44,7 +49,7 @@ DEFAULT_TZ = timezone(timedelta(hours=8))
 CHUNK = 500
 """``IN (?)`` 的参数上限远高于此；分块是为了让内存占用与选中运行数无关。"""
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
 
 # ---------------------------------------------------------------- 时间
@@ -77,6 +82,41 @@ def parse_time(raw: str | None, *, end_of_day: bool = False) -> int | None:
 
 
 # ---------------------------------------------------------------- 挑选
+
+
+def select_root_runs(
+    connection: sqlite3.Connection,
+    since_ms: int | None,
+    until_ms: int | None,
+    business_refs: Sequence[str] | None,
+) -> list[dict[str, Any]]:
+    """选中根运行的 (run_id, payload_state, created_at_ms)。
+
+    包按**根运行**打，所以取数也要按根运行决定「这棵树需不需要带包」。
+    """
+    where = ["parent_run_id IS NULL"]
+    params: list[Any] = []
+    if since_ms is not None:
+        where.append("created_at_ms >= ?")
+        params.append(since_ms)
+    if until_ms is not None:
+        where.append("created_at_ms < ?")
+        params.append(until_ms)
+    if business_refs:
+        marks = ",".join("?" for _ in business_refs)
+        where.append(f"business_ref IN ({marks})")
+        params.extend(business_refs)
+    rows = connection.execute(
+        f"SELECT run_id, payload_state, created_at_ms FROM workflow_runs "
+        f"WHERE {' AND '.join(where)} ORDER BY created_at_ms",
+        params,
+    )
+    # 按位置取而不是 ``dict(row)``：调用方的连接不一定设了 ``row_factory``，
+    # 依赖它会让本函数在测试里直接抛 ValueError。
+    return [
+        {"run_id": row[0], "payload_state": row[1], "created_at_ms": row[2]}
+        for row in rows
+    ]
 
 
 def select_runs(
@@ -177,6 +217,58 @@ def copy_rows(
     return count
 
 
+def copy_archives(
+    roots: Sequence[Mapping[str, Any]],
+    source_archive_dir: Path | None,
+    target_dir: Path,
+) -> dict[str, Any]:
+    """把选中根部里已打包的包复制出来，逐个校验 sha256。
+
+    包是运行时数据的**唯一副本**（库内那部分载荷在打包成功后已清空），所以缺包不能
+    当作「这次没有数据」轻描淡写地跳过——这里逐个登记，由调用方决定是否报错。
+    """
+    copied: list[str] = []
+    missing: list[str] = []
+    total_bytes = 0
+    if source_archive_dir is not None:
+        for root in roots:
+            state = root.get("payload_state")
+            if state != "packed":
+                continue
+            run_id = root["run_id"]
+            created_at = root.get("created_at_ms")
+            day = _archive_day(created_at)
+            source = source_archive_dir / day / f"{run_id}.json.gz"
+            if not source.exists():
+                missing.append(run_id)
+                continue
+            target = target_dir / day / source.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            copied.append(run_id)
+            total_bytes += target.stat().st_size
+            _verify_gzip(target)
+    return {
+        "count": len(copied),
+        "bytes": total_bytes,
+        "missing": missing,
+    }
+
+
+def _archive_day(created_at_ms: int | None) -> str:
+    """与写包侧同一个分日口径（东八区）。"""
+    tz = DEFAULT_TZ
+    if created_at_ms is None:
+        return datetime.now(tz).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(created_at_ms / 1000, tz=tz).strftime("%Y-%m-%d")
+
+
+def _verify_gzip(path: Path) -> None:
+    """读一遍确认文件完整。复制中断会留下截断的 gzip，读的时候才炸更糟。"""
+    with gzip.open(path, "rb") as handle:
+        handle.read(1)
+
+
 def export(
     source_path: Path,
     out_dir: Path,
@@ -185,8 +277,14 @@ def export(
     until_ms: int | None,
     business_refs: Sequence[str] | None,
     dry_run: bool = False,
+    source_archive_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """执行一次快照导出，返回 manifest。"""
+    """执行一次快照导出，返回 manifest。
+
+    **库只是骨架，包才是运行时数据。** 打包之后库里的载荷列是空的，只拷库会得到一份
+    处处空白的快照——而且看起来一切正常。因此凡是 ``payload_state='packed'`` 的根运行，
+    它的包必须一起带出来，缺一个都要报出来。
+    """
     if not source_path.exists():
         raise SystemExit(f"trace db not found: {source_path}")
 
@@ -201,8 +299,17 @@ def export(
     try:
         source.execute("BEGIN")  # 一个读事务 = 一个一致快照
         run_ids = select_runs(source, since_ms, until_ms, business_refs)
+        roots = select_root_runs(source, since_ms, until_ms, business_refs)
         if dry_run:
-            return {"dry_run": True, "selected_runs": len(run_ids)}
+            packed = [r for r in roots if r.get("payload_state") == "packed"]
+            purged = [r for r in roots if r.get("payload_state") == "purged"]
+            return {
+                "dry_run": True,
+                "selected_runs": len(run_ids),
+                "selected_roots": len(roots),
+                "need_archive": len(packed),
+                "purged": len(purged),
+            }
 
         target = sqlite3.connect(target_path)
         try:
@@ -260,6 +367,9 @@ def export(
     finally:
         source.close()
 
+    archive_target = out_dir / f"{name}.archives"
+    archives = copy_archives(roots, source_archive_dir, archive_target)
+
     manifest = {
         "format": FORMAT_VERSION,
         "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
@@ -276,6 +386,8 @@ def export(
             "business_refs": list(business_refs) if business_refs else None,
         },
         "counts": counts,
+        "archive_dir": (name + ".archives") if archives["count"] else None,
+        "archives": archives,
         "duration_ms": int((time.time() - started) * 1000),
     }
     manifest_path = out_dir / f"{name}.manifest.json"
@@ -312,6 +424,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="业务标识（手机号）清单，逗号分隔；不给表示不按号码筛选",
     )
     parser.add_argument(
+        "--archive-dir",
+        default=os.environ.get("TRACE_ARCHIVE_DIR") or str(DEFAULT_ARCHIVE_DIR),
+        help="运行时数据包目录；缺省取 TRACE_ARCHIVE_DIR，再缺省 <仓库>/data/trace-archives",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="只报告会选中多少运行，不落盘"
     )
     args = parser.parse_args(argv)
@@ -332,9 +449,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         source = sqlite3.connect(f"file:{Path(args.db)}?mode=ro", uri=True)
         try:
             run_ids = select_runs(source, since_ms, until_ms, phones)
+            roots = select_root_runs(source, since_ms, until_ms, phones)
         finally:
             source.close()
+        packed = sum(1 for r in roots if r.get("payload_state") == "packed")
+        purged = sum(1 for r in roots if r.get("payload_state") == "purged")
         print(f"selected runs (roots + descendants): {len(run_ids)}")
+        print(f"selected roots: {len(roots)}; need archive: {packed}; purged: {purged}")
         return 0
 
     manifest = export(
@@ -344,17 +465,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         since_ms,
         until_ms,
         phones,
+        source_archive_dir=Path(args.archive_dir) if args.archive_dir else None,
     )
     counts = manifest["counts"]
+    archives = manifest["archives"]
     print(
         f"exported {manifest['database']}: runs={counts['workflow_runs']} "
         f"nodes={counts['node_executions']} attempts={counts['request_attempts']} "
         f"definitions={counts['definition_versions']} "
-        f"size={manifest['bytes'] / 1024 / 1024:.1f}MB"
+        f"size={manifest['bytes'] / 1024 / 1024:.1f}MB "
+        f"archives={archives['count']} ({archives['bytes'] / 1024 / 1024:.1f}MB)"
     )
     if counts["workflow_runs"] == 0:
         print("WARNING: nothing selected; check the time window and phone filters", file=sys.stderr)
         return 2
+    if archives["missing"]:
+        print(
+            f"ERROR: {len(archives['missing'])} 个已打包运行的包文件找不到，"
+            "这些运行的运行时数据无法带出：",
+            file=sys.stderr,
+        )
+        for run_id in archives["missing"]:
+            print(f"  - {run_id}", file=sys.stderr)
+        return 3
     return 0
 
 

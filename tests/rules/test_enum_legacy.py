@@ -100,12 +100,15 @@ def test_normalize_enum_still_rejects_unmapped_value():
 def test_projection_routes_purchase_type_value_to_purchase_nature():
     """``purchase_type=replacement`` 不再以非法值留在 purchase_type，而是搬去购车性质。
 
-    带上「有旧车证据」的旁证：``CONSIST-01`` 会对「声称换购却无旧车支撑」的购车性质
+    带上「有置换凭据」的旁证：``CONSIST-01`` 会对「声称换购却无置换凭据」的购车性质
     整条剔除，那是跨字段一致性的独立职责，与本用例要验的「换字段」无关。
+
+    2026-11-04 口径调整后旁证要用 ``has_trade_in_evidence``：``has_old_car_evidence``
+    只说明客户名下有车，已经不构成换购凭据（见 ``CONSIST-01``）。
     """
     result = proj.project(
         [proj.Claim(attribute="purchase_type", value="replacement", channel="试驾录音信息")],
-        context={"has_old_car_evidence": True},
+        context={"has_trade_in_evidence": True},
     )
     assert result.facts.get("purchase_nature") == "replacement"
     assert not result.facts.get("purchase_type")

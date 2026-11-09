@@ -1,0 +1,239 @@
+#!/usr/bin/env python
+"""按 run_id 或号码 + 时间窗取回留痕包，供排障用。
+
+## 它解决什么问题
+
+一台运行台看到某次运行有问题，想把它拿到本地细看。整库快照（``export_snapshot.py``）
+动辄上百 MB、还依赖内网主机；而这一案的全部运行时数据其实就在**一个包**里。
+
+## 两条口径
+
+1. **包是唯一副本。** 打包成功后库里的载荷列已被清空，取不到包就说明数据已经没了。
+   因此找不到包时**非零退出**并说明原因（超过保留期 / 从未生成 / 目录指错），
+   而不是安静地打印一行「未找到」。
+2. **默认只复制，不改变源目录。** 想直接看内容再加 ``--unpack``；源目录是证据，
+   不在这里就地改动。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Sequence
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from customer_profile.persistence import archive  # noqa: E402
+
+
+def _connect(db_path: Path):
+    import sqlite3
+
+    return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
+
+
+def _roots_by_id(db_path: Path, run_id: str) -> list[dict]:
+    """给定 run_id，返回所属**根运行**的 (run_id, payload_state, created_at_ms)。"""
+    connection = _connect(db_path)
+    try:
+        row = connection.execute(
+            "WITH RECURSIVE up(run_id, parent_run_id) AS ("
+            " SELECT run_id, parent_run_id FROM workflow_runs WHERE run_id = ?"
+            " UNION SELECT p.run_id, p.parent_run_id FROM workflow_runs p"
+            " JOIN up ON p.run_id = up.parent_run_id) "
+            "SELECT run_id FROM up WHERE parent_run_id IS NULL LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return []
+        return _roots_by_ids(connection, [row[0]])
+    finally:
+        connection.close()
+
+
+def _roots_by_phone(
+    db_path: Path, phone: str, since_ms: int | None, until_ms: int | None
+) -> list[dict]:
+    connection = _connect(db_path)
+    try:
+        clauses = ["parent_run_id IS NULL", "business_ref LIKE ?"]
+        params: list = [f"%{phone}%"]
+        if since_ms is not None:
+            clauses.append("created_at_ms >= ?")
+            params.append(since_ms)
+        if until_ms is not None:
+            clauses.append("created_at_ms < ?")
+            params.append(until_ms)
+        rows = connection.execute(
+            "SELECT run_id FROM workflow_runs WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY created_at_ms",
+            params,
+        ).fetchall()
+        return _roots_by_ids(connection, [row[0] for row in rows])
+    finally:
+        connection.close()
+
+
+def _roots_by_ids(connection, run_ids: Sequence[str]) -> list[dict]:
+    result = []
+    for run_id in run_ids:
+        row = connection.execute(
+            "SELECT payload_state, created_at_ms FROM workflow_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            continue
+        result.append(
+            {"run_id": run_id, "payload_state": row[0], "created_at_ms": row[1]}
+        )
+    return result
+
+
+def _explain_missing(root: dict, archive_dir: Path) -> str:
+    """包找不到时说明是哪一种找不到——这三种原因的处置完全不同。"""
+    state = root.get("payload_state")
+    day = archive._archive_day(root.get("created_at_ms"))
+    target = archive_dir / day / f"{root['run_id']}.json.gz"
+    if state == "purged":
+        return f"{root['run_id']}：存量清理过的运行，本来就没有包"
+    if state != "packed":
+        return (
+            f"{root['run_id']}：该运行从未打包（payload_state={state!r}），"
+            "可能仍在库里或从未收尾"
+        )
+    return (
+        f"{root['run_id']}：已打包但文件不存在，预期路径 {target}；"
+        "多为超过保留期被删，或 --archive-dir 指向了别处"
+    )
+
+
+def fetch(
+    db_path: Path,
+    archive_dir: Path,
+    *,
+    run_id: str | None = None,
+    phone: str | None = None,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+    out_dir: Path | None = None,
+    unpack: bool = False,
+) -> dict:
+    if run_id is not None:
+        roots = _roots_by_id(db_path, run_id)
+    elif phone is not None:
+        roots = _roots_by_phone(db_path, phone, since_ms, until_ms)
+    else:
+        raise ValueError("需要 --run-id 或 --phone")
+
+    fetched: list[dict] = []
+    missing: list[str] = []
+    for root in roots:
+        day = archive._archive_day(root.get("created_at_ms"))
+        source = archive_dir / day / f"{root['run_id']}.json.gz"
+        if not source.exists():
+            missing.append(_explain_missing(root, archive_dir))
+            continue
+        entry = {"run_id": root["run_id"], "source": str(source)}
+        if out_dir is not None:
+            target_dir = Path(out_dir) / root["run_id"]
+            target_dir.mkdir(parents=True, exist_ok=True)
+            if unpack:
+                package = archive.read_package(source)
+                target = target_dir / "package.json"
+                target.write_text(
+                    json.dumps(package, ensure_ascii=False, indent=1),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                entry["unpacked"] = str(target)
+                entry["manifest"] = package.get("manifest")
+            else:
+                target = target_dir / source.name
+                shutil.copy2(source, target)
+                entry["copied"] = str(target)
+        else:
+            entry["manifest"] = archive.read_package(source).get("manifest")
+        fetched.append(entry)
+    return {"fetched": fetched, "missing": missing, "roots": len(roots)}
+
+
+def _parse_time(raw: str | None) -> int | None:
+    if not raw:
+        return None
+    day = datetime.fromisoformat(raw)
+    return int(day.timestamp() * 1000)
+
+
+def _print_manifest(manifest: dict) -> None:
+    times = manifest.get("timestamps") or {}
+    print(
+        f"    mode={manifest.get('persist_mode')} "
+        f"root={manifest.get('root_run_id')} "
+        f"counts={manifest.get('counts')}"
+    )
+    print(
+        f"    created={times.get('created_at')} finished={times.get('finished_at')} "
+        f"url_may_expire={((manifest.get('media') or {}).get('url_may_expire'))} "
+        f"unresolved_media={manifest.get('unresolved_media')}"
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="按 run_id 或号码取回留痕包")
+    parser.add_argument("--db", default=str(REPO_ROOT / "data" / "customer_profile.db"))
+    parser.add_argument("--archive-dir", default=None, help="包目录；缺省 <db 同级>/trace-archives")
+    parser.add_argument("--run-id", default=None)
+    parser.add_argument("--phone", default=None, help="号码；按 business_ref 模糊匹配")
+    parser.add_argument("--since", default=None, help="YYYY-MM-DD")
+    parser.add_argument("--until", default=None, help="YYYY-MM-DD")
+    parser.add_argument("--out-dir", default=None, help="取回的目标目录")
+    parser.add_argument("--unpack", action="store_true", help="解包成 json 而不是复制")
+    args = parser.parse_args(argv)
+
+    db_path = Path(args.db)
+    archive_dir = (
+        Path(args.archive_dir)
+        if args.archive_dir
+        else Path(args.db).parent / "trace-archives"
+    )
+    if not db_path.exists():
+        print(f"ERROR: 库不存在 {db_path}", file=sys.stderr)
+        return 2
+    if args.run_id is None and args.phone is None:
+        print("ERROR: 需要 --run-id 或 --phone", file=sys.stderr)
+        return 2
+
+    result = fetch(
+        db_path,
+        archive_dir,
+        run_id=args.run_id,
+        phone=args.phone,
+        since_ms=_parse_time(args.since),
+        until_ms=_parse_time(args.until),
+        out_dir=Path(args.out_dir) if args.out_dir else None,
+        unpack=args.unpack,
+    )
+    for entry in result["fetched"]:
+        print(f"OK {entry['run_id']}")
+        if entry.get("manifest"):
+            _print_manifest(entry["manifest"])
+        if entry.get("copied"):
+            print(f"    -> {entry['copied']}")
+        if entry.get("unpacked"):
+            print(f"    -> {entry['unpacked']}")
+    for line in result["missing"]:
+        print(f"MISS {line}", file=sys.stderr)
+    if not result["roots"]:
+        print("ERROR: 没有匹配的运行", file=sys.stderr)
+        return 2
+    return 3 if result["missing"] else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

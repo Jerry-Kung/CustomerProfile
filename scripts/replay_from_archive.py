@@ -66,7 +66,7 @@ from customer_profile.replay import ReplaySource, http_key  # noqa: E402
 from customer_profile.runner import build_service  # noqa: E402
 
 BATCH_ROOT = REPO_ROOT / "experiments" / "uat_data"
-DEFAULT_SOURCE = "uat-all-tasks-20261026-20261027"
+DEFAULT_SOURCE = "uat-traces-20261102-20261103"
 
 SKIP_TARGETS = ("/callback/update-profile", "/submit_analyze", "/query_analyze")
 """这些请求不进 HTTP fixture。
@@ -375,11 +375,16 @@ async def run(args: argparse.Namespace) -> int:
     dump_json(batch_dir / "fixture.json", fixture)
 
     # ---- 转写缓存：录音识别不走回放帧（路径无号码，会跨案串号）。
+    # ``settings`` 必须在播种前构造：``build_submit_body`` 要读 ``Settings`` 的 AUC 参数，
+    # 而这些参数进缓存键。位置放后会让键按另一套默认值算，命中率静默归零。
+    policy = ExportPolicy()
+    settings = build_settings(batch_dir / "trace.db", read_timeout=args.read_timeout)
+
     cache = TranscriptCache(batch_dir / "transcript_cache", read=True, write=True)
     seeded = 0
     for phone in phones:
         for entry in build_transcript_entries(cases[phone]):
-            params = build_submit_body(entry["file_url"])["request"]
+            params = build_submit_body(entry["file_url"], settings)["request"]
             cache.store(
                 cache.make_entry(
                     entry["file_url"],
@@ -415,8 +420,6 @@ async def run(args: argparse.Namespace) -> int:
     for phone, urls in unresolved.items():
         _log(log_path, f"WARNING unresolved binary response for {phone}: {len(urls)} url(s)")
 
-    policy = ExportPolicy()
-    settings = build_settings(batch_dir / "trace.db", read_timeout=args.read_timeout)
     replay = ReplaySource(http=frames, llm=None, strict=True, name=f"archive:{source.name}")
 
     manifest = {

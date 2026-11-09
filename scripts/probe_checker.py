@@ -30,7 +30,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from customer_profile import readable as rdb  # noqa: E402
 from customer_profile.rules import checker  # noqa: E402
 
-DEFAULT_BATCH = REPO_ROOT / "experiments/uat_data/uat-18-20261026"
+DEFAULT_BATCH = REPO_ROOT / "experiments/uat_data/uat-traces-20261102-20261103"
 TEMPLATE = "customer_profile_pipeline__pipeline_rule_check"
 
 
