@@ -96,6 +96,8 @@ def release(args: argparse.Namespace) -> int:
         raise ValueError("Invitation release requires --profile invitation-runner.")
     if args.migrate and args.group not in {"all", "backend"}:
         raise ValueError("--migrate is available for the all/backend release groups.")
+    if args.prepare and args.migrate:
+        raise ValueError("--prepare does not run migrations; add --migrate to the final release instead.")
 
     runtime = []
     if args.group == "all":
@@ -167,6 +169,10 @@ def release(args: argparse.Namespace) -> int:
                 "-c", validation_header + validation,
             ], env)
 
+        if args.prepare:
+            print(f"Prepared {image}. Running services were not stopped or recreated.", flush=True)
+            return 0
+
         previous_output = run(compose + ["ps", "--all", "--format", "json"], env, capture=True)
         previous = []
         if previous_output:
@@ -235,14 +241,16 @@ def release(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env-file", help="Execution-service environment file")
-    parser.add_argument("--task-env-file", help="Task-backend environment file")
+    parser.add_argument("--env-file", help="Unified environment file (default: repository .env)")
+    parser.add_argument("--task-env-file", help="Optional separate task-backend environment file")
     parser.add_argument("--image", help="Versioned image tag or existing image digest")
     parser.add_argument("--group", choices=["all", "backend", "profile", "invitation"], default="all")
     parser.add_argument("--profile", action="append", default=[])
     parser.add_argument("--skip-build", action="store_true", help="Deploy an existing local image")
     parser.add_argument("--migrate", action="store_true", help="Run MySQL migrations explicitly")
-    parser.add_argument("--check", action="store_true", help="Validate configuration and show the release scope")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="Validate Compose and show the release scope")
+    mode.add_argument("--prepare", action="store_true", help="Build and validate process settings before the cutover")
     parser.add_argument("--wait-timeout", type=int, default=120)
     args = parser.parse_args()
     if args.wait_timeout < 1:

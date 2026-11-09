@@ -2,7 +2,7 @@
 
 潜在目标客户人设画像分析工作流。给定一个手机号，产出一份该客户的画像 JSON，并按回写契约写到 Notes 服务。
 
-仓库同时维护 MySQL 任务后端与画像、邀约执行器。两个模块使用独立 Python 环境、进程和配置，共用一个镜像及发布入口。
+仓库同时维护 MySQL 任务后端与画像、邀约执行器。两个模块使用独立 Python 环境和进程，共用根目录 `.env`、一个镜像及发布入口。
 
 用于汽车营销场景：帮助销售人员快速掌握客户基础信息，便于针对性制定销售策略。
 
@@ -28,7 +28,6 @@
 
 ```
 cp .env.example .env          # 然后填入真实端点与凭据
-cp services/task-backend/.env.example services/task-backend/.env
 # 填写后端 MySQL、目标和业务回调配置后，首次安装显式执行迁移
 ./scripts/release.py --profile invitation-runner --migrate
 ```

@@ -36,7 +36,7 @@ x-task: &task
   init: true
   working_dir: /app/services/task-backend
   env_file:
-    - ${TASK_ENV_FILE:-./services/task-backend/.env}
+    - ${TASK_ENV_FILE:-${CP_ENV_FILE:-.env}}
   environment: *task-environment
   volumes:
     - task-logs:/app/logs

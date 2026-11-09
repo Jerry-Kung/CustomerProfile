@@ -490,6 +490,7 @@ class Settings(BaseSettings):
         "llm_max_tokens",
         "api_port",
         "inbound_port",
+        "trace_archive_dir",
         mode="before",
     )
     @classmethod

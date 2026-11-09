@@ -69,7 +69,7 @@ elif args[0] == "compose":
     env.pop("CP_IMAGE", None)
     env.pop("COMPOSE_PROFILES", None)
 
-    def invoke(*arguments, failure=False, preflight_failure=False, build=False, legacy_worker=False):
+    def invoke(*arguments, failure=False, preflight_failure=False, build=False, legacy_worker=False, single_env=False):
         selected_env = dict(env)
         if failure:
             selected_env["FAIL_EXECUTION"] = "1"
@@ -79,7 +79,8 @@ elif args[0] == "compose":
             selected_env["LEGACY_WORKER"] = "1"
         result = subprocess.run([
             sys.executable, str(scripts / "release.py"),
-            "--env-file", str(runtime_env), "--task-env-file", str(task_env),
+            "--env-file", str(runtime_env),
+            *([] if single_env else ["--task-env-file", str(task_env)]),
             "--image", IMAGE, *([] if build else ["--skip-build"]), *arguments,
         ], cwd=tmp_path, env=selected_env, capture_output=True, text=True)
         rows = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
@@ -156,6 +157,35 @@ def test_check_only_validates_configuration(release_project):
     assert result.returncode == 0, result.stderr
     assert operations(rows) == []
     assert not (project / ".releases").exists()
+
+
+def test_prepare_builds_and_validates_without_stopping_services(release_project):
+    project, _, _, invoke = release_project
+    result, rows = invoke("--prepare", "--profile", "invitation-runner", build=True)
+    assert result.returncode == 0, result.stderr
+    assert len([row for row in rows if row["args"][0] == "build"]) == 1
+    validations = [row for row in rows if "--entrypoint" in row["args"]]
+    assert len(validations) == 9
+    assert operations(rows) == []
+    assert not (project / ".releases").exists()
+
+
+def test_prepare_rejects_migration_before_building(release_project):
+    _, _, _, invoke = release_project
+    result, rows = invoke("--prepare", "--migrate", build=True)
+    assert result.returncode != 0
+    assert "--prepare does not run migrations" in result.stderr
+    assert not any(row["args"][0] == "build" for row in rows)
+    assert operations(rows) == []
+
+
+def test_release_uses_one_env_file_by_default(release_project):
+    _, runtime_env, _, invoke = release_project
+    result, rows = invoke("--check", single_env=True)
+    assert result.returncode == 0, result.stderr
+    compose_calls = [row for row in rows if row["args"][0] == "compose"]
+    assert compose_calls
+    assert all(row["runtime_env"] == row["task_env"] == str(runtime_env) for row in compose_calls)
 
 
 def test_invalid_component_configuration_is_rejected_before_pause(release_project):
