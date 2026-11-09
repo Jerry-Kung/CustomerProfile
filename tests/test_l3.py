@@ -375,7 +375,9 @@ def test_l3_graph_shape():
     """
     llm = [n for n in l3.WORKFLOW.nodes if n.node_type == "llm"]
     assert [n.node_id for n in llm] == [l3.EXPRESS]
-    assert len(l3.WORKFLOW.nodes) == len(l3.PRESET_ASSETS) + 6
+    # 2026-11-09 起多一个代码节点「增量表达跳过判定」（``SKIP``）：事实未变时零 LLM
+    # 复用上一版板块，因此 start + end + 4 个代码节点。
+    assert len(l3.WORKFLOW.nodes) == len(l3.PRESET_ASSETS) + 7
     assert len(l3.BOUND_ASSETS) == 2
     kinds = {n.node_type for n in l3.WORKFLOW.nodes}
     assert kinds == {"start", "end", "code", "llm", "template-transform"}

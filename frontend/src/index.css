@@ -189,6 +189,29 @@ button {
   text-align: center;
 }
 
+/* 留痕载荷不完整时的提示。与错误提示分开：裁剪与过期是「证据不全」，不是「跑失败了」。
+   用 warn 而非 danger，避免把一切「看不到」都读成故障。 */
+.overview-payload-note,
+.inline-note {
+  border: 1px solid var(--tone-warn-line);
+  border-radius: var(--radius-sm);
+  background: var(--tone-warn-bg);
+  color: var(--tone-warn);
+  font-size: 12.5px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.overview-payload-note {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+}
+
+.inline-note {
+  margin: 0 0 8px;
+  padding: 7px 10px;
+}
+
 /* ---------------------------------------------------------------- 通用元件 */
 
 .status-tag {

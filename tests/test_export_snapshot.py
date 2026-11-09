@@ -53,6 +53,14 @@ def _make_db(path: Path) -> None:
             "VALUES (?,?,?,?)",
             ("demo", f"hash-{version}", "{}", now),
         )
+    for phone, level in (("13800000000", "B"), ("13900000001", "A")):
+        connection.execute(
+            "INSERT INTO profile_baselines "
+            "(phone, compat_key, updated_at_ms, deal_level, consumed_keys_json, callback_json) "
+            "VALUES (?,?,?,?,?,?)",
+            (phone, "ck-1", now, level, '["k1"]',
+             '{"phone":"%s","batch_id":"old","analysis_result":{"profile_summary":{}}}' % phone),
+        )
     connection.commit()
     connection.close()
 
@@ -126,6 +134,73 @@ def test_target_has_expected_indexes(tmp_path):
         connection.close()
     assert "idx_runs_business" in names
     assert "idx_attempts_run" in names
+
+
+def test_baselines_travel_with_the_snapshot(tmp_path):
+    """基线表按号码连带：本地起服务才能读到上一版、跑出 T0。
+
+    这张表不挂在任何 run 上——漏搬不会报错，只会让本地每一轮都退化成全量。
+    """
+    manifest, target = _export(tmp_path)
+    assert manifest["counts"]["profile_baselines"] == 2
+    connection = sqlite3.connect(target)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM profile_baselines").fetchone()[0] == 2
+    finally:
+        connection.close()
+
+
+def test_baseline_filter_follows_phone_list(tmp_path):
+    manifest, target = _export(tmp_path, since_ms=None, until_ms=None, business_refs=["13800000000"])
+    assert manifest["counts"]["profile_baselines"] == 1
+    connection = sqlite3.connect(target)
+    try:
+        phones = {row[0] for row in connection.execute("SELECT phone FROM profile_baselines")}
+    finally:
+        connection.close()
+    assert phones == {"13800000000"}
+
+
+def test_snapshot_baseline_is_readable_by_the_repository(tmp_path):
+    """搬过去之后要能被真实仓储读出来：列对不上时不报错，只是永远读不到基线。"""
+    import asyncio
+
+    from customer_profile.persistence.profile_baselines import BaselineRepository
+    from customer_profile.persistence.store import Store
+
+    _, target = _export(tmp_path)
+    store = Store(target)
+    store.connect()
+
+    async def _load():
+        try:
+            return await BaselineRepository(store).load("13800000000")
+        finally:
+            store.close()
+
+    baseline = asyncio.run(_load())
+    assert baseline is not None
+    assert baseline.deal_level == "B"
+    assert baseline.consumed_keys == ("k1",)
+
+
+def test_source_without_baseline_table_still_exports(tmp_path):
+    """旧库没有这张表：返回 0 而不是报错，那是「没发生过增量」。"""
+    source = tmp_path / "old.db"
+    connection = sqlite3.connect(source)
+    for statement in SCHEMA_STATEMENTS:
+        connection.execute(statement)
+    connection.execute("DROP TABLE profile_baselines")
+    connection.execute(
+        "INSERT INTO workflow_runs (run_id, workflow_id, status, created_at_ms) "
+        "VALUES ('r1','demo','succeeded',1)"
+    )
+    connection.commit()
+    connection.close()
+
+    manifest = es.export(source, tmp_path / "out2", "old", None, None, None)
+    assert manifest["counts"]["profile_baselines"] == 0
+    assert manifest["format"] >= 3
 
 
 def test_parse_time_end_of_day_is_exclusive_next_midnight():

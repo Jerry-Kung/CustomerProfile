@@ -24,7 +24,13 @@ import { api, type RuntimeInfo } from '../api/client'
 /** 与后端 `api.py` 的 PHONE_PATTERN、脚本里的脱敏正则同一形状。 */
 const PHONE_PATTERN = /^1[3-9]\d{9}$/
 
-const ENTRY_WORKFLOW_ID = 'customer_profile_pipeline'
+/**
+ * 缺省入口。**实际以 `GET /runtime` 的 `entry_workflow_id` 为准**：
+ * 后端按 `INCREMENTAL_ENABLED` 切换入口，前端再写一份常量就是第二份事实来源，
+ * 只改一侧会让手机号校验或批次号补全静默失效（2026-10-16 踩过）。
+ * 这里保留缺省值只为「运行态还没取回来」的短暂窗口。
+ */
+const DEFAULT_ENTRY_WORKFLOW_ID = 'customer_profile_pipeline'
 
 export interface SubmitRunProps {
   runtime: RuntimeInfo | null
@@ -39,6 +45,8 @@ export function SubmitRun({ runtime, onSubmitted }: SubmitRunProps) {
 
   const trimmed = phone.trim()
   const looksValid = PHONE_PATTERN.test(trimmed)
+  // 入口以后端为准；运行态未取回时用缺省值。
+  const entryWorkflowId = runtime?.entry_workflow_id || DEFAULT_ENTRY_WORKFLOW_ID
 
   async function submit() {
     if (!looksValid || submitting) return
@@ -46,7 +54,7 @@ export function SubmitRun({ runtime, onSubmitted }: SubmitRunProps) {
     setError('')
     try {
       const result = await api.submitRun({
-        workflow_id: ENTRY_WORKFLOW_ID,
+        workflow_id: entryWorkflowId,
         inputs: { phone_number: trimmed, batch_id: batchId.trim() },
         // 业务标识取手机号：列表页按它检索，子运行也会自动带上同一个号码。
         business_ref: trimmed,
@@ -72,9 +80,15 @@ export function SubmitRun({ runtime, onSubmitted }: SubmitRunProps) {
       >
         <h2>提交任务</h2>
         <p className="submit-hint">
-          运行 <code>{ENTRY_WORKFLOW_ID}</code>（业务测试臂）。提交后跳到运行详情，
+          运行 <code>{entryWorkflowId}</code>（业务测试臂）。提交后跳到运行详情，
           在那里可以看到完整的运行过程与每一次模型调用。
         </p>
+        {runtime?.incremental_enabled ? (
+          <p className="submit-hint">
+            增量入口已启用：同一号码第二次及以后，没有新数据时原样回传上一版，
+            有新数据时按档位重建。
+          </p>
+        ) : null}
 
         <label htmlFor="submit-phone">手机号</label>
         <input

@@ -43,13 +43,22 @@ DEFAULT_ARCHIVE_DIR = REPO_ROOT / "data" / "trace-archives"
 TABLES = ("workflow_runs", "node_executions", "request_attempts", "definition_versions")
 """按依赖顺序排列：运行 → 节点/尝试 → 定义快照。"""
 
+BASELINE_TABLE = "profile_baselines"
+"""增量基线表：按手机号一行，**不挂在任何 run 上**。
+
+必须随快照一起带走。少了它，本地起服务跑增量入口时读不到基线，每一轮都会退化成
+T3（全量重建）——产物照样出得来，于是会被误判成「增量没生效」而不是「快照不全」
+（``03`` P3 的排期约束正是为此）。
+"""
+
 DEFAULT_TZ = timezone(timedelta(hours=8))
 """不带时区的时间按业务时区（东八区）解释。内网 UAT 上打的时间通常就是本地时间。"""
 
 CHUNK = 500
 """``IN (?)`` 的参数上限远高于此；分块是为了让内存占用与选中运行数无关。"""
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
+"""3：连带 ``profile_baselines``。2 及更早的快照跑不出增量，只能复现 T3。"""
 
 
 # ---------------------------------------------------------------- 时间
@@ -269,6 +278,32 @@ def _verify_gzip(path: Path) -> None:
         handle.read(1)
 
 
+def _has_table(connection: sqlite3.Connection, table: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    return row is not None
+
+
+def copy_baselines(
+    source: sqlite3.Connection,
+    target: sqlite3.Connection,
+    phones: Sequence[str] | None,
+) -> int:
+    """连带增量基线表，返回行数。
+
+    按手机号筛选（给了 ``--phone`` 就只带这些号码），**不按时间窗**：基线是「当前状态」，
+    没有历史版本，一个号码一行的旧数据仍是本地跑 T0 的前提。源库没有这张表（旧库）时
+    返回 0，不报错——那是「这份快照里没发生过增量」，不是数据损坏。
+    """
+    if not _has_table(source, BASELINE_TABLE):
+        return 0
+    if phones:
+        marks = ",".join("?" for _ in phones)
+        return copy_rows(source, target, BASELINE_TABLE, f"phone IN ({marks})", list(phones))
+    return copy_rows(source, target, BASELINE_TABLE)
+
+
 def export(
     source_path: Path,
     out_dir: Path,
@@ -303,12 +338,26 @@ def export(
         if dry_run:
             packed = [r for r in roots if r.get("payload_state") == "packed"]
             purged = [r for r in roots if r.get("payload_state") == "purged"]
+            baselines = 0
+            if _has_table(source, BASELINE_TABLE):
+                if business_refs:
+                    marks = ",".join("?" for _ in business_refs)
+                    baselines = source.execute(
+                        f"SELECT COUNT(*) FROM {BASELINE_TABLE} "
+                        f"WHERE phone IN ({marks})",
+                        list(business_refs),
+                    ).fetchone()[0]
+                else:
+                    baselines = source.execute(
+                        f"SELECT COUNT(*) FROM {BASELINE_TABLE}"
+                    ).fetchone()[0]
             return {
                 "dry_run": True,
                 "selected_runs": len(run_ids),
                 "selected_roots": len(roots),
                 "need_archive": len(packed),
                 "purged": len(purged),
+                "baselines": baselines,
             }
 
         target = sqlite3.connect(target_path)
@@ -359,6 +408,8 @@ def export(
                 )
             else:
                 counts = {table: 0 for table in TABLES}
+            # 基线不挂在 run 上：即便本次一个运行都没选中，也要带（见 BASELINE_TABLE）。
+            counts[BASELINE_TABLE] = copy_baselines(source, target, business_refs)
             target.commit()
             target.execute("VACUUM")
         finally:
@@ -450,12 +501,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             run_ids = select_runs(source, since_ms, until_ms, phones)
             roots = select_root_runs(source, since_ms, until_ms, phones)
+            # 基线计数必须在关连接之前读：连接一关，dry-run 直接抛 ProgrammingError。
+            if _has_table(source, BASELINE_TABLE):
+                if phones:
+                    marks = ",".join("?" for _ in phones)
+                    baselines = source.execute(
+                        f"SELECT COUNT(*) FROM {BASELINE_TABLE} WHERE phone IN ({marks})",
+                        list(phones),
+                    ).fetchone()[0]
+                else:
+                    baselines = source.execute(
+                        f"SELECT COUNT(*) FROM {BASELINE_TABLE}"
+                    ).fetchone()[0]
+            else:
+                baselines = 0
         finally:
             source.close()
         packed = sum(1 for r in roots if r.get("payload_state") == "packed")
         purged = sum(1 for r in roots if r.get("payload_state") == "purged")
         print(f"selected runs (roots + descendants): {len(run_ids)}")
         print(f"selected roots: {len(roots)}; need archive: {packed}; purged: {purged}")
+        print(f"baselines to carry: {baselines}")
         return 0
 
     manifest = export(
@@ -473,6 +539,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"exported {manifest['database']}: runs={counts['workflow_runs']} "
         f"nodes={counts['node_executions']} attempts={counts['request_attempts']} "
         f"definitions={counts['definition_versions']} "
+        f"baselines={counts.get(BASELINE_TABLE, 0)} "
         f"size={manifest['bytes'] / 1024 / 1024:.1f}MB "
         f"archives={archives['count']} ({archives['bytes'] / 1024 / 1024:.1f}MB)"
     )

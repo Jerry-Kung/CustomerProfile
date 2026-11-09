@@ -298,6 +298,20 @@ export function NodeDetail({
               <div className="raw-block-head">
                 <span className="raw-block-title">输出</span>
               </div>
+              {execution.payload_truncated ? (
+                <div className="inline-note tone-warn">
+                  本节点输出以 low 档留痕，只保留诊断字段
+                  {typeof execution.outputs_truncated_from === 'number'
+                    ? `（原有 ${execution.outputs_truncated_from} 个键）`
+                    : ''}
+                  。这里看不到的字段是「被裁掉」，不代表节点没有产出。
+                </div>
+              ) : null}
+              {execution.payload_missing ? (
+                <div className="inline-note tone-warn">
+                  留痕包里没有这个节点，载荷已丢失。为空不代表没有产出。
+                </div>
+              ) : null}
               {execution.outputs_json !== null ? (
                 <pre className="raw-pre">{asText(execution.outputs_json)}</pre>
               ) : (

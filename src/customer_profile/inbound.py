@@ -41,7 +41,7 @@ from fastapi import FastAPI, Header, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from .api import ENTRY_WORKFLOW_ID, PHONE_PATTERN
+from .api import ENTRY_WORKFLOW_ID, PHONE_PATTERN, entry_workflow_id
 from .logging_config import configure_logging
 from .runner import QueueFull, RunSlotUnavailable, Service, build_service
 from .settings import Settings, get_settings
@@ -160,7 +160,7 @@ def create_inbound_app(
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, Any]:
         """存活探针。**不报告接口是否已启用**——那是未鉴权调用方不该知道的信息。"""
-        return {"status": "ok", "interface": "inbound", "workflow_id": ENTRY_WORKFLOW_ID}
+        return {"status": "ok", "interface": "inbound", "workflow_id": entry_workflow_id(get_service().settings)}
 
     @app.post(TASK_PATH, response_model=TaskAccepted, tags=["tasks"])
     async def accept_task(
@@ -200,9 +200,10 @@ def create_inbound_app(
                 detail="batch_id 必填且不能为空白：回传体要把原值带回，前端据此判断任务来源",
             )
 
+        entry_id = entry_workflow_id(service.settings)
         try:
             run_id = await service.submit(
-                ENTRY_WORKFLOW_ID,
+                entry_id,
                 {"phone_number": phone, "batch_id": batch_id},
                 # 业务标识取手机号，与运行台提交页同口径：列表可按它检索，子运行也带上同一个值。
                 business_ref=phone,
@@ -221,7 +222,7 @@ def create_inbound_app(
 
         return TaskAccepted(
             run_id=run_id,
-            workflow_id=ENTRY_WORKFLOW_ID,
+            workflow_id=entry_id,
             phone_number=phone,
             batch_id=batch_id,
         )

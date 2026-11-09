@@ -153,6 +153,9 @@ async def test_low_marks_truncated_rows(tmp_path, store):
     facts = next(n for n in nodes if n["node_id"] == "pipeline_l1_facts")
     assert facts["payload_truncated"] == "low"
     assert set(facts["outputs_json"]) == {"facts_json"}
+    # 只标「被裁」不够：读的人还要知道裁掉了几个键，否则「节点只有这一个产出」
+    # 与「其余被裁掉」看起来一样。
+    assert facts["outputs_truncated_from"] == 2
 
 
 async def test_execution_trace_is_backfilled(tmp_path, store):

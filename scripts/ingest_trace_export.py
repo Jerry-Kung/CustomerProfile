@@ -432,9 +432,11 @@ def ingest(zip_path: Path | None, jsonl_path: Path | None, out_dir: Path,
     order: list[tuple[int, int, dict]] = []
     definitions: dict[int, dict] = {}
     payload_kinds: Counter[str] = Counter()
+    root_workflows: Counter[str] = Counter()
     for idx, record in enumerate(_iter_records(stream)):
         root = record["runs"][record["root_run_id"]]
         payload_kinds[_payload_kind(record, root)] += 1
+        root_workflows[str(root.get("workflow_id") or "")] += 1
         order.append((int(root.get("started_at_ms") or 0), idx, record))
         for version_id, snapshot in (record.get("definitions") or {}).items():
             definitions.setdefault(int(version_id), snapshot)
@@ -622,7 +624,13 @@ def ingest(zip_path: Path | None, jsonl_path: Path | None, out_dir: Path,
         "created_at": datetime.now().astimezone().isoformat(),
         "origin": "UAT 运行台 GET /traces/export（JSONL，每行一棵根运行树）后整理归档",
         "source": source_block,
-        "workflow_id": "customer_profile_pipeline",
+        # 从导出行里取，不写死：增量入口（customer_profile_incremental）导出的批次
+        # 若标成 pipeline，README 与 manifest 会把来源说错，而数据本身是对的。
+        # 一批里混了多个入口时给空串，完整清单在 workflow_ids。
+        "workflow_id": (
+            next(iter(root_workflows)) if len(root_workflows) == 1 else ""
+        ),
+        "workflow_ids": dict(root_workflows.most_common()),
         "code_commit": None,
         "phones_count": len(phones),
         "root_run_count": len(order),

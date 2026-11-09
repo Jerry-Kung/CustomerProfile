@@ -142,6 +142,9 @@ CHANNEL_TIER: dict[str, str] = {
     #     记人工/系统登记档，否则身份字段会因「非登记来源」被降为 inferred_low。
     "客户留资手机号": REGISTRY,
     "试驾与置换记录": REGISTRY,
+    # —— 增量画像的底座（上一版回传体或接口画像）：我们上一轮发出去、销售看过的结论，
+    #     可信度等同登记档。见 ``incremental.base_claims.BASE_CHANNEL``。
+    "上一版画像": REGISTRY,
     # —— 一手交互
     "试驾录音信息": FIRSTHAND,
     "外呼录音信息": FIRSTHAND,

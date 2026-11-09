@@ -272,6 +272,34 @@ class Settings(BaseSettings):
     生产副作用。真实冒烟也保持 false——V0.3 的验收目标是端到端**读**通，不含写。
     """
 
+    incremental_enabled: bool = False
+    """是否启用增量画像入口（``INCREMENTAL_ENABLED``）。
+
+    缺省 **false**：关闭时入口仍是 ``customer_profile_pipeline``，产物与接入增量前
+    逐字节一致，也不写基线。开启后入口解析为 ``customer_profile_incremental``，
+    由它按档位分流（P1 只有 T0 / T3 两档）。
+
+    **前后端必须同改**：前端 ``SubmitRun.tsx`` 里的入口常量决定提交页写哪个 ID，
+    这里决定入参校验与入站接口认哪个 ID。只改一侧会让手机号校验或批次号补全静默失效。
+    """
+
+    incremental_tiers: str = "T0,T1,T2"
+    """增量入口放行哪些档位（``INCREMENTAL_TIERS``，逗号分隔，缺省 ``T0,T1,T2``）。
+
+    **灰度与回滚的唯一手段**（``03`` T2-7）：把 ``T1,T2`` 摘掉即回到「判据命中后仍落
+    T3」，不需要改代码、也不需要重启改图。空串按缺省值处理——配置写空不该让增量停摆。
+    """
+
+    baseline_enabled: bool = True
+    """是否在运行成功后写回传体基线（``BASELINE_ENABLED``）。
+
+    缺省 **true**，但只在 ``incremental_enabled`` 打开时生效——没有增量入口就没有
+    读基线的地方，白写一表业务数据没有意义。
+
+    **回写关闭时也写**（``WRITEBACK_ENABLED=false``）：基线描述的是「我们算出来的
+    上一版」，不是「后台收到的那份」（``03`` T1-2）。
+    """
+
     replay_strict: bool = True
     """固定响应未命中时是否直接失败。默认严格，避免「静默走过」被误当成等价验证。"""
 

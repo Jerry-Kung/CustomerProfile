@@ -291,3 +291,158 @@ def test_iter_archive_days_ignores_non_date_dirs(tmp_path):
     (tmp_path / "junk").mkdir()
     days = [p.name for p in A.iter_archive_days(tmp_path)]
     assert days == ["2026-01-02", "2026-01-03"]
+
+
+# ---------------------------------------------------------------- 节点专属诊断切片
+
+
+def _node_trace(*nodes: dict) -> dict:
+    """只带指定节点的最小运行树。节点专属切片只关心 `node_id` 与出参。"""
+    return {
+        "root_run_id": "root",
+        "runs": {
+            "root": {
+                "run_id": "root",
+                "workflow_id": "customer_profile_incremental",
+                "parent_run_id": None,
+                "created_at_ms": 1_762_300_000_000,
+                "inputs": {},
+                "outputs": {"result1": "{}"},
+                "nodes": [
+                    {
+                        "execution_id": index,
+                        "run_id": "root",
+                        "node_type": "code",
+                        "inputs_json": {},
+                        **node,
+                    }
+                    for index, node in enumerate(nodes, start=1)
+                ],
+                "attempts": [],
+                "child_run_ids": [],
+            }
+        },
+        "definitions": {},
+    }
+
+
+def _outputs_of(package: dict, node_id: str) -> dict:
+    return next(n for n in package["nodes"] if n["node_id"] == node_id)["outputs_json"]
+
+
+def test_low_keeps_incremental_tier_decision():
+    """档位判定是「这次为什么走这一档」的唯一直接证据，low 必须留。
+
+    灰度期要按天统计四档占比（`05` §4.1），来源就是这个节点的 `tier`。
+    """
+    trace = _node_trace({
+        "node_id": "incremental_dispatch",
+        "outputs_json": {
+            "tier": "T2",
+            "tier_label": "音频增量",
+            "tier_reason": "新增外呼录音",
+            "baseline_found": "true",
+            "compat_ok": "true",
+            "added_count": 4,
+            "removed_count": 0,
+            "unchanged_count": 6,
+            "touched_channels": "OntologyCallRecord",
+            "stage": "lead",
+            "previous_level": "B",
+            "previous_level_detail": '{"summary": "B"}',
+            "compat_key": "0ec1e2c2",
+            "adapt_error": "",
+            "history_records": 10,
+            "base_stats_json": '{"same": 5, "differ": 1}',
+            "incremental_ctx": '{"v": 1}' * 2000,
+            "callback_json": "{}" * 4000,
+        },
+    })
+    outputs = _outputs_of(A.build_package(trace, mode="low"), "incremental_dispatch")
+    assert outputs["tier"] == "T2"
+    assert outputs["tier_reason"] == "新增外呼录音"
+    assert outputs["base_stats_json"] == '{"same": 5, "differ": 1}'
+    assert outputs["added_count"] == 4
+    # 两个大键刻意不收：上下文可由 base_stats 与入参复核，回传体与根输出逐字节相同。
+    assert "incremental_ctx" not in outputs
+    assert "callback_json" not in outputs
+
+
+def test_low_keeps_baseline_commit_verdict():
+    """「基线写没写成功」决定下一轮还走不走增量，失败时也必须能在包里看到。"""
+    trace = _node_trace({
+        "node_id": "incremental_baseline_commit",
+        "outputs_json": {
+            "baseline_saved": False,
+            "baseline_error": "database is locked",
+            "baseline_keys": 0,
+            "baseline_tier": "T2",
+        },
+    })
+    outputs = _outputs_of(A.build_package(trace, mode="low"), "incremental_baseline_commit")
+    assert outputs["baseline_saved"] is False
+    assert outputs["baseline_error"] == "database is locked"
+
+
+def test_low_keeps_skip_verdict_but_not_its_sections():
+    """表达跳过命中时是九个板块全文，不能进切片；判定本身要留。"""
+    trace = _node_trace({
+        "node_id": "l3_skip_express",
+        "outputs_json": {
+            "skip": "true",
+            "reason": "事实与上一版逐字节相同",
+            "sections_json": '{"profile_summary": "x"}' * 500,
+        },
+    })
+    outputs = _outputs_of(A.build_package(trace, mode="low"), "l3_skip_express")
+    assert outputs == {"skip": "true", "reason": "事实与上一版逐字节相同"}
+
+
+def test_node_scoped_keys_do_not_leak_to_other_nodes():
+    """同名短键在别的节点上语义不同，不能因为增量清单里有就一起留下。
+
+    `pipeline_l2_project` 也输出 `tier`，但那是证据档位、不是增量档位；把它一并留下
+    会让读的人以为该节点参与了档位判定。
+    """
+    trace = _node_trace(
+        {
+            "node_id": "pipeline_l2_project",
+            "outputs_json": {"tier": "high", "facts_json": "{}"},
+        },
+        {
+            "node_id": "incremental_dispatch",
+            "outputs_json": {"tier": "T1"},
+        },
+    )
+    package = A.build_package(trace, mode="low")
+    project = _outputs_of(package, "pipeline_l2_project")
+    assert "tier" not in project
+    assert project["facts_json"] == "{}"
+    assert _outputs_of(package, "incremental_dispatch")["tier"] == "T1"
+
+
+def test_low_records_how_many_keys_were_dropped():
+    """读的人要能分清「节点就只有这些产出」与「其余被裁掉了」。"""
+    trace = _node_trace({
+        "node_id": "incremental_dispatch",
+        "outputs_json": {"tier": "T3", "incremental_ctx": "x", "callback_json": "y"},
+    })
+    node = next(
+        n for n in A.build_package(trace, mode="low")["nodes"]
+        if n["node_id"] == "incremental_dispatch"
+    )
+    assert node["outputs_truncated_from"] == 3
+    assert node["payload_truncated"] == "low"
+
+
+def test_high_does_not_record_truncation():
+    trace = _node_trace({
+        "node_id": "incremental_dispatch",
+        "outputs_json": {"tier": "T3", "incremental_ctx": "x"},
+    })
+    node = next(
+        n for n in A.build_package(trace, mode="high")["nodes"]
+        if n["node_id"] == "incremental_dispatch"
+    )
+    assert "outputs_truncated_from" not in node
+    assert node["outputs_json"]["incremental_ctx"] == "x"
