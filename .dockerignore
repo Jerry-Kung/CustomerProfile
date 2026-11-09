@@ -22,8 +22,6 @@
 !services/task-backend/contracts/**
 !services/task-backend/db/
 !services/task-backend/db/**
-!scripts/
-!scripts/container-entrypoint.sh
 
 **/__pycache__/
 **/*.py[cod]

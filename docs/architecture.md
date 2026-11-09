@@ -41,7 +41,7 @@ flowchart LR
 留在 MySQL 等待。执行层不再配置第二套每类任务数量上限，接收后按派发任务自动启动；
 SQLite 仍负责可靠接单、记录运行身份与状态，接单和执行之间可以短暂处于 queued。
 
-发布脚本统一构建镜像，更新邀约时联动 `inbound / invitation-worker / invitation-runner-worker`，
+使用 Docker Compose 构建共用镜像，更新邀约时联动 `inbound / invitation-worker / invitation-runner-worker`，
 更新画像时联动 `api / profile-worker / profile-runner-worker`。运行记录保存各服务实际采用的镜像。
 两组仍共享持久化格式，公共数据库契约变化须兼容旧版本，
 这类基础层升级可能需要联合发布。部署与首次从旧 worker 切换见运行指南。

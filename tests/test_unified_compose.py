@@ -26,14 +26,20 @@ def test_one_image_with_separate_credentials_ports_and_existing_history_volume(t
         encoding="utf-8",
     )
     image = "customer-profile-unified:20261109-150000-test"
+    env = dict(os.environ, CP_IMAGE=image, CP_ENV_FILE=str(runtime), TASK_ENV_FILE=str(task))
+    env.pop("COMPOSE_PROJECT_NAME", None)
     result = subprocess.run([
-        str(ROOT / "scripts/compose.sh"), "--env-file", str(runtime),
-        "--task-env-file", str(task), "--profile", "*", "config", "--format", "json",
-    ], env=dict(os.environ, CP_IMAGE=image), capture_output=True, text=True, check=True)
+        "docker", "compose", "--project-directory", str(ROOT),
+        "--env-file", str(task), "--env-file", str(runtime),
+        "-f", str(ROOT / "compose.yaml"), "--profile", "*", "config", "--format", "json",
+    ], env=env, capture_output=True, text=True, check=True)
     configuration = json.loads(result.stdout)
     services = configuration["services"]
     assert len(services) == 10
     assert {service["image"] for service in services.values()} == {image}
+    assert {name for name, service in services.items() if "build" in service} == {"api"}
+    for name in ["task-api", "task-migrate", "qingtian-worker", "commercial-worker", "profile-runner-worker", "invitation-runner-worker"]:
+        assert services[name]["command"][0].startswith("/opt/task-venv/bin/customer-profile-")
     assert services["api"]["environment"]["PROFILE_API_KEY"] == "runtime-fixture-key"
     assert services["task-api"]["environment"]["PROFILE_API_KEY"] == "task-fixture-key"
     assert services["api"]["environment"]["API_PORT"] == "18175"
@@ -51,9 +57,6 @@ def test_one_image_with_separate_credentials_ports_and_existing_history_volume(t
 
 @pytest.mark.parametrize("custom_file", [False, True])
 def test_one_env_file_preserves_project_ports_and_worker_scopes(tmp_path, custom_file):
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
-    shutil.copy2(ROOT / "scripts/compose.sh", scripts / "compose.sh")
     shutil.copy2(ROOT / "compose.yaml", tmp_path / "compose.yaml")
     env_file = tmp_path / ("custom config.env" if custom_file else ".env")
     env_file.write_text(
@@ -67,16 +70,21 @@ def test_one_env_file_preserves_project_ports_and_worker_scopes(tmp_path, custom
         "INVITATION_RUNNER_WORK_ENVS=test,production\n",
         encoding="utf-8",
     )
-    env = dict(os.environ, CP_IMAGE="customer-profile-unified:20261109-150000-test")
-    for key in ("CP_ENV_FILE", "TASK_ENV_FILE", "COMPOSE_PROJECT_NAME"):
+    env = dict(os.environ)
+    for key in ("CP_IMAGE", "CP_ENV_FILE", "TASK_ENV_FILE", "COMPOSE_PROJECT_NAME"):
         env.pop(key, None)
+    if custom_file:
+        env["CP_ENV_FILE"] = str(env_file)
     result = subprocess.run([
-        str(scripts / "compose.sh"),
+        "docker", "compose", "--project-directory", str(tmp_path),
+        "-f", str(tmp_path / "compose.yaml"),
         *(["--env-file", str(env_file)] if custom_file else []),
         "--profile", "invitation-runner", "config", "--format", "json",
     ], env=env, capture_output=True, text=True, check=True)
     config = json.loads(result.stdout)
     services = config["services"]
+    assert {service["image"] for service in services.values()} == {"customer-profile-unified:uat"}
+    assert {name for name, service in services.items() if "build" in service} == {"api"}
     assert config["name"] == "customer-profile-runner"
     assert config["volumes"]["profile-data"]["name"] == "customer-profile-runner_profile-data"
     assert services["api"]["environment"]["API_PORT"] == "18173"

@@ -2,7 +2,7 @@
 
 潜在目标客户人设画像分析工作流。给定一个手机号，产出一份该客户的画像 JSON，并按回写契约写到 Notes 服务。
 
-仓库同时维护 MySQL 任务后端与画像、邀约执行器。两个模块使用独立 Python 环境和进程，共用根目录 `.env`、一个镜像及发布入口。
+仓库同时维护 MySQL 任务后端与画像、邀约执行器。两个模块使用独立 Python 环境和进程，共用根目录 `.env` 和一个镜像，通过 Docker Compose 部署。
 
 用于汽车营销场景：帮助销售人员快速掌握客户基础信息，便于针对性制定销售策略。
 
@@ -28,11 +28,15 @@
 
 ```
 cp .env.example .env          # 然后填入真实端点与凭据
-# 填写后端 MySQL、目标和业务回调配置后，首次安装显式执行迁移
-./scripts/release.py --profile invitation-runner --migrate
+# 填写后端 MySQL、目标和业务回调配置
+docker compose --profile invitation-runner config -q
+docker compose build api
+# 仅首次新建 MySQL 库时执行：docker compose run --rm --no-deps task-migrate
+docker compose --profile invitation-runner up -d --no-build --wait
 ```
 
-已有 001–008 后端库的日常更新使用 `./scripts/release.py --profile invitation-runner`。
+所有服务共用 `customer-profile-unified:uat`；只有 `api` 声明构建，其他服务直接使用同一镜像。
+已有 001–008 后端库无需执行迁移。更新前先暂停派发并等待执行 Worker 完成。
 两仓部署首次切换、分组发布和恢复步骤见 [统一镜像发布](docs/runbooks/统一镜像发布.md)。
 
 **直接跑进程**：

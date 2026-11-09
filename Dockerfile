@@ -41,7 +41,6 @@ COPY services/task-backend/src ./services/task-backend/src
 COPY services/task-backend/contracts ./services/task-backend/contracts
 COPY services/task-backend/db ./services/task-backend/db
 RUN /opt/task-venv/bin/pip install --no-deps --no-build-isolation ./services/task-backend
-COPY --chmod=755 scripts/container-entrypoint.sh /usr/local/bin/customer-profile-entrypoint
 
 # ---- 3. 数据目录与运行用户 ------------------------------------------------
 # /app/data 是 SQLite 与运行产物的落位（settings.PROJECT_ROOT=/app，DATA_DIR=data）。
@@ -62,5 +61,4 @@ LABEL org.opencontainers.image.revision=${BUILD_REVISION} \
       io.customer-profile.layout=v1
 
 # 缺省起 API；worker 与 inbound 由 compose 覆盖 command。
-ENTRYPOINT ["/usr/local/bin/customer-profile-entrypoint"]
 CMD ["python", "-m", "customer_profile.main"]

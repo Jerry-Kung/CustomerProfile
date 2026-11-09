@@ -1,9 +1,7 @@
 name: customer-profile
 
 x-service: &service
-  image: ${CP_IMAGE:?Run scripts/release.py or set CP_IMAGE to a versioned image}
-  build:
-    context: .
+  image: ${CP_IMAGE:-customer-profile-unified:uat}
   pull_policy: never
   init: true
   restart: unless-stopped
@@ -29,9 +27,7 @@ x-task-environment: &task-environment
   LOG_DIR: /app/logs
 
 x-task: &task
-  image: ${CP_IMAGE:?Run scripts/release.py or set CP_IMAGE to a versioned image}
-  build:
-    context: .
+  image: ${CP_IMAGE:-customer-profile-unified:uat}
   pull_policy: never
   init: true
   working_dir: /app/services/task-backend
@@ -46,7 +42,7 @@ x-task: &task
 
 x-task-worker: &task-worker
   <<: *task
-  command: ["customer-profile-worker"]
+  command: ["/opt/task-venv/bin/customer-profile-worker"]
   depends_on:
     task-api:
       condition: service_healthy
@@ -55,6 +51,9 @@ x-task-worker: &task-worker
 services:
   api:
     <<: *service
+    # Build once; all other services use this same image.
+    build:
+      context: .
     command: ["python", "-m", "customer_profile.main"]
     environment:
       <<: *environment
@@ -125,12 +124,12 @@ services:
   task-migrate:
     <<: *task
     profiles: ["maintenance"]
-    command: ["customer-profile-migrate"]
+    command: ["/opt/task-venv/bin/customer-profile-migrate"]
     restart: "no"
 
   task-api:
     <<: *task
-    command: ["customer-profile-api"]
+    command: ["/opt/task-venv/bin/customer-profile-api"]
     environment:
       <<: *task-environment
       API_HOST: 0.0.0.0
