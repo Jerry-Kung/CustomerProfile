@@ -2,6 +2,8 @@
 
 潜在目标客户人设画像分析工作流。给定一个手机号，产出一份该客户的画像 JSON，并按回写契约写到 Notes 服务。
 
+仓库同时维护 MySQL 任务后端与画像、邀约执行器。两个模块使用独立 Python 环境和进程，共用根目录 `.env` 和一个镜像，通过 Docker Compose 部署。
+
 用于汽车营销场景：帮助销售人员快速掌握客户基础信息，便于针对性制定销售策略。
 
 ## 这个仓库是什么
@@ -22,12 +24,20 @@
 
 部署配置、日志、原数据卷升级与接口验收见 [部署与运行](docs/runbooks/部署.md)。
 
-**容器部署**（画像和邀约各有 API 与 worker，Compose 自动构建镜像，可分别更新，共用原 SQLite 历史卷）：
+**容器部署**（任务后端、画像和邀约共用镜像，按服务组更新）：
 
 ```
 cp .env.example .env          # 然后填入真实端点与凭据
-docker compose up -d --build
+# 填写后端 MySQL、目标和业务回调配置
+docker compose --profile invitation-runner config -q
+docker compose build runtime-profile-api
+# 仅首次新建 MySQL 库时执行：docker compose run --rm --no-deps backend-migrate
+docker compose --profile invitation-runner up -d --no-build --wait
 ```
+
+所有服务共用 `customer-profile-unified:uat`；只有 `runtime-profile-api` 声明构建，其他服务直接使用同一镜像。
+已有 001–008 后端库无需执行迁移。更新前先暂停派发并等待执行 Worker 完成。
+两仓部署首次切换、分组发布和恢复步骤见 [统一镜像发布](docs/runbooks/统一镜像发布.md)。
 
 **直接跑进程**：
 
@@ -55,6 +65,7 @@ curl -X POST localhost:18173/runs \
 | 路径 | 内容 |
 |---|---|
 | `src/customer_profile/` | 执行器、定义层、持久化、API 与 worker |
+| `services/task-backend/` | MySQL 业务任务 API、调度 Worker、适配器和迁移 |
 | `src/customer_profile/workflows/` | 各工作流的 Python 定义 |
 | `src/customer_profile/templates/` | 提示词与模板正文（运行期唯一来源） |
 | `frontend/` | 运行台前端（Vite + React） |
@@ -63,6 +74,8 @@ curl -X POST localhost:18173/runs \
 | `data/` | 运行期 SQLite 与产物（可重建，已 gitignore） |
 | `experiments/` | 功能验证与问题回归场地：UAT 运行数据（`uat_data/`）与本地跑批批次（`batches/`），体积大，已 gitignore |
 | `docs/` | 文档：架构、设计决策、运行手册、变更日志；历史归档见 `docs/history/` |
+
+开发检查入口为 `scripts/test.sh`。安装两套开发环境的方法见 [统一镜像发布](docs/runbooks/统一镜像发布.md)。
 
 ## 文档
 

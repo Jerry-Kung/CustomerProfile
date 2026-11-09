@@ -1,0 +1,6 @@
+.DS_Store
+.git/
+.gitignore
+*.tgz
+*.tar.gz
+values*.private.yaml

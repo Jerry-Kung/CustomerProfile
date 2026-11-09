@@ -1,0 +1,30 @@
+# Merge with the root Compose file. All paths resolve from the root project directory.
+services:
+  qingtian-b:
+    build: .
+    command: ["customer-profile-worker"]
+    env_file:
+      - "${APP_ENV_FILE:-.env}"
+    environment:
+      WORKFLOW_PLATFORM: qingtian
+      WORKER_ROLE: local
+      WORKFLOW_TARGET_ID: "${QINGTIAN_B_TARGET_ID:-qingtian-b}"
+      WORKFLOW_TARGET_REVISION: "${QINGTIAN_B_TARGET_REVISION:-v1}"
+      WORKER_TASK_TYPES: "${QINGTIAN_B_TASK_TYPES:-customer_profile}"
+      WORKER_WORK_ENVS: "${QINGTIAN_B_WORK_ENVS:-production}"
+      WORKER_TARGET_MODE: "${QINGTIAN_B_TARGET_MODE:-active}"
+      WORKER_CONCURRENCY: "${QINGTIAN_B_CONCURRENCY:-1}"
+      QINGTIAN_BASE_URL: "${QINGTIAN_B_BASE_URL:-https://qingtian.example/api/proxy/api/v1}"
+      QINGTIAN_USER_ID: "${QINGTIAN_B_USER_ID:-${QINGTIAN_USER_ID:-}}"
+      QINGTIAN_API_KEY_TEST: "${QINGTIAN_B_API_KEY_TEST:-}"
+      QINGTIAN_API_KEY_PRODUCTION: "${QINGTIAN_B_API_KEY_PRODUCTION:-}"
+      QINGTIAN_INVITATION_STRATEGY_API_KEY: "${QINGTIAN_B_INVITATION_STRATEGY_API_KEY:-}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: 60s

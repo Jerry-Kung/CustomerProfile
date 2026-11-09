@@ -249,6 +249,14 @@ def test_archive_dir_defaults_under_data_dir(tmp_path):
     assert explicit.trace_archive_path == tmp_path / "x"
 
 
+@pytest.mark.parametrize("blank", ["", " ", "\t"])
+def test_blank_archive_dir_from_env_file_stays_under_data_dir(tmp_path, blank):
+    env_file = tmp_path / "archive.env"
+    env_file.write_text(f'TRACE_ARCHIVE_DIR="{blank}"\n', encoding="utf-8")
+    settings = Settings(_env_file=env_file, data_dir=tmp_path / "data")
+    assert settings.trace_archive_path == tmp_path / "data" / "trace-archives"
+
+
 def test_ensure_dirs_creates_archive_dir(tmp_path):
     settings = Settings(_env_file=None, data_dir=tmp_path / "d")
     settings.ensure_dirs()

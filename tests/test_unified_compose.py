@@ -1,0 +1,105 @@
+"""Parse the real Compose definition without contacting Docker Engine."""
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+pytestmark = pytest.mark.skipif(shutil.which("docker") is None, reason="requires Docker Compose CLI")
+
+
+def test_one_image_with_separate_credentials_ports_and_existing_history_volume(tmp_path):
+    runtime = tmp_path / "runtime.env"
+    task = tmp_path / "task.env"
+    runtime.write_text(
+        "API_PORT=18175\nCP_API_PORT=18000\nPROFILE_API_KEY=runtime-fixture-key\n",
+        encoding="utf-8",
+    )
+    task.write_text(
+        "API_PORT=19999\nTASK_API_PORT=18009\nHOST_API_PORT=18007\n"
+        "PROFILE_API_KEY=task-fixture-key\nPROFILE_RUNNER_CONCURRENCY=5\n",
+        encoding="utf-8",
+    )
+    image = "customer-profile-unified:20261109-150000-test"
+    env = dict(os.environ, CP_IMAGE=image, CP_ENV_FILE=str(runtime), TASK_ENV_FILE=str(task))
+    env.pop("COMPOSE_PROJECT_NAME", None)
+    result = subprocess.run([
+        "docker", "compose", "--project-directory", str(ROOT),
+        "--env-file", str(task), "--env-file", str(runtime),
+        "-f", str(ROOT / "compose.yaml"), "--profile", "*", "config", "--format", "json",
+    ], env=env, capture_output=True, text=True, check=True)
+    configuration = json.loads(result.stdout)
+    services = configuration["services"]
+    assert len(services) == 10
+    for name, service in services.items():
+        assert name.startswith(("backend-", "runtime-"))
+        assert service["container_name"] == f"{name}-customer-profile"
+    assert "api" in services["runtime-profile-api"]["networks"]["default"]["aliases"]
+    assert "inbound" in services["runtime-invitation-api"]["networks"]["default"]["aliases"]
+    assert {service["image"] for service in services.values()} == {image}
+    assert {name for name, service in services.items() if "build" in service} == {"runtime-profile-api"}
+    for name in ["backend-api", "backend-migrate", "backend-qingtian-worker", "backend-commercial-worker", "backend-profile-worker", "backend-invitation-worker"]:
+        assert services[name]["command"][0].startswith("/opt/task-venv/bin/customer-profile-")
+    assert services["runtime-profile-api"]["environment"]["PROFILE_API_KEY"] == "runtime-fixture-key"
+    assert services["backend-api"]["environment"]["PROFILE_API_KEY"] == "task-fixture-key"
+    assert services["runtime-profile-api"]["environment"]["API_PORT"] == "18175"
+    assert services["backend-api"]["environment"]["API_PORT"] == "18009"
+    assert services["backend-api"]["ports"][0]["published"] == "18007"
+    assert services["runtime-profile-worker"]["environment"]["WORKER_CONCURRENCY"] == ""
+    assert services["backend-profile-worker"]["environment"]["WORKER_CONCURRENCY"] == "5"
+    assert services["backend-api"]["working_dir"] == "/app/services/task-backend"
+    assert services["backend-api"]["environment"]["PYTHONPATH"] == "/app/services/task-backend"
+    assert configuration["volumes"]["profile-data"]["name"] == "customer-profile_profile-data"
+    assert services["runtime-profile-api"]["environment"]["INTERRUPT_ON_START"] == "false"
+    assert services["runtime-profile-worker"]["stop_grace_period"] == "1h0m0s"
+    assert services["runtime-invitation-worker"]["stop_grace_period"] == "1h0m0s"
+
+
+@pytest.mark.parametrize("custom_file", [False, True])
+def test_one_env_file_preserves_project_ports_and_worker_scopes(tmp_path, custom_file):
+    shutil.copy2(ROOT / "compose.yaml", tmp_path / "compose.yaml")
+    env_file = tmp_path / ("custom config.env" if custom_file else ".env")
+    env_file.write_text(
+        "COMPOSE_PROJECT_NAME=customer-profile-runner\n"
+        "API_PORT=18173\nCP_API_PORT=18000\nINBOUND_PORT=8099\n"
+        "TASK_API_PORT=18008\nTASK_HOST_API_PORT=18007\n"
+        "PROFILE_API_KEY=shared-fixture-key\nMYSQL_PASSWORD=mysql-fixture-key\n"
+        "WORKER_CONCURRENCY=10\nPROFILE_RUNNER_CONCURRENCY=5\n"
+        "PROFILE_RUNNER_WORK_ENVS=test,production\n"
+        "INVITATION_RUNNER_TARGET_ID=invitation-runner-uat\n"
+        "INVITATION_RUNNER_WORK_ENVS=test,production\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    for key in ("CP_IMAGE", "CP_ENV_FILE", "TASK_ENV_FILE", "COMPOSE_PROJECT_NAME"):
+        env.pop(key, None)
+    if custom_file:
+        env["CP_ENV_FILE"] = str(env_file)
+    result = subprocess.run([
+        "docker", "compose", "--project-directory", str(tmp_path),
+        "-f", str(tmp_path / "compose.yaml"),
+        *(["--env-file", str(env_file)] if custom_file else []),
+        "--profile", "invitation-runner", "config", "--format", "json",
+    ], env=env, capture_output=True, text=True, check=True)
+    config = json.loads(result.stdout)
+    services = config["services"]
+    assert {service["image"] for service in services.values()} == {"customer-profile-unified:uat"}
+    assert {name for name, service in services.items() if "build" in service} == {"runtime-profile-api"}
+    assert config["name"] == "customer-profile-runner"
+    for name, service in services.items():
+        assert service["container_name"] == f"{name}-customer-profile-runner"
+    assert config["volumes"]["profile-data"]["name"] == "customer-profile-runner_profile-data"
+    assert services["runtime-profile-api"]["environment"]["API_PORT"] == "18173"
+    assert services["runtime-profile-api"]["ports"][0]["published"] == "18000"
+    assert services["backend-api"]["environment"]["API_PORT"] == "18008"
+    assert services["backend-api"]["ports"][0]["published"] == "18007"
+    assert services["backend-api"]["environment"]["MYSQL_PASSWORD"] == "mysql-fixture-key"
+    assert services["runtime-profile-worker"]["environment"]["WORKER_CONCURRENCY"] == ""
+    assert services["backend-profile-worker"]["environment"]["WORKER_CONCURRENCY"] == "5"
+    assert services["backend-invitation-worker"]["environment"]["WORKFLOW_TARGET_ID"] == "invitation-runner-uat"
+    assert services["backend-invitation-worker"]["environment"]["WORKER_WORK_ENVS"] == "test,production"

@@ -247,6 +247,7 @@ tests/fixtures/replay/*.json
 
 # 临时脚本与中间产物
 .tmp_*
+.releases/
 
 # ---------------------------------------------------------------------------
 # V0.6 数据基线（实验）
@@ -263,3 +264,6 @@ experiments/*
 # 属"真实客户数据"管辖，禁止入库。测试号清单见受控文件 test_phone_numbers.txt。
 json_by_phone/
 test_phone_numbers.txt
+
+# Container image exports are build artifacts, not source files.
+*.tar

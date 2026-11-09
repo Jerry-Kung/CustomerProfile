@@ -1,8 +1,8 @@
 name: customer-profile
 
 x-service: &service
-  build:
-    context: .
+  image: ${CP_IMAGE:-customer-profile-unified:uat}
+  pull_policy: never
   init: true
   restart: unless-stopped
   env_file:
@@ -21,9 +21,44 @@ x-environment: &environment
   # Two execution processes split the configured global LLM RPM/TPM budget.
   WORKER_REPLICAS: "2"
 
+x-task-environment: &task-environment
+  PYTHONPATH: /app/services/task-backend
+  PATH: /opt/task-venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+  LOG_DIR: /app/logs
+
+x-task: &task
+  image: ${CP_IMAGE:-customer-profile-unified:uat}
+  pull_policy: never
+  init: true
+  working_dir: /app/services/task-backend
+  env_file:
+    - ${TASK_ENV_FILE:-${CP_ENV_FILE:-.env}}
+  environment: *task-environment
+  volumes:
+    - task-logs:/app/logs
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  restart: unless-stopped
+
+x-task-worker: &task-worker
+  <<: *task
+  command: ["/opt/task-venv/bin/customer-profile-worker"]
+  depends_on:
+    backend-api:
+      condition: service_healthy
+  stop_grace_period: 60s
+
 services:
-  api:
+  runtime-profile-api:
+    container_name: runtime-profile-api-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *service
+    # Preserve the original internal hostname during the naming transition.
+    networks:
+      default:
+        aliases: [api]
+    # Build once; all other services use this same image.
+    build:
+      context: .
     command: ["python", "-m", "customer_profile.main"]
     environment:
       <<: *environment
@@ -48,7 +83,8 @@ services:
       start_period: 30s
       retries: 3
 
-  profile-worker:
+  runtime-profile-worker:
+    container_name: runtime-profile-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *service
     command: ["python", "-m", "customer_profile.worker"]
     environment:
@@ -59,7 +95,11 @@ services:
     # lets the current workflow finish before Docker may force termination.
     stop_grace_period: 60m
 
-  inbound:
+  runtime-invitation-api:
+    container_name: runtime-invitation-api-${COMPOSE_PROJECT_NAME:-customer-profile}
+    networks:
+      default:
+        aliases: [inbound]
     <<: *service
     command: ["python", "-m", "customer_profile.inbound"]
     environment:
@@ -82,7 +122,8 @@ services:
       start_period: 30s
       retries: 3
 
-  invitation-worker:
+  runtime-invitation-worker:
+    container_name: runtime-invitation-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *service
     command: ["python", "-m", "customer_profile.worker"]
     environment:
@@ -91,5 +132,103 @@ services:
       INTERRUPT_ON_START: "true"
     stop_grace_period: 60m
 
+  backend-migrate:
+    container_name: backend-migrate-${COMPOSE_PROJECT_NAME:-customer-profile}
+    <<: *task
+    profiles: ["maintenance"]
+    command: ["/opt/task-venv/bin/customer-profile-migrate"]
+    restart: "no"
+
+  backend-api:
+    container_name: backend-api-${COMPOSE_PROJECT_NAME:-customer-profile}
+    <<: *task
+    command: ["/opt/task-venv/bin/customer-profile-api"]
+    environment:
+      <<: *task-environment
+      API_HOST: 0.0.0.0
+      API_PORT: "${TASK_API_PORT:-18008}"
+    ports:
+      - "${TASK_HOST_API_PORT:-${HOST_API_PORT:-18008}}:${TASK_API_PORT:-18008}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ['API_PORT']+'/ready',timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  backend-qingtian-worker:
+    container_name: backend-qingtian-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
+    <<: *task-worker
+    environment:
+      <<: *task-environment
+      WORKFLOW_PLATFORM: qingtian
+      WORKER_ROLE: local
+      WORKFLOW_TARGET_ID: "${QINGTIAN_WORKER_TARGET_ID:-local-default}"
+      WORKFLOW_TARGET_REVISION: "${QINGTIAN_WORKER_TARGET_REVISION:-${LOCAL_WORKFLOW_TARGET_REVISION:-v1}}"
+      WORKER_TARGET_MODE: "${QINGTIAN_WORKER_TARGET_MODE:-${LOCAL_WORKER_TARGET_MODE:-draining}}"
+      WORKER_TASK_TYPES: "${QINGTIAN_WORKER_TASK_TYPES:-customer_profile}"
+      WORKER_WORK_ENVS: "${QINGTIAN_WORKER_WORK_ENVS:-test,production}"
+      WORKER_CONCURRENCY: "${QINGTIAN_WORKER_CONCURRENCY:-1}"
+
+  backend-commercial-worker:
+    container_name: backend-commercial-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
+    <<: *task-worker
+    environment:
+      <<: *task-environment
+      WORKFLOW_PLATFORM: qingtian
+      WORKER_ROLE: commercial
+      WORKFLOW_TARGET_ID: "${COMMERCIAL_WORKER_TARGET_ID:-commercial-default}"
+      WORKFLOW_TARGET_REVISION: "${COMMERCIAL_WORKER_TARGET_REVISION:-${COMMERCIAL_1_WORKFLOW_TARGET_REVISION:-v1}}"
+      WORKER_TARGET_MODE: "${COMMERCIAL_WORKER_TARGET_MODE:-${COMMERCIAL_1_WORKER_TARGET_MODE:-draining}}"
+      WORKER_TASK_TYPES: "${COMMERCIAL_WORKER_TASK_TYPES:-customer_profile}"
+      WORKER_WORK_ENVS: "${COMMERCIAL_WORKER_WORK_ENVS:-test,production}"
+      WORKER_CONCURRENCY: "${COMMERCIAL_WORKER_CONCURRENCY:-1}"
+      QINGTIAN_API_KEY_TEST: "${QINGTIAN_COMMERCIAL_API_KEY_TEST:-}"
+      QINGTIAN_API_KEY_PRODUCTION: "${QINGTIAN_COMMERCIAL_API_KEY_PRODUCTION:-}"
+
+  backend-profile-worker:
+    container_name: backend-profile-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
+    <<: *task-worker
+    depends_on:
+      backend-api:
+        condition: service_healthy
+      runtime-profile-api:
+        condition: service_healthy
+    environment:
+      <<: *task-environment
+      WORKFLOW_PLATFORM: runner
+      WORKER_ROLE: local
+      WORKFLOW_TARGET_ID: "${PROFILE_RUNNER_TARGET_ID:-profile-runner-production}"
+      WORKFLOW_TARGET_REVISION: "${PROFILE_RUNNER_TARGET_REVISION:-v1}"
+      WORKER_TASK_TYPES: "${PROFILE_RUNNER_TASK_TYPES:-customer_profile}"
+      WORKER_WORK_ENVS: "${PROFILE_RUNNER_WORK_ENVS:-production}"
+      WORKER_TARGET_MODE: "${PROFILE_RUNNER_TARGET_MODE:-active}"
+      WORKER_CONCURRENCY: "${PROFILE_RUNNER_CONCURRENCY:-5}"
+      PROFILE_RUNNER_BASE_URL_TEST: "${PROFILE_RUNNER_BASE_URL_TEST:-}"
+      PROFILE_RUNNER_BASE_URL_PRODUCTION: "${PROFILE_RUNNER_BASE_URL_PRODUCTION:-http://runtime-profile-api:${API_PORT:-18173}}"
+
+  backend-invitation-worker:
+    container_name: backend-invitation-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
+    <<: *task-worker
+    profiles: ["invitation-runner"]
+    depends_on:
+      backend-api:
+        condition: service_healthy
+      runtime-invitation-api:
+        condition: service_healthy
+    environment:
+      <<: *task-environment
+      WORKFLOW_PLATFORM: invitation_runner
+      WORKER_ROLE: local
+      WORKFLOW_TARGET_ID: "${INVITATION_RUNNER_TARGET_ID:-invitation-runner-test}"
+      WORKFLOW_TARGET_REVISION: "${INVITATION_RUNNER_TARGET_REVISION:-v1}"
+      WORKER_TASK_TYPES: invitation_strategy
+      WORKER_WORK_ENVS: "${INVITATION_RUNNER_WORK_ENVS:-test}"
+      WORKER_TARGET_MODE: "${INVITATION_RUNNER_TARGET_MODE:-active}"
+      WORKER_CONCURRENCY: "${INVITATION_RUNNER_CONCURRENCY:-5}"
+      INVITATION_RUNNER_BASE_URL_TEST: "${INVITATION_RUNNER_BASE_URL_TEST:-http://runtime-invitation-api:${INBOUND_PORT:-8099}}"
+      INVITATION_RUNNER_BASE_URL_PRODUCTION: "${INVITATION_RUNNER_BASE_URL_PRODUCTION:-}"
+
 volumes:
   profile-data:
+  task-logs:

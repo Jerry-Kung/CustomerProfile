@@ -1,0 +1,102 @@
+# One-release transition from the legacy local-default/commercial-default pair
+# to the current 1-local + 3-commercial topology.
+#
+# Keep the first two recovery_only targets until the SQL in docs/helm-deploy.md
+# reports no processing/retry_wait rows bound to them. Then switch to
+# values.workflow-targets.example.yaml.
+
+config:
+  WORKER_ROUTING_MODE: parallel
+  COMMERCIAL_QUEUE_THRESHOLD: "5"
+  COMMERCIAL_SPILLOVER_DELAY_SECONDS: "0"
+
+retry:
+  policyVersion: throughput_first_v1
+  maxWorkflowAttempts: 3
+  maxPollRecoveries: 3
+  maxRunLifetimeSeconds: 7200
+
+workflowTargets:
+  - id: local-default
+    name: customer-profile-worker
+    pool: local
+    revision: v1
+    secretName: customer-profile-backend-local-secret
+    mode: recovery_only
+    replicas: 1
+    concurrency: 5
+    taskTypes: [customer_profile, invitation_strategy]
+    workEnvs: [test, production]
+    mountTaskUploads: true
+    resources: &workerResources
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 1Gi
+
+  - id: commercial-default
+    name: customer-profile-worker-secondary
+    pool: commercial
+    revision: v1
+    secretName: customer-profile-backend-commercial-secret
+    mode: recovery_only
+    replicas: 1
+    concurrency: 1
+    taskTypes: [customer_profile]
+    workEnvs: [test, production]
+    mountTaskUploads: false
+    resources: *workerResources
+
+  - id: local-01
+    name: customer-profile-worker-local-01
+    pool: local
+    revision: v1
+    secretName: customer-profile-backend-local-secret
+    mode: active
+    replicas: 1
+    concurrency: 5
+    taskTypes: [customer_profile, invitation_strategy]
+    workEnvs: [test, production]
+    mountTaskUploads: true
+    resources: *workerResources
+
+  - id: commercial-01
+    name: customer-profile-worker-commercial-01
+    pool: commercial
+    revision: v1
+    secretName: customer-profile-backend-commercial-secret
+    mode: active
+    replicas: 1
+    concurrency: 1
+    taskTypes: [customer_profile]
+    workEnvs: [test, production]
+    mountTaskUploads: false
+    resources: *workerResources
+
+  - id: commercial-02
+    name: customer-profile-worker-commercial-02
+    pool: commercial
+    revision: v1
+    secretName: customer-profile-workflow-commercial-02
+    mode: active
+    replicas: 1
+    concurrency: 1
+    taskTypes: [customer_profile]
+    workEnvs: [test, production]
+    mountTaskUploads: false
+    resources: *workerResources
+
+  - id: commercial-03
+    name: customer-profile-worker-commercial-03
+    pool: commercial
+    revision: v1
+    secretName: customer-profile-workflow-commercial-03
+    mode: active
+    replicas: 1
+    concurrency: 1
+    taskTypes: [customer_profile]
+    workEnvs: [test, production]
+    mountTaskUploads: false
+    resources: *workerResources

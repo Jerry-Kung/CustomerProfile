@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.names.api }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "customer-profile-backend.commonLabels" . | nindent 4 }}
+    app: {{ .Values.names.api }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.api.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  selector:
+    matchLabels:
+      app: {{ .Values.names.api }}
+  template:
+    metadata:
+      labels:
+        {{- include "customer-profile-backend.commonLabels" . | nindent 8 }}
+        app: {{ .Values.names.api }}
+        app.kubernetes.io/component: api
+      annotations:
+        checksum/config: {{ toJson .Values.config | sha256sum }}
+        checksum/secrets: {{ toJson (dict "common" .Values.secrets.common "local" .Values.secrets.local) | sha256sum }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
+      containers:
+        - name: customer-profile-api
+          image: {{ include "customer-profile-backend.image" . | quote }}
+          imagePullPolicy: {{ .Values.api.imagePullPolicy | default .Values.image.pullPolicy }}
+          command:
+            - customer-profile-api
+          envFrom:
+            - configMapRef:
+                name: {{ .Values.names.configMap }}
+            - secretRef:
+                name: {{ .Values.names.commonSecret }}
+            - secretRef:
+                name: {{ .Values.names.localSecret }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # The API stamps this immutable policy version on each submitted
+            # task generation; Workers must read the same Helm value.
+            - name: RETRY_POLICY_VERSION
+              value: {{ .Values.retry.policyVersion | quote }}
+            - name: RETRY_MAX_WORKFLOW_ATTEMPTS
+              value: {{ .Values.retry.maxWorkflowAttempts | quote }}
+          ports:
+            - name: http-api
+              containerPort: {{ .Values.api.port }}
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - >-
+                  import json,sys,urllib.request;
+                  data=json.load(urllib.request.urlopen('http://127.0.0.1:{{ .Values.api.port }}/health',timeout=3));
+                  sys.exit(0 if data.get('status') == 'ok' and data.get('db_status') == 'up' else 1)
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 12
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: http-api
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          volumeMounts:
+            - name: task-uploads
+              mountPath: {{ .Values.config.TASK_UPLOAD_DIR }}
+            - name: logs
+              mountPath: {{ .Values.config.LOG_DIR }}
+      volumes:
+        - name: task-uploads
+          {{- if .Values.persistence.taskUploads.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "customer-profile-backend.taskUploadsPvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: logs
+          {{- if .Values.persistence.logs.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "customer-profile-backend.logsPvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
