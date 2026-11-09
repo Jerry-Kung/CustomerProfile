@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.names.configMap }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "customer-profile-backend.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: config
+data:
+  {{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}

@@ -1,0 +1,23 @@
+{{- if and .Values.persistence.logs.enabled (not .Values.persistence.logs.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.names.logsPvc }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "customer-profile-backend.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: logs
+  {{- if .Values.persistence.logs.keep }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.logs.accessMode }}
+  {{- with .Values.persistence.logs.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.logs.size }}
+{{- end }}

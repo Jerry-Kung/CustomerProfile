@@ -1,0 +1,117 @@
+{{- $root := . }}
+{{- $targetIds := dict }}
+{{- $deploymentNames := dict }}
+{{- range $target := .Values.workflowTargets }}
+{{- if hasKey $targetIds $target.id }}
+{{- fail (printf "workflowTargets contains duplicate id %q" $target.id) }}
+{{- end }}
+{{- if hasKey $deploymentNames $target.name }}
+{{- fail (printf "workflowTargets contains duplicate name %q" $target.name) }}
+{{- end }}
+{{- $_ := set $targetIds $target.id true }}
+{{- $_ := set $deploymentNames $target.name true }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $target.name }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "customer-profile-backend.commonLabels" $root | nindent 4 }}
+    app: {{ $target.name }}
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/instance-role: {{ $target.pool | quote }}
+    customer-profile/workflow-target: {{ $target.id | quote }}
+spec:
+  replicas: {{ $target.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ $target.name }}
+  template:
+    metadata:
+      labels:
+        {{- include "customer-profile-backend.commonLabels" $root | nindent 8 }}
+        app: {{ $target.name }}
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/instance-role: {{ $target.pool | quote }}
+        customer-profile/workflow-target: {{ $target.id | quote }}
+      annotations:
+        checksum/config: {{ toJson $root.Values.config | sha256sum }}
+        checksum/common-secret: {{ toJson $root.Values.secrets.common | sha256sum }}
+        {{- if eq $target.secretName $root.Values.names.localSecret }}
+        checksum/target-secret: {{ toJson $root.Values.secrets.local | sha256sum }}
+        {{- else if eq $target.secretName $root.Values.names.commercialSecret }}
+        checksum/target-secret: {{ toJson $root.Values.secrets.commercial | sha256sum }}
+        {{- end }}
+        workflow-target/revision: {{ $target.revision | quote }}
+    spec:
+      terminationGracePeriodSeconds: {{ default 60 $target.terminationGracePeriodSeconds }}
+      containers:
+        - name: customer-profile-worker
+          image: {{ include "customer-profile-backend.image" $root | quote }}
+          imagePullPolicy: {{ default $root.Values.image.pullPolicy $target.imagePullPolicy }}
+          command:
+            - customer-profile-worker
+          envFrom:
+            - configMapRef:
+                name: {{ $root.Values.names.configMap }}
+            - secretRef:
+                name: {{ $root.Values.names.commonSecret }}
+            - secretRef:
+                name: {{ $target.secretName }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WORKER_ROLE
+              value: {{ $target.pool | quote }}
+            - name: WORKFLOW_TARGET_ID
+              value: {{ $target.id | quote }}
+            - name: WORKFLOW_TARGET_REVISION
+              value: {{ $target.revision | quote }}
+            - name: WORKER_TARGET_MODE
+              value: {{ default "active" $target.mode | quote }}
+            - name: WORKER_TASK_TYPES
+              value: {{ join "," $target.taskTypes | quote }}
+            - name: WORKER_WORK_ENVS
+              value: {{ join "," $target.workEnvs | quote }}
+            - name: WORKER_CONCURRENCY
+              value: {{ $target.concurrency | quote }}
+            - name: RETRY_MAX_POLL_RECOVERIES
+              value: {{ $root.Values.retry.maxPollRecoveries | quote }}
+            - name: RETRY_MAX_RUN_LIFETIME_SECONDS
+              value: {{ $root.Values.retry.maxRunLifetimeSeconds | quote }}
+            - name: RETRY_MAX_WORKFLOW_ATTEMPTS
+              value: {{ $root.Values.retry.maxWorkflowAttempts | quote }}
+            - name: RETRY_POLICY_VERSION
+              value: {{ $root.Values.retry.policyVersion | quote }}
+          resources:
+            {{- toYaml $target.resources | nindent 12 }}
+          volumeMounts:
+            - name: logs
+              mountPath: {{ $root.Values.config.LOG_DIR }}
+            {{- if $target.mountTaskUploads }}
+            - name: task-uploads
+              mountPath: {{ $root.Values.config.TASK_UPLOAD_DIR }}
+            {{- end }}
+      volumes:
+        - name: logs
+          {{- if $root.Values.persistence.logs.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "customer-profile-backend.logsPvcName" $root }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if $target.mountTaskUploads }}
+        - name: task-uploads
+          {{- if $root.Values.persistence.taskUploads.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "customer-profile-backend.taskUploadsPvcName" $root }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+{{- end }}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: customer-profile-backend
+description: Customer profile API, extensible workflow-target Workers, and database migration
+type: application
+version: 0.1.0
+appVersion: "arm64-latest"

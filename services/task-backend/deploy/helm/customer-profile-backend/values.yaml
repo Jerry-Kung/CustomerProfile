@@ -1,0 +1,173 @@
+names:
+  configMap: customer-profile-backend-config
+  commonSecret: customer-profile-backend-common-secret
+  localSecret: customer-profile-backend-local-secret
+  commercialSecret: customer-profile-backend-commercial-secret
+  logsPvc: customer-profile-logs
+  taskUploadsPvc: customer-profile-task-uploads
+  api: customer-profile-backend
+  service: customer-profile-backend
+  localWorker: customer-profile-worker
+  commercialWorker: customer-profile-worker-secondary
+  migrate: customer-profile-migrate
+
+image:
+  repository: registry.dfmc.com.cn/mhero-ai/customer-profile-backend
+  tag: arm64-latest
+  pullPolicy: Always
+
+# Non-sensitive settings rendered into a ConfigMap.
+config:
+  APP_ENV: prod
+  LOG_LEVEL: INFO
+  LOG_DIR: /app/logs
+  API_HOST: 0.0.0.0
+  API_PORT: "18008"
+  TASK_UPLOAD_DIR: /var/lib/customer-profile/task-uploads
+  WORKFLOW_PLATFORM: qingtian
+  QINGTIAN_BASE_URL: https://qingtian.dfmc.com.cn/api/proxy/api/v1
+  QINGTIAN_USER_ID: REPLACE_WITH_QINGTIAN_USER_ID
+  QINGTIAN_POLL_INTERVAL_MS: "2000"
+  QINGTIAN_POLL_TIMEOUT_MS: "2400000"
+  WORKER_POLL_INTERVAL_MS: "2000"
+  WORKER_TARGET_FAILURE_THRESHOLD: "3"
+  WORKER_TARGET_COOLDOWN_SECONDS: "60"
+  # Backward-safe for the legacy 1-local + 1-commercial Deployment pair.
+  # The multi-target overlay switches this to parallel.
+  WORKER_ROUTING_MODE: local_preferred
+  COMMERCIAL_QUEUE_THRESHOLD: "5"
+  COMMERCIAL_SPILLOVER_DELAY_SECONDS: "600"
+  TASK_QUEUE_MAX_WAITING: "500"
+  MYSQL_HOST: REPLACE_WITH_MYSQL_HOST
+  MYSQL_PORT: "3306"
+  MYSQL_DATABASE: customer_profile
+  MIGRATION_DB_WAIT_MAX_TRIES: "30"
+  MIGRATION_DB_WAIT_INTERVAL_MS: "2000"
+
+# Sensitive settings are split so the local and commercial AppKeys are never
+# injected into the wrong Worker. Production values must be supplied privately.
+secrets:
+  common:
+    MYSQL_USER: REPLACE_WITH_MYSQL_USER
+    MYSQL_PASSWORD: REPLACE_WITH_MYSQL_PASSWORD
+    QINGTIAN_INVITATION_STRATEGY_API_KEY: REPLACE_WITH_QINGTIAN_INVITATION_STRATEGY_API_KEY
+  local:
+    QINGTIAN_API_KEY_TEST: REPLACE_WITH_LOCAL_QINGTIAN_API_KEY_TEST
+    QINGTIAN_API_KEY_PRODUCTION: REPLACE_WITH_LOCAL_QINGTIAN_API_KEY_PRODUCTION
+  commercial:
+    QINGTIAN_API_KEY_TEST: REPLACE_WITH_COMMERCIAL_QINGTIAN_API_KEY_TEST
+    QINGTIAN_API_KEY_PRODUCTION: REPLACE_WITH_COMMERCIAL_QINGTIAN_API_KEY_PRODUCTION
+
+persistence:
+  logs:
+    enabled: true
+    existingClaim: customer-profile-logs
+    accessMode: ReadWriteMany
+    size: 10Gi
+    storageClassName: lke-arm-csi-nfs-prod
+    keep: true
+  taskUploads:
+    enabled: true
+    existingClaim: customer-profile-task-uploads
+    accessMode: ReadWriteOnce
+    size: 10Gi
+    storageClassName: lke-arm-csi-nfs-prod
+    keep: true
+
+retry:
+  # Legacy 1+1 mode cannot guarantee three distinct targets. The multi-target
+  # overlay switches this to throughput_first_v1.
+  policyVersion: local_first_v1
+  maxWorkflowAttempts: 3
+  maxPollRecoveries: 3
+  maxRunLifetimeSeconds: 7200
+
+# When non-empty, this target list replaces the legacy localWorker and
+# commercialWorker Deployments. Each referenced Secret contains only that
+# target's QINGTIAN_API_KEY_TEST / QINGTIAN_API_KEY_PRODUCTION values.
+#
+# Example production shape:
+# workflowTargets:
+#   - id: local-01
+#     name: customer-profile-worker-local-01
+#     pool: local
+#     revision: v1
+#     secretName: customer-profile-workflow-local-01
+#     mode: active
+#     replicas: 1
+#     concurrency: 5
+#     taskTypes: [customer_profile, invitation_strategy]
+#     workEnvs: [test, production]
+#     mountTaskUploads: true
+#     resources: {}
+#   - id: commercial-01
+#     name: customer-profile-worker-commercial-01
+#     pool: commercial
+#     revision: v1
+#     secretName: customer-profile-workflow-commercial-01
+#     mode: active
+#     replicas: 1
+#     concurrency: 5
+#     taskTypes: [customer_profile]
+#     workEnvs: [test, production]
+#     mountTaskUploads: false
+#     resources: {}
+workflowTargets: []
+
+api:
+  replicas: 1
+  imagePullPolicy: IfNotPresent
+  port: 18008
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests:
+      cpu: 100m
+      memory: 100Mi
+    limits:
+      cpu: 200m
+      memory: 250Mi
+
+localWorker:
+  replicas: 1
+  imagePullPolicy: Always
+  concurrency: 5
+  terminationGracePeriodSeconds: 60
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+
+commercialWorker:
+  replicas: 1
+  imagePullPolicy: Always
+  concurrency: 5
+  queueThreshold: 5
+  terminationGracePeriodSeconds: 60
+  mountTaskUploads: false
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+
+service:
+  type: ClusterIP
+  port: 18008
+
+migration:
+  enabled: true
+  imagePullPolicy: IfNotPresent
+  backoffLimit: 6
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests:
+      cpu: 100m
+      memory: 100Mi
+    limits:
+      cpu: 200m
+      memory: 250Mi

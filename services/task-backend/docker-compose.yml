@@ -1,0 +1,92 @@
+# All workers use one runtime contract; platform selects the HTTP adapter.
+x-app: &app
+  build: .
+  env_file:
+    - "${APP_ENV_FILE:-.env}"
+  volumes:
+    - ./logs:/app/logs
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  restart: unless-stopped
+
+x-worker: &worker
+  <<: *app
+  command: ["customer-profile-worker"]
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  stop_grace_period: 60s
+
+services:
+  migrate:
+    <<: *app
+    command: ["customer-profile-migrate"]
+    restart: "no"
+
+  api:
+    <<: *app
+    ports:
+      - "${HOST_API_PORT:-18008}:${API_PORT:-18008}"
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: "${API_PORT:-18008}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('API_PORT','18008')+'/ready',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    <<: *worker
+    environment:
+      WORKFLOW_PLATFORM: qingtian
+      # Preserve old pool/target identity for existing runs. Pool is not an admission policy.
+      WORKER_ROLE: local
+      WORKFLOW_TARGET_ID: "${QINGTIAN_WORKER_TARGET_ID:-local-default}"
+      WORKFLOW_TARGET_REVISION: "${QINGTIAN_WORKER_TARGET_REVISION:-${LOCAL_WORKFLOW_TARGET_REVISION:-v1}}"
+      WORKER_TARGET_MODE: "${QINGTIAN_WORKER_TARGET_MODE:-${LOCAL_WORKER_TARGET_MODE:-draining}}"
+      WORKER_TASK_TYPES: "${QINGTIAN_WORKER_TASK_TYPES:-customer_profile}"
+      WORKER_WORK_ENVS: "${QINGTIAN_WORKER_WORK_ENVS:-test,production}"
+      WORKER_CONCURRENCY: "${QINGTIAN_WORKER_CONCURRENCY:-${WORKER_CONCURRENCY:-1}}"
+
+  commercial-worker:
+    <<: *worker
+    environment:
+      WORKFLOW_PLATFORM: qingtian
+      WORKER_ROLE: commercial
+      WORKFLOW_TARGET_ID: "${COMMERCIAL_WORKER_TARGET_ID:-commercial-default}"
+      WORKFLOW_TARGET_REVISION: "${COMMERCIAL_WORKER_TARGET_REVISION:-${COMMERCIAL_1_WORKFLOW_TARGET_REVISION:-v1}}"
+      WORKER_TARGET_MODE: "${COMMERCIAL_WORKER_TARGET_MODE:-${COMMERCIAL_1_WORKER_TARGET_MODE:-draining}}"
+      WORKER_TASK_TYPES: "${COMMERCIAL_WORKER_TASK_TYPES:-customer_profile}"
+      WORKER_WORK_ENVS: "${COMMERCIAL_WORKER_WORK_ENVS:-test,production}"
+      WORKER_CONCURRENCY: "${COMMERCIAL_WORKER_CONCURRENCY:-1}"
+      QINGTIAN_API_KEY_TEST: "${QINGTIAN_COMMERCIAL_API_KEY_TEST:-}"
+      QINGTIAN_API_KEY_PRODUCTION: "${QINGTIAN_COMMERCIAL_API_KEY_PRODUCTION:-}"
+
+  profile-runner-worker:
+    <<: *worker
+    environment:
+      WORKFLOW_PLATFORM: runner
+      WORKER_ROLE: local
+      WORKFLOW_TARGET_ID: "${PROFILE_RUNNER_TARGET_ID:-profile-runner-production}"
+      WORKFLOW_TARGET_REVISION: "${PROFILE_RUNNER_TARGET_REVISION:-v1}"
+      WORKER_TASK_TYPES: "${PROFILE_RUNNER_TASK_TYPES:-customer_profile}"
+      WORKER_WORK_ENVS: "${PROFILE_RUNNER_WORK_ENVS:-production}"
+      WORKER_TARGET_MODE: "${PROFILE_RUNNER_TARGET_MODE:-active}"
+      WORKER_CONCURRENCY: "${PROFILE_RUNNER_CONCURRENCY:-5}"
+
+  invitation-runner-worker:
+    <<: *worker
+    profiles: ["invitation-runner"]
+    environment:
+      WORKFLOW_PLATFORM: invitation_runner
+      WORKER_ROLE: local
+      WORKFLOW_TARGET_ID: "${INVITATION_RUNNER_TARGET_ID:-invitation-runner-test}"
+      WORKFLOW_TARGET_REVISION: "${INVITATION_RUNNER_TARGET_REVISION:-v1}"
+      WORKER_TASK_TYPES: invitation_strategy
+      WORKER_WORK_ENVS: "${INVITATION_RUNNER_WORK_ENVS:-test}"
+      WORKER_TARGET_MODE: "${INVITATION_RUNNER_TARGET_MODE:-active}"
+      WORKER_CONCURRENCY: "${INVITATION_RUNNER_CONCURRENCY:-5}"
