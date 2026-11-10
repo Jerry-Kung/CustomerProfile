@@ -288,6 +288,14 @@ L2_REVIEW_TEMPLATE = template_name(L2_REVIEW)
 fact 必有锚点。**能代码判定的先由代码修**，只有代码判不了的语义问题才走这一次 LLM。"""
 
 LEVEL_ASSESS_TEMPLATE = template_name(LEVEL_ASSESS)
+
+
+INCREMENTAL_CTX = "incremental_ctx"
+"""增量上下文入参名（``incremental.context``）。
+
+**空串 = 非增量运行**，三处消费点（L1 输入、L2 合并、定级锚点）都按缺省值处理，
+产出与接入增量前**逐字节相同**。这条保证是 T3 子运行可比性的前提。
+"""
 """商机等级定级提示词：规范全文要点 + 全量记录 + 已定稿事实，输出结构化定级结论。"""
 
 
@@ -1048,6 +1056,11 @@ def build_records(history_body, channels_json, phone_number: str = "") -> dict:
                 "fetched_at": _fetched_at_of(latest),
                 "content": content,
                 "content_kind": content_kind,
+                # 身份键的两段（增量画像用）：过程资料的逻辑身份 ``source_key`` 与
+                # ``source_version``。基础渠道两者皆空，增量侧按「渠道 + 内容哈希」判。
+                # 放在记录上而不是让增量侧回查清单，是因为记录层是**唯一**的取数出口。
+                "source_key": str((latest or {}).get("source_key") or ""),
+                "source_version": (latest or {}).get("source_version"),
                 # 录音的**未标注**六字段原文。角色标注与勘误都可能出错，而正文一经改写
                 # 就无法回查，因此原文单独留一份（非录音渠道为空串）。
                 "content_raw": content_raw,
@@ -1101,6 +1114,8 @@ def _ontology_records(
                 "fetched_at": "",
                 "content": "",
                 "content_kind": spec["content_kind"],
+                "source_key": "",
+                "source_version": None,
                 "content_raw": "",
                 "role_lines": [],
                 "corrections": [],
@@ -1124,6 +1139,8 @@ def _ontology_records(
                 "fetched_at": _fetched_at_of(item),
                 "content": text,
                 "content_kind": spec["content_kind"],
+                "source_key": str(item.get("source_key") or ""),
+                "source_version": item.get("source_version"),
                 "content_raw": "",
                 "role_lines": [],
                 "corrections": [],
@@ -1669,7 +1686,54 @@ def l1_guide() -> str:
     return "\n\n".join(parts)
 
 
-def build_l1_input(records_json, kb_brief: str = "") -> dict:
+def _incremental_ctx(value: Any) -> dict[str, Any]:
+    """解析增量上下文；空串或坏值一律返回空上下文（非增量运行）。"""
+    from ..incremental import context as ictx
+
+    return ictx.loads(value)
+
+
+def _is_new_record(record: dict, ctx: dict[str, Any]) -> bool:
+    """这条记录是否属于本轮「新来的」那一批（增量模式下 L1 只看这些）。"""
+    from ..incremental import context as ictx
+
+    keys, logical = ictx.new_key_sets(ctx)
+    if not keys and not logical:
+        return True
+    from ..incremental.diff import logical_key, record_key
+
+    return record_key(record) in keys or logical_key(record) in logical
+
+
+def _settled_facts_block(ctx: dict[str, Any]) -> str:
+    """《上一版已定稿事实》——只给字段与取值，**不给证据与推理**。
+
+    用途只有一个：新记录与旧结论冲突时，让模型能明确标出「本条推翻某字段」。
+    措辞里写明它不得作为取证来源，否则模型会照抄清单当断言（``05`` 风险表已列）。
+
+    **在输入装配里拼接、不改模板**：模板属业务资产，任何正文改动都要单独确认；
+    这一段是「可选段」，拼接位置与其它约束同性质（记录正文之前）。
+    """
+    from ..incremental import context as ictx
+
+    facts = ictx.settled_facts(ctx)
+    if not facts:
+        return ""
+    lines = [f"- {key}：{value}" for key, value in sorted(facts.items())]
+    header = (
+        "## 上一版已定稿事实（只用于标注冲突，不得作为取证来源）"
+        "\n\n"
+        "下面这些结论在上一版画像里已经定稿，本轮没有新的记录支撑它们。"
+        "你的任务仍然只是从本次记录里提取事实；"
+        "只有当本次记录明确与某条旧结论冲突时，才在那条断言里加 "
+        '"supersedes": "<字段键>"'
+        " 标注推翻，其余情况不要复述清单里的取值。"
+        "\n\n"
+    )
+    return header + "\n".join(lines)
+
+
+def build_l1_input(records_json, kb_brief: str = "", incremental_ctx: Any = "") -> dict:
     """L1 取证层的输入装配：把有内容的渠道排成分节文本。
 
     ``kb_brief`` 是知识库渲染的《本方品牌与在售车型》（K3）。**缺省空串**——
@@ -1687,6 +1751,12 @@ def build_l1_input(records_json, kb_brief: str = "") -> dict:
     第三方预测）：长上下文里靠后的内容召回更低，把登记事实与录音原文前置。
     """
     records = _records_of(records_json)
+    ctx = _incremental_ctx(incremental_ctx)
+    incremental = bool(ctx.get("new_keys") or ctx.get("new_logical"))
+    if incremental:
+        # 增量：只看新记录。旧记录里的结论已经在底座上，让模型重读一遍既费 token，
+        # 又会把同一件事重新措辞一遍。
+        records = [r for r in records if _is_new_record(r, ctx)]
     usable = [r for r in records if r.get("status") == OK and (r.get("content") or "").strip()]
     # 按**来源档的优先级序号**排序，不能按档名排序：「firsthand」按字母序排在
     # 「registry」之前，用档名当键会把一手交互顶到人工登记前面。
@@ -1733,12 +1803,18 @@ def build_l1_input(records_json, kb_brief: str = "") -> dict:
         # 《本方品牌与在售车型》紧跟在字段清单之后、记录正文之前：
         # 它是「取值域」的约束，与《合法取值清单》同一性质，因此排在同类位置。
         guide = f"{guide}\n\n{kb_brief}"
+    settled = _settled_facts_block(ctx) if incremental else ""
+    if settled:
+        # 清单放在记录正文**之前**：与其它约束同性质，让记录原文仍是最后读到的内容。
+        guide = f"{guide}\n\n{settled}"
     output = f"{guide}\n\n---\n\n{body}" if body else guide
     return {
         "output": output,
         "section_count": len(sections),
         "chars": len(output),
         "guide_chars": len(guide),
+        "incremental": "true" if incremental else "false",
+        "new_record_count": len(usable) if incremental else 0,
     }
 
 
@@ -2138,7 +2214,9 @@ def _has_old_car(claims: list[dict]) -> bool:
     return False
 
 
-def inject_deterministic(records_json, claims_json, phone_number: str = "") -> dict:
+def inject_deterministic(
+    records_json, claims_json, phone_number: str = "", incremental_ctx: Any = ""
+) -> dict:
     """S1 · 确定性字段代码注入（v3.1 改造四，纯代码 0 token）。
 
     两个字段有**定义级**的确定取值，不该交给模型归纳：
@@ -2216,6 +2294,32 @@ def inject_deterministic(records_json, claims_json, phone_number: str = "") -> d
             replaced += 1
 
     payload = [by_attr[key] for key in order]
+
+    # ---- 增量：把本轮新断言与上一版底座合成一份账本（``01`` §6.2）
+    # 合并放在注入**之后**：注入值（手机号、驾照）同样是本轮结论，要参与时近性取舍。
+    # 非增量运行（上下文为空）时这一段整体跳过，输出与接入前逐字节相同。
+    ctx = _incremental_ctx(incremental_ctx)
+    merged = 0
+    retired = 0
+    merge_trace = "[]"
+    if ctx.get("base_fields"):
+        from ..incremental.merge import merge_claims
+
+        try:
+            outcome = merge_claims(
+                base_fields=ctx.get("base_fields") or [],
+                new_fields={"fields": payload},
+                current_rows=records,
+                base_updated_at=str(ctx.get("base_updated_at") or ""),
+                disabled_rules=_disabled_rule_ids(),
+            )
+            payload = _claims_payload(outcome["claims_json"])[0]
+            merged = int(outcome["base_count"])
+            retired = int(outcome["retired"])
+            merge_trace = outcome["rule_trace_json"]
+        except Exception:  # noqa: BLE001 —— 合并失败退回只跑新断言，不阻断运行
+            merged = 0
+
     return {
         "claims_json": json.dumps({"fields": payload}, ensure_ascii=False, default=str),
         "added": added,
@@ -2223,6 +2327,9 @@ def inject_deterministic(records_json, claims_json, phone_number: str = "") -> d
         "injected": len(injected),
         "license_injected": has_drive or has_old_car,
         "parse_ok": parse_ok,
+        "base_merged": merged,
+        "base_retired": retired,
+        "merge_rule_trace_json": merge_trace,
     }
 
 
@@ -3228,7 +3335,9 @@ def _level_record_sections(records: list[dict]) -> list[str]:
     return sections
 
 
-def build_level_input(records_json, facts_json="{}", claims_json="{}") -> dict:
+def build_level_input(
+    records_json, facts_json="{}", claims_json="{}", incremental_ctx: Any = ""
+) -> dict:
     """定级输入装配：业务阶段 + 已定稿事实 + **全部**客户原始记录。
 
     **为什么带上全部记录而不是只带事实表**：规范要求「尽可能详细地分析客户所有数据」
@@ -3250,9 +3359,19 @@ def build_level_input(records_json, facts_json="{}", claims_json="{}") -> dict:
         "【已定稿事实（中文名 → 取值）】",
         rdb.readable_facts(facts),
         "",
+    ]
+
+    # 增量：带上上一版等级与推理链，要求说明变更依据（``01`` §6.3）。
+    # 这一段只在增量运行时有内容；非增量运行的输入与接入前逐字节相同。
+    ctx = _incremental_ctx(incremental_ctx)
+    previous = str(ctx.get("previous_level") or "").strip()
+    if previous:
+        payload.extend(_previous_level_block(ctx, previous))
+
+    payload.extend([
         "【客户原始信息记录（按来源分节）】",
         body or "（无可用记录）",
-    ]
+    ])
     output = "\n".join(payload)
     return {
         "output": output,
@@ -3260,7 +3379,37 @@ def build_level_input(records_json, facts_json="{}", claims_json="{}") -> dict:
         "stage_label": stage["stage_label"],
         "section_count": len(sections),
         "chars": len(output),
+        "incremental": "true" if previous else "false",
     }
+
+
+def _previous_level_block(ctx: dict[str, Any], previous: str) -> list[str]:
+    """《上一版等级与推理链》：只用于让模型说明「这次为什么变」，不得直接沿用。"""
+    detail_raw = ctx.get("previous_level_detail") or ""
+    summary = ""
+    steps: list[str] = []
+    try:
+        detail = json.loads(detail_raw) if isinstance(detail_raw, str) else detail_raw
+    except ValueError:
+        detail = {}
+    if isinstance(detail, dict):
+        summary = str(detail.get("summary") or "").strip()
+        steps = [str(item).strip() for item in (detail.get("steps") or []) if str(item).strip()]
+    lines = [
+        "",
+        "【上一版等级与推理链（只用于说明本次为何变化，不得直接照抄）】",
+        f"- 上一版等级：{previous}",
+    ]
+    if summary:
+        lines.append(f"- 上一版结论：{summary}")
+    for step in steps[:8]:
+        lines.append(f"- 依据：{step}")
+    lines.append(
+        "请按**本次的原始记录**重新判断。若等级与上一版不同，请在 steps 里写明"
+        "是哪一条新记录导致的改变；若证据不足以支撑变化，请维持上一版等级。"
+    )
+    lines.append("")
+    return lines
 
 
 LEVEL_STEP_LIMIT = 8
@@ -3294,7 +3443,9 @@ def _as_list(value) -> list:
     return []
 
 
-def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
+def apply_level(
+    records_json, facts_json, assess_json, stage="", incremental_ctx: Any = ""
+) -> dict:
     """定级收口（纯代码，0 token）：把模型结论变成可回传的 facts。
 
     三道收口，每道都对应规范里一条可机器判定的硬规则：
@@ -3417,6 +3568,29 @@ def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
         "confidence": round(confidence, 2),
     }
 
+    # rule: RECENT-03 等级变化必须锚定本轮新增记录
+    # ---- 4 增量守卫：没有新证据支撑的改判回退上一版
+    ctx = _incremental_ctx(incremental_ctx)
+    reverted = ""
+    previous = str(ctx.get("previous_level") or "").strip()
+    if previous:
+        from ..rules.clusters import recency as recency_rules
+
+        guard = recency_rules.guard_level(
+            level=level,
+            previous_level=previous,
+            stage=stage_code,
+            previous_stage=stage_code,
+            evidence=all_evidence + steps,
+            new_record_text=_new_record_text(records_json, ctx),
+            disabled=_disabled_rule_ids(),
+        )
+        if guard["level"] != level:
+            reverted = guard["reverted"]
+            detail["steps"] = steps[:LEVEL_STEP_LIMIT]
+            level = guard["level"]
+            facts["deal_level_detail"] = detail
+
     facts["deal_level"] = level
     facts["deal_level_detail"] = detail
     facts["business_opp_stage"] = LEVEL_STAGE_LABEL[stage_code]
@@ -3429,7 +3603,20 @@ def apply_level(records_json, facts_json, assess_json, stage="") -> dict:
         "rule_clamped": clamped,
         "evidence_fragments_removed": removed,
         "parse_ok": True,
+        "level_reverted": reverted,
     }
+
+
+def _new_record_text(records_json, ctx: dict[str, Any]) -> str:
+    """本轮**新增**记录的正文拼接。等级守卫据此判断改判有没有新证据。"""
+    if not (ctx.get("new_keys") or ctx.get("new_logical")):
+        return ""
+    parts = [
+        str(record.get("content") or "")
+        for record in _records_of(records_json)
+        if _is_new_record(record, ctx)
+    ]
+    return "\n".join(part for part in parts if part)
 
 
 def _tool(
@@ -3536,9 +3723,14 @@ WORKFLOW = WorkflowDef(
             START,
             "用户输入",
             "start",
-            variables=("phone_number", "batch_id"),
+            variables=("phone_number", "batch_id", "incremental_ctx"),
             required_phone_number=True,
             required_batch_id=False,
+            # 增量上下文：空串即非增量运行，产出与接入前逐字节相同。
+            # ``defaults`` 是必须的：start 节点只把「传进来的或声明了默认值的」变量
+            # 透出为输出，缺了它下游绑定会报「未产出字段 incremental_ctx」。
+            required_incremental_ctx=False,
+            defaults={"incremental_ctx": ""},
         ),
         make_node(
             HISTORY_HTTP,
@@ -3722,8 +3914,10 @@ WORKFLOW = WorkflowDef(
             inputs={
                 "records_json": (L0_RECORDS, "records_json"),
                 "kb_brief": (KB_BRIEF, "output"),
+                "incremental_ctx": (START, INCREMENTAL_CTX),
             },
-            outputs=("output", "section_count", "chars", "guide_chars"),
+            outputs=("output", "section_count", "chars", "guide_chars",
+                     "incremental", "new_record_count"),
             function=f"customer_profile.workflows.{SLUG}:build_l1_input",
         ),
         # ---- 1a 事实提取层：只聚焦「全 / 准 / 事实（高置信推断）」，输出 JSONL
@@ -3818,6 +4012,7 @@ WORKFLOW = WorkflowDef(
                 "records_json": (L0_RECORDS, "records_json"),
                 "claims_json": (L1_LOCALIZE, "claims_json"),
                 "phone_number": (START, "phone_number"),
+                "incremental_ctx": (START, INCREMENTAL_CTX),
             },
             outputs=(
                 "claims_json",
@@ -3826,6 +4021,10 @@ WORKFLOW = WorkflowDef(
                 "injected",
                 "license_injected",
                 "parse_ok",
+                # 增量合并账本的留痕（非增量运行时为空/零）。
+                "base_merged",
+                "base_retired",
+                "merge_rule_trace_json",
             ),
             function=f"customer_profile.workflows.{SLUG}:inject_deterministic",
         ),
@@ -4029,8 +4228,10 @@ WORKFLOW = WorkflowDef(
             inputs={
                 "records_json": (L0_RECORDS, "records_json"),
                 "facts_json": (L2_ENUM_MAP, "facts_json"),
+                "incremental_ctx": (START, INCREMENTAL_CTX),
             },
-            outputs=("output", "stage", "stage_label", "section_count", "chars"),
+            outputs=("output", "stage", "stage_label", "section_count", "chars",
+                     "incremental"),
             function=f"customer_profile.workflows.{SLUG}:build_level_input",
         ),
         make_node(
@@ -4055,6 +4256,7 @@ WORKFLOW = WorkflowDef(
                 "facts_json": (L2_ENUM_MAP, "facts_json"),
                 "assess_json": (LEVEL_ASSESS, "result"),
                 "stage": (LEVEL_INPUT, "stage"),
+                "incremental_ctx": (START, INCREMENTAL_CTX),
             },
             outputs=(
                 "facts_json",
@@ -4064,6 +4266,8 @@ WORKFLOW = WorkflowDef(
                 "rule_clamped",
                 "evidence_fragments_removed",
                 "parse_ok",
+                # RECENT-03：等级/阶段被守卫回退时的理由（非增量运行为空串）。
+                "level_reverted",
             ),
             function=f"customer_profile.workflows.{SLUG}:apply_level",
         ),
@@ -4088,6 +4292,8 @@ WORKFLOW = WorkflowDef(
                 "basis_json": (RULE_APPLY, "basis_json"),
                 "notes_updates_json": (RULE_APPLY, "notes_updates_json"),
                 "claims_json": (L1_INJECT, "claims_json"),
+                # 增量上下文：L3 据此判断「事实没变就不重写」，直接复用上一版板块。
+                "incremental_ctx": (START, INCREMENTAL_CTX),
             },
             outputs=("result1", "section_count", "sections_missing",
                      "sections_hoisted", "new_fact_suspects", "suspects_json"),
@@ -4100,6 +4306,7 @@ WORKFLOW = WorkflowDef(
                     "basis_json": "basis_json",
                     "notes_updates_json": "notes_updates_json",
                     "claims_json": "claims_json",
+                    "incremental_ctx": "incremental_ctx",
                 },
             },
         ),

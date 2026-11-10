@@ -35,6 +35,23 @@ ENTRY_WORKFLOW_ID = "customer_profile_pipeline"
 只改前端会让手机号校验静默失效。
 """
 
+INCREMENTAL_WORKFLOW_ID = "customer_profile_incremental"
+"""增量画像入口（``INCREMENTAL_ENABLED=true`` 时生效）。
+
+**前后端必须同改**：前端提交页从 ``GET /runtime`` 读当前入口，本模块决定入参校验与
+入站接口认哪个 ID。只改一侧会让手机号校验或批次号补全静默失效。
+"""
+
+ENTRY_WORKFLOWS = frozenset({ENTRY_WORKFLOW_ID, INCREMENTAL_WORKFLOW_ID})
+"""两个主入口共用同一套入参契约（``phone_number`` 必填、``batch_id`` 可选）。"""
+
+
+def entry_workflow_id(settings: Any = None) -> str:
+    """当前生效的主入口 ID。开关关闭时与接入增量前逐字节一致。"""
+    settings = settings or get_settings()
+    return INCREMENTAL_WORKFLOW_ID if getattr(settings, "incremental_enabled", False) else ENTRY_WORKFLOW_ID
+
+
 DEFAULT_BATCH_ID = "batch_001"
 """主入口未传 ``batch_id`` 时补的缺省批次号。
 
@@ -62,7 +79,7 @@ def _validate_entry_inputs(workflow_id: str, inputs: Mapping[str, Any]) -> None:
     只校验主入口：其它工作流（如 ``evidence_subagent``、录音类）的入参契约不同，
     在这里一并约束会把它们的合法调用挡掉。
     """
-    if workflow_id != ENTRY_WORKFLOW_ID:
+    if workflow_id not in ENTRY_WORKFLOWS:
         return
     phone = inputs.get("phone_number")
     if phone is None:
@@ -257,6 +274,11 @@ def create_app(service_factory: Any = None) -> FastAPI:
         quota = service.quota.snapshot() if service.quota is not None else {}
         return {
             "replay_mode": settings.replay_mode,
+            # 入口与增量开关原样报：前端据此决定提交页写哪个 workflow_id。
+            # 这是唯一一处让前后端入口常量不各写一份的地方。
+            "entry_workflow_id": entry_workflow_id(settings),
+            "incremental_enabled": bool(settings.incremental_enabled),
+            "baseline_enabled": bool(settings.baseline_enabled),
             "writeback_enabled": settings.writeback_enabled,
             "llm_model": settings.llm_model,
             # 配额：只报开关与剩余额度，不含任何凭据。
@@ -394,7 +416,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
         """
         service = get_service()
         inputs = dict(payload.inputs)
-        if payload.workflow_id == ENTRY_WORKFLOW_ID and not str(inputs.get("batch_id") or "").strip():
+        if payload.workflow_id in ENTRY_WORKFLOWS and not str(inputs.get("batch_id") or "").strip():
             # 未传或传空白：补缺省批次号。见 DEFAULT_BATCH_ID 的说明——
             # 不补的话运行会在下游节点 KeyError，而调用方拿到的是 200。
             inputs["batch_id"] = DEFAULT_BATCH_ID

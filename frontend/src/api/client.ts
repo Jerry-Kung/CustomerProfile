@@ -56,6 +56,16 @@ export interface NodeExecution {
   duration_ms: number | null
   sub_run_id: string | null
   attempt_count: number
+  /**
+   * 节点输出被切片过（`low` 留痕档）。为空表示库里/包里是完整输出。
+   *
+   * 只在读包回填时出现；载荷还在库里的运行（`in_db`）没有这个字段。
+   */
+  payload_truncated?: string | null
+  /** 切片前的输出键个数。与上一字段一起回答「是被裁了还是本来就没有」。 */
+  outputs_truncated_from?: number | null
+  /** 载荷标记为已打包但包读不到：节点为空是「证据缺失」，不是「没有产出」。 */
+  payload_missing?: boolean
 }
 
 /**
@@ -72,6 +82,10 @@ export interface RunDetailPayload extends RunSummary {
   outputs: Record<string, unknown>
   definition_version_id: number | null
   child_run_ids: string[]
+  /** 运行时数据在哪：`in_db` / `packed`（在包里）/ `purged`（已清理）。 */
+  payload_state?: string | null
+  /** 标记为 packed 但包读不到。为真时节点为空表示「证据缺失」。 */
+  payload_missing?: boolean
 }
 
 /** 图中的一条边。`source_handle` 保留分支名（`true` / `false` / `source`）。 */
@@ -149,6 +163,12 @@ export interface SubmitResult {
 /** 当前运行态。**只有配置，没有凭据**——三个 API Key 一律不在此。 */
 export interface RuntimeInfo {
   replay_mode: 'off' | 'fixture' | string
+  /** 当前生效的主入口。增量开关打开时是 `customer_profile_incremental`。 */
+  entry_workflow_id?: string
+  /** 增量入口是否启用。提交页据此展示入口名，不再自己写一份常量。 */
+  incremental_enabled?: boolean
+  /** 是否写回传体基线。关闭时不写，入口仍可跑（每轮全量）。 */
+  baseline_enabled?: boolean
   /** 回写开关。false 时回写节点只产出「已跳过」的结果，运行仍可能 succeeded。 */
   writeback_enabled: boolean
   llm_model: string

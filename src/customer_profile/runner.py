@@ -503,6 +503,16 @@ async def build_service(
     runtime.extra["code_functions"]["customer_profile.workflows.invitation:confirm_delivery"] = partial(
         confirm_delivery, http=http_client, settings=settings,
     )
+    # 增量入口的两个 code 节点需要 Store（读基线、写基线）。注入方式与 checker 同形：
+    # code 节点拿不到 NodeRuntime，只能走 rt.extra["code_functions"]。
+    # 基线关闭或没有存储时传 None——节点自己会退回「无基线 → T3」，不会报错。
+    from .incremental import nodes as incremental_nodes
+
+    baseline_store = store if (settings.baseline_enabled or settings.incremental_enabled) else None
+    for func in (incremental_nodes.incremental_dispatch, incremental_nodes.baseline_commit):
+        runtime.extra["code_functions"][
+            f"customer_profile.incremental.nodes:{func.__name__}"
+        ] = partial(func, store=baseline_store)
     registry = build_default_registry()
 
     definitions, issues = _load_definitions()

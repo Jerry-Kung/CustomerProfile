@@ -645,6 +645,8 @@ class Store:
                 node["outputs_json"] = item.get("outputs_json")
                 if item.get("payload_truncated"):
                     node["payload_truncated"] = item["payload_truncated"]
+                if item.get("outputs_truncated_from") is not None:
+                    node["outputs_truncated_from"] = item["outputs_truncated_from"]
             packed_attempts = attempts_by_run.get(run_id, {})
             for attempt in run.get("attempts") or []:
                 item = packed_attempts.get(attempt.get("attempt_id"))
@@ -1262,6 +1264,8 @@ class Store:
                 node["outputs_json"] = item.get("outputs_json")
                 if item.get("payload_truncated"):
                     node["payload_truncated"] = item["payload_truncated"]
+                if item.get("outputs_truncated_from") is not None:
+                    node["outputs_truncated_from"] = item["outputs_truncated_from"]
             if missing:
                 for node in nodes:
                     node["payload_missing"] = True

@@ -104,22 +104,28 @@ def _resolve_source(value: str) -> Path:
     return (BATCH_ROOT / value).resolve()
 
 
-def case_dirs(source: Path, phones: Sequence[str]) -> dict[str, Path]:
-    """号码 → 运行目录。同号码有多次运行时取**第一份**。
+def case_dirs(
+    source: Path, phones: Sequence[str], run_index: int = 0
+) -> dict[str, Path]:
+    """号码 → 运行目录。同号码有多次运行时缺省取**第一份**。
 
     归档里 ``13207117251__run2`` 两次运行读到的画像不同（第一次写过库），
     取第一份与 ``compare_batches.py`` 的口径一致，两边才对得上。
+
+    ``run_index`` 取该号码的第 N 次运行（0 起）：增量序列要的是「同一客户的第几轮」，
+    固定取第一份会让每个时点都跑成同一份输入。
     """
     runs = source / "runs"
-    picked: dict[str, Path] = {}
+    by_phone: dict[str, list[Path]] = {}
     for entry in sorted(runs.iterdir()):
         if not entry.is_dir():
             continue
-        phone = entry.name.split("__")[0]
-        if phone in picked:
-            continue
-        if phone in phones:
-            picked[phone] = entry
+        by_phone.setdefault(entry.name.split("__")[0], []).append(entry)
+    picked: dict[str, Path] = {}
+    for phone in phones:
+        entries = by_phone.get(phone) or []
+        if len(entries) > run_index:
+            picked[phone] = entries[run_index]
     return picked
 
 
@@ -356,7 +362,7 @@ async def run(args: argparse.Namespace) -> int:
     if args.limit:
         phones = phones[: args.limit]
 
-    cases = case_dirs(source, phones)
+    cases = case_dirs(source, phones, args.run_index)
     missing = [phone for phone in phones if phone not in cases]
     if missing:
         raise SystemExit(f"归档里找不到这些号码的运行目录：{missing}")
@@ -503,6 +509,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--batch-id", default=None, help="新批次目录名（缺省 <source>-replay）")
     parser.add_argument("--only", default=None, help="只跑这些号码，逗号分隔")
     parser.add_argument("--limit", type=int, default=0, help="只取清单前 N 个号码")
+    parser.add_argument(
+        "--run-index",
+        type=int,
+        default=0,
+        help="同号码的多次运行里取第几次（0 起，缺省第一份）",
+    )
     parser.add_argument("--concurrency", type=int, default=2, help="并发数（缺省 2）")
     parser.add_argument(
         "--per-phone-timeout", type=float, default=3600.0, help="单号码超时秒数"

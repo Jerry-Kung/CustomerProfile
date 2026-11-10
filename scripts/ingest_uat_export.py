@@ -378,6 +378,9 @@ def ingest(export_path: Path, out_dir: Path, archive: Path | None,
     batch_id = batch_id or out_dir.name
 
     tasks = sorted(root_tasks, key=lambda item: item["root_run"]["started_at_ms"])
+    root_workflows: Counter[str] = Counter(
+        str(task["root_run"].get("workflow_id") or "") for task in tasks
+    )
     seen: Counter[str] = Counter()
     cases: list[dict[str, Any]] = []
     all_nodes: list[dict] = []
@@ -495,7 +498,12 @@ def ingest(export_path: Path, out_dir: Path, archive: Path | None,
             "export_completed_at": manifest_in.get("export_completed_at"),
             "credential_fields": "redacted",
         },
-        "workflow_id": "customer_profile_pipeline",
+        # 与 `ingest_trace_export.py` 同口径：从根运行取，不写死。增量入口导出的批次
+        # 若标成 pipeline，README 与 manifest 会把来源说错，而数据本身是对的。
+        "workflow_id": (
+            next(iter(root_workflows)) if len(root_workflows) == 1 else ""
+        ),
+        "workflow_ids": dict(root_workflows.most_common()),
         "code_commit": None,
         "phones_source": "本批次自身（导出内根运行的 business_ref）",
         "phones_count": len(phones),

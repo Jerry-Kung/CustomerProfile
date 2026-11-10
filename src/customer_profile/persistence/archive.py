@@ -40,12 +40,87 @@ DIAGNOSTIC_FIELDS: tuple[str, ...] = (
     "unbacked_fact",
     "placeholder_removed",
 )
-"""``low`` 档唯一保留的节点输出键。
+"""``low`` 档在所有节点上保留的节点输出键。
 
 **集中在常量里，不散落到裁剪逻辑**——这份清单就是「``low`` 还能回答什么」的定义，
 分散之后没有人能一眼看出某个键是被刻意排除还是漏掉了。
 
 ``callback_json`` 明确不收：它与根运行输出逐字节相同，留它是纯冗余。
+"""
+
+NODE_DIAGNOSTIC_FIELDS: Mapping[str, tuple[str, ...]] = {
+    "incremental_dispatch": (
+        "tier",
+        "tier_label",
+        "tier_reason",
+        "baseline_found",
+        "compat_ok",
+        "added_count",
+        "removed_count",
+        "unchanged_count",
+        "touched_channels",
+        "stage",
+        "previous_level",
+        "previous_level_detail",
+        "compat_key",
+        "adapt_error",
+        "history_records",
+        "base_stats_json",
+    ),
+    "incremental_tier_branch": ("tier",),
+    "incremental_baseline_commit": (
+        "baseline_saved",
+        "baseline_error",
+        "baseline_keys",
+        "baseline_tier",
+    ),
+    "pipeline_l1_input": (
+        "new_record_count",
+        "incremental",
+        "chars",
+        "guide_chars",
+        "section_count",
+    ),
+    "pipeline_l1_inject": (
+        "base_merged",
+        "base_retired",
+        "added",
+        "replaced",
+        "injected",
+        "license_injected",
+        "parse_ok",
+        "merge_rule_trace_json",
+    ),
+    "l3_skip_express": ("skip", "reason"),
+    "pipeline_level_apply": (
+        "level",
+        "level_detail_json",
+        "level_reverted",
+        "stage",
+        "rule_clamped",
+        "evidence_fragments_removed",
+        "parse_ok",
+    ),
+}
+"""``low`` 档**按节点**额外保留的键，与 :data:`DIAGNOSTIC_FIELDS` 取并集。
+
+**为什么按节点而不是加进全局清单**：``tier``、``stage``、``reason``、``parse_ok`` 这类
+短键在别的节点上也存在，但语义不同（``pipeline_l2_project`` 的 ``tier`` 是证据档位，
+不是增量档位）。全局清单只能表达「任何节点上都有诊断意义的键」；增量证据是「只有这个
+节点才有」的，混进全局清单会让全量路径的节点莫名其妙多留几个键，也说不出为什么。
+
+**这份清单的准入标准**：参与回答「这次为什么走这一档、底座补了多少、基线写没写成功、
+表达跳过命中没有、等级为什么变」这五个问题，且**单案体积 << 1 KB**。刻意排除的大键：
+
+- ``incremental_dispatch.incremental_ctx``（实测 25 KB）——它是喂给 L1 的上下文，
+  由 ``base_stats_json`` 与入参可复核；
+- ``incremental_dispatch.callback_json``（实测 9 KB）——与根运行输出逐字节相同；
+- ``pipeline_l1_input.output``（实测 32 KB）——拼好的提示词正文；
+- ``pipeline_l1_inject.claims_json``（实测 20 KB）——L1 账本全量，``facts_json`` 已定稿；
+- ``l3_skip_express.sections_json``——命中跳过时是九个板块全文，体积无上界。
+
+``PACKAGE_VERSION`` **不因这份清单而升版**：包的形状（manifest 与节点对象的结构）没变，
+变的是切片内容。读侧按键取值，旧包缺这些键时读回空，不需要也不应该让存量包失效。
 """
 
 REPEATED_INPUT_KEYS: frozenset[str] = frozenset({"customer_data"})
@@ -192,11 +267,16 @@ def _strip_repeated_inputs(inputs: Any) -> Any:
     return kept
 
 
-def _slice_outputs(outputs: Any) -> dict[str, Any]:
-    """``low`` 档的节点输出：只留诊断字段。"""
+def _slice_outputs(outputs: Any, node_id: str = "") -> dict[str, Any]:
+    """``low`` 档的节点输出：只留诊断字段。
+
+    全局清单与节点专属清单取并集。节点专属的键**只在这个节点上**保留——同名短键在
+    别的节点上语义不同（见 :data:`NODE_DIAGNOSTIC_FIELDS`）。
+    """
     if not isinstance(outputs, dict):
         return {}
-    return {key: outputs[key] for key in DIAGNOSTIC_FIELDS if key in outputs}
+    keep = DIAGNOSTIC_FIELDS + NODE_DIAGNOSTIC_FIELDS.get(node_id, ())
+    return {key: outputs[key] for key in keep if key in outputs}
 
 
 def build_package(
@@ -241,8 +321,14 @@ def build_package(
                 # 原样输入不进切片：它是「当时喂进去的是什么」的唯一副本。
                 item["outputs_json"] = _externalize(outputs, index, media_stats)
             elif mode == "low":
-                item["outputs_json"] = _slice_outputs(outputs)
+                sliced = _slice_outputs(outputs, str(item.get("node_id") or ""))
+                item["outputs_json"] = sliced
                 item["payload_truncated"] = "low"
+                # 留下「这个节点本来有几个键」。切片之后只剩一两个键时，
+                # 读的人分不清是「节点就只有这些产出」还是「被裁掉了」。
+                item["outputs_truncated_from"] = (
+                    len(outputs) if isinstance(outputs, dict) else 0
+                )
             else:
                 item["outputs_json"] = _externalize(outputs, index, media_stats)
             item["inputs_json"] = _externalize(

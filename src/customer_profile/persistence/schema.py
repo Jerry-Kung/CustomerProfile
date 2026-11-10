@@ -132,6 +132,19 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS idx_attempts_run ON request_attempts (run_id, node_id)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS profile_baselines (
+        phone             TEXT PRIMARY KEY,
+        compat_key        TEXT NOT NULL DEFAULT '',
+        source_run_id     TEXT,
+        updated_at_ms     INTEGER NOT NULL,
+        stage             TEXT NOT NULL DEFAULT '',
+        deal_level        TEXT NOT NULL DEFAULT '',
+        deal_level_detail TEXT NOT NULL DEFAULT '',
+        consumed_keys_json TEXT NOT NULL DEFAULT '[]',
+        callback_json     TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
 )
 
 

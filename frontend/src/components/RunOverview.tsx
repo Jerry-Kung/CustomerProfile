@@ -75,6 +75,27 @@ export function RunOverview({
   const blockedCount = tally('blocked') + tally('failed')
 
   const hasResult = detail !== null && Object.keys(detail.outputs ?? {}).length > 0
+  // 增量入口的档位留痕：调度判定节点把档位、差分计数与兼容键比对结果都写在出参里。
+  // 销售问「这次为什么没变」只能从这里回答（档位与差分不回传、只留在运行台）。
+  const dispatch = executions.find(
+    (item) => item.node_id === 'incremental_dispatch' && item.outputs_json,
+  )
+  const tier = dispatch ? String(dispatch.outputs_json?.tier ?? '') : ''
+  const tierReason = dispatch ? String(dispatch.outputs_json?.tier_reason ?? '') : ''
+  // 留痕载荷的完整度。三种状态都会让节点看起来「没有产出」，必须说清楚是哪一种：
+  //   - packed + 节点被切片：low 档，只有诊断字段；
+  //   - purged / 包读不到：运行时数据已经不在；
+  //   - in_db：完整，不提示。
+  // 切片是逐节点的，运行级没有单独的 mode 字段，因此从节点行上判定。
+  const slicedCount = executions.filter((item) => item.payload_truncated).length
+  const payloadState = detail?.payload_state ?? null
+  const payloadNote = detail?.payload_missing
+    ? '本次运行的留痕包找不到，节点与请求的运行时数据无法显示。这不是「节点没有产出」，是证据丢失。'
+    : payloadState === 'purged'
+      ? '本次运行的运行时数据已过保留期被清理，只剩状态与错误信息。'
+      : slicedCount > 0
+        ? `本次运行以 low 档留痕：${slicedCount} 个节点的输出只保留诊断字段，其余字段是「被裁掉」而不是「没有产出」。`
+        : ''
   // 工作流的 `display_name` 也可能带开发期前缀（实测「（新）客户初始画像（生产环境）」），
   // 与节点标题用同一套清洗，否则标题行还留着一个只有内部人才看得懂的标记。
   const name = displayTitle(displayName, run.workflow_id)
@@ -96,6 +117,7 @@ export function RunOverview({
             {labelOf(RUN_STATUS_LABEL, run.status)}
           </span>
           {run.is_replay ? <span className="tag-plain">回放</span> : null}
+          {tier ? <span className="tag-plain">档位 {tier}</span> : null}
         </div>
 
         <div className="overview-actions">
@@ -153,6 +175,10 @@ export function RunOverview({
         ) : null}
       </dl>
 
+      {payloadNote ? (
+        <p className="overview-payload-note tone-warn">{payloadNote}</p>
+      ) : null}
+
       <div className={`overview-banner tone-${runStatusTone(run.status)}`}>
         <div className="overview-banner-main">
           <p className="overview-banner-title">
@@ -169,6 +195,9 @@ export function RunOverview({
               .filter(Boolean)
               .join(' · ')}
           </p>
+          {tierReason ? (
+            <p className="overview-banner-facts">增量判定：{tierReason}</p>
+          ) : null}
         </div>
         {run.error ? <p className="overview-banner-error">{run.error}</p> : null}
       </div>

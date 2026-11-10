@@ -374,7 +374,46 @@ REGISTRY_CHANNELS: frozenset[str] = hard_rules.REGISTRY_CHANNELS
 # ====================================================================
 
 
-def assemble_l3(phone: str, batch_id: str, facts_json, notes_updates_json, express_json) -> dict:
+SKIP = "l3_skip_express"
+"""增量表达跳过判定的节点 ID（``01`` §6.4）。"""
+
+
+def _ctx(value: Any) -> dict:
+    from ..incremental import context as ictx
+
+    return ictx.loads(value)
+
+
+def decide_express(facts_json="{}", incremental_ctx: Any = "") -> dict:
+    """事实没变就不重写（``01`` §6.4）：零 LLM，直接复用上一版的九个板块。
+
+    判据只有一条——**合并后的 facts 与上一版 facts 逐字节相同**。facts 是投影层定稿的
+    字段表，它变了才意味着卡片上该写的东西变了；证据措辞变了而取值没变，不值得重写。
+    """
+    from ..incremental.base_claims import base_facts_signature
+
+    ctx = _ctx(incremental_ctx)
+    base_sig = str(ctx.get("base_facts_sig") or "")
+    sections = ctx.get("base_sections") or {}
+    if not base_sig or not isinstance(sections, dict) or not sections:
+        return {"skip": "false", "sections_json": "{}", "reason": "无上一版板块可比"}
+
+    facts = _payload(facts_json)
+    if not isinstance(facts, dict):
+        facts = {}
+    if base_facts_signature(facts) != base_sig:
+        return {"skip": "false", "sections_json": "{}", "reason": "事实有变化"}
+    return {
+        "skip": "true",
+        "sections_json": json.dumps(sections, ensure_ascii=False, default=str),
+        "reason": "事实与上一版逐字节相同",
+    }
+
+
+def assemble_l3(
+    phone: str, batch_id: str, facts_json, notes_updates_json, express_json,
+    incremental_ctx: Any = "", reused_sections_json="{}",
+) -> dict:
     """把表达层的 9 个 section 与 Notes 装成 ``result1``（与基线同形）。
 
     **同源检查在这里做**：表达层是 LLM，它可以润色，但不得引入 ``facts`` 之外的事实。
@@ -398,6 +437,11 @@ def assemble_l3(phone: str, batch_id: str, facts_json, notes_updates_json, expre
     sections = _payload(express_json)
     if isinstance(sections, dict):
         sections = sections.get("analysis_result", sections)
+    if not isinstance(sections, dict) or not sections:
+        # 增量跳过路径：表达层没跑，直接复用上一版的九个板块。
+        reused = _payload(reused_sections_json)
+        if isinstance(reused, dict) and reused:
+            sections = dict(reused)
 
     analysis_result: dict[str, Any] = {}
     if isinstance(sections, dict):
@@ -591,7 +635,10 @@ WORKFLOW: WorkflowDef = WorkflowDef(
                 "basis_json",
                 "notes_updates_json",
                 "claims_json",
+                "incremental_ctx",
             ),
+            required_incremental_ctx=False,
+            defaults={"incremental_ctx": ""},
             required_phone=True,
             required_facts_json=True,
             required_notes_updates_json=True,
@@ -635,6 +682,19 @@ WORKFLOW: WorkflowDef = WorkflowDef(
             ),
             function=f"customer_profile.workflows.{SLUG}:validate_l3",
         ),
+        # ---- 增量跳过判定（纯代码，0 token）：事实没变就不写
+        make_node(
+            SKIP,
+            "增量表达跳过判定",
+            "code",
+            after=(VALIDATE,),
+            inputs={
+                "facts_json": (VALIDATE, "facts_json"),
+                "incremental_ctx": (START, "incremental_ctx"),
+            },
+            outputs=("skip", "sections_json", "reason"),
+            function=f"customer_profile.workflows.{SLUG}:decide_express",
+        ),
         # ---- 表达（1 次 LLM）
         make_node(
             EXPRESS,
@@ -663,13 +723,15 @@ WORKFLOW: WorkflowDef = WorkflowDef(
             ASSEMBLE,
             "L3 装配",
             "code",
-            after=(EXPRESS,),
+            after=(EXPRESS, SKIP),
             inputs={
                 "phone": (START, "phone"),
                 "batch_id": (START, "batch_id"),
                 "facts_json": (VALIDATE, "facts_json"),
                 "notes_updates_json": (START, "notes_updates_json"),
                 "express_json": (EXPRESS, "result"),
+                "incremental_ctx": (START, "incremental_ctx"),
+                "reused_sections_json": (SKIP, "sections_json"),
             },
             outputs=("result1", "section_count", "sections_missing",
                      "sections_hoisted", "new_fact_suspects", "suspects_json"),
@@ -694,6 +756,7 @@ WORKFLOW: WorkflowDef = WorkflowDef(
 CODE_SPECS: dict[str, dict] = {
     VALIDATE: {"main": "validate_l3", "renames": {}},
     INVITE_STRATEGY: {"main": "build_invite_strategy", "renames": {}},
+    SKIP: {"main": "decide_express", "renames": {}},
     ASSEMBLE: {"main": "assemble_l3", "renames": {}},
 }
 

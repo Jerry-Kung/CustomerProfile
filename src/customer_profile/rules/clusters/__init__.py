@@ -26,6 +26,7 @@ CLUSTER_MODULES: tuple[str, ...] = (
     "expression",
     "spec",
     "knowledge",
+    "recency",
 )
 """已启用的簇模块名（相对本包）。顺序即同级动作的次级排序键，一经定下不轻易调换。"""
 
@@ -39,6 +40,7 @@ CLUSTER_TITLES: dict[str, str] = {
     "expression": "表达",
     "spec": "金标准与取证方向",
     "knowledge": "知识库",
+    "recency": "时近性",
 }
 """簇的中文名。全部簇一次性登记，未启用的也在册——新增簇时只加模块，不改这张表。"""
 
