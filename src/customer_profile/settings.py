@@ -75,19 +75,38 @@ class Settings(BaseSettings):
     llm_enable_thinking: bool | None = None
     """是否启用模型的思维链（``LLM_ENABLE_THINKING``）。
 
-    ``None``（未设置）时**不发这个键**，沿用服务端默认值；
-    只有显式设为 ``true`` / ``false`` 时才把它写进请求体。
-    这是有意的：既定要求“不设其他参数”，且不同服务
-    商对这个开关的默认取值不同，发送一个我们猜测的
-    值会把服务端的默认覆盖掉。
+    ``None``（未设置）时不发送思考参数，沿用服务端默认值；
+    显式设置时按 ``resolved_llm_thinking_format`` 选择请求字段。
     """
+
+    llm_thinking_format: Literal["auto", "enable_thinking", "thinking"] = "auto"
+    """思考参数格式。auto 按接口域名识别火山，其他地址保持原 enable_thinking 格式。
+
+    自建网关可显式设为 thinking 或 enable_thinking，不根据模型名猜测供应商。
+    """
+
+    @field_validator("llm_thinking_format", mode="before")
+    @classmethod
+    def _normalize_llm_thinking_format(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip().lower() or "auto"
+        return value
+
+    @property
+    def resolved_llm_thinking_format(self) -> Literal["enable_thinking", "thinking"]:
+        """解析实际使用的参数格式；显式配置优先于域名识别。"""
+        if self.llm_thinking_format != "auto":
+            return self.llm_thinking_format
+        hostname = (urlsplit(self.llm_base_url).hostname or "").lower()
+        if hostname.startswith("ark.") and hostname.endswith(".volces.com"):
+            return "thinking"
+        return "enable_thinking"
 
     llm_max_tokens: int | None = None
     """单次响应的输出上限（``LLM_MAX_TOKENS``）。``None`` 时不发这个键，沿用服务端默认。
 
-    存在的理由是**实测出来的截断**：关闭思维链后，服务端在未指定上限时把输出卡在
-    8192 token，长 JSON 会被拦腰截断，而 ``detect_output_anomaly`` 不检查 ``finish_reason``，
-    截断因此能静默通过并在下游解析时炸掉。
+    部分服务在关闭思考、未指定上限时仅允许 8192 token，可能截断长 JSON。
+    具体上限由供应商和模型决定，不能由上下文窗口大小推断。
     """
 
     # ------------------------------------------------------------ 运行台 / API（V0.5.6）

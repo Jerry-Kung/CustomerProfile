@@ -2,6 +2,17 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-11-10 — 兼容火山与阿里的模型思考开关
+
+`LLM_ENABLE_THINKING` 不再固定发送 `enable_thinking`。新增
+`LLM_THINKING_FORMAT=auto / thinking / enable_thinking`，默认按接口域名识别：
+火山 `ark.*.volces.com` 使用 `thinking.type=enabled / disabled`，其他地址保持原格式；
+自建网关可显式选择。开关留空仍不发送思考参数，不按模型名称猜测接口协议。
+
+回归覆盖 `.env` 到实际 HTTP 请求的开启、关闭、留空、显式覆盖和域名边界。
+此次更新涉及 Python 代码，需重新构建统一镜像并替换四个执行层容器，见
+[更新步骤](runbooks/统一镜像发布.md#更新-llm-思考参数适配)。
+
 ## 2026-11-09 — 留痕审查：UAT 取数命令修正，`low` 档补回增量判定证据
 
 增量专项做完后回头审了一遍「UAT 运行时数据取不取得到、够不够定位」，修掉三处。

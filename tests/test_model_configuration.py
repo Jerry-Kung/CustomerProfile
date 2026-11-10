@@ -190,6 +190,76 @@ async def test_llm_env_file_controls_actual_model_and_api_path(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "base_url,thinking_format,expected_key",
+    [
+        ("https://dashscope.aliyuncs.com/compatible-mode/v1", None, "enable_thinking"),
+        ("https://llm.example.cn-beijing.maas.aliyuncs.com/v1", None, "enable_thinking"),
+        ("https://ark.cn-beijing.volces.com/api/v3", None, "thinking"),
+        ("https://ARK.CN-SHANGHAI.VOLCES.COM/api/v3", "auto", "thinking"),
+        ("https://ark.cn-beijing.volces.com.proxy.invalid/v1", None, "enable_thinking"),
+        ("https://gateway.invalid/ark.cn-beijing.volces.com", None, "enable_thinking"),
+        ("https://gateway.invalid/v1", "thinking", "thinking"),
+        ("https://ark.cn-beijing.volces.com/api/v3", "enable_thinking", "enable_thinking"),
+    ],
+)
+@pytest.mark.parametrize("enabled", [False, True, None])
+async def test_llm_env_thinking_switch_reaches_provider(
+    tmp_path, base_url, thinking_format, expected_key, enabled
+):
+    """从 .env 到实际 HTTP 请求验证，模型同名也不能混用两家供应商的开关。"""
+    config = tmp_path / ".env"
+    lines = [
+        f"LLM_BASE_URL={base_url}",
+        "LLM_MODEL=deepseek-v4-1-flash-261017",
+        f"LLM_ENABLE_THINKING={'' if enabled is None else str(enabled).lower()}",
+        "LLM_MAX_TOKENS=128000",
+    ]
+    if thinking_format is not None:
+        lines.append(f"LLM_THINKING_FORMAT={thinking_format}")
+    config.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "正常回答"}, "finish_reason": "stop"}]},
+        )
+
+    client = LlmClient(Settings(_env_file=config), transport=httpx.MockTransport(respond))
+    try:
+        assert await client.llm_call("测试", max_attempts=1) == "正常回答"
+    finally:
+        await client.aclose()
+
+    assert len(requests) == 1
+    payload = json.loads(requests[0].content)
+    if enabled is None:
+        assert "thinking" not in payload
+        assert "enable_thinking" not in payload
+    elif expected_key == "thinking":
+        assert payload["thinking"] == {"type": "enabled" if enabled else "disabled"}
+        assert "enable_thinking" not in payload
+    else:
+        assert payload["enable_thinking"] is enabled
+        assert "thinking" not in payload
+    assert payload["max_tokens"] == 128000
+    assert payload["temperature"] == 0.5
+
+
+@pytest.mark.parametrize(
+    "raw,expected", [("", "auto"), ("  ", "auto"), (" THINKING ", "thinking"), ("AUTO", "auto")]
+)
+def test_llm_thinking_format_normalizes_configuration(raw, expected):
+    assert Settings(_env_file=None, llm_thinking_format=raw).llm_thinking_format == expected
+
+
+def test_llm_thinking_format_rejects_unknown_protocol():
+    with pytest.raises(ValidationError, match="llm_thinking_format"):
+        Settings(_env_file=None, llm_thinking_format="volcano")
+
+
+@pytest.mark.parametrize(
     "field", ["llm_chat_completions_path", "auc_submit_path", "auc_query_path"]
 )
 @pytest.mark.parametrize(
