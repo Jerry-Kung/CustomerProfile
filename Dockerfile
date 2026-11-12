@@ -43,8 +43,11 @@ COPY services/task-backend/db ./services/task-backend/db
 RUN /opt/task-venv/bin/pip install --no-deps --no-build-isolation ./services/task-backend
 
 # ---- 3. 数据目录与运行用户 ------------------------------------------------
-# /app/data 是 SQLite 与运行产物的落位（settings.PROJECT_ROOT=/app，DATA_DIR=data）。
-# 必须以**本地卷**挂载：WAL 依赖共享内存（-shm），网络文件系统上会锁失效并可能损坏库。
+# /app/data 保存**运行时数据包**（trace-archives）与存活信号。
+# 数据库不再必然落在这里：生产/UAT 用 MySQL（DATABASE_URL=mysql://…），
+# SQLite 只用于本地、批次实验与快照复现。
+# 仍必须以**本地卷**挂载：包是节点载荷的唯一副本，容器重建即丢；
+# 若某环境仍用 SQLite，WAL 依赖共享内存（-shm），网络文件系统上会锁失效并可能损坏库。
 RUN groupadd --gid 10001 customer-profile \
     && useradd --uid 10001 --gid 10001 --no-log-init --create-home customer-profile \
     && mkdir -p /app/data /app/logs \

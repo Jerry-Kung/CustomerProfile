@@ -9,3 +9,6 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q"
 pythonpath = ["src"]
+markers = [
+  "mysql_integration: 需要真实 MySQL 的方言契约测试；未配 CUSTOMER_PROFILE_MYSQL_URL 时跳过",
+]

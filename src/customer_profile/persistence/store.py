@@ -1,16 +1,17 @@
-"""SQLite 持久化：建库、写入与查询。
+"""留痕持久化：建库、写入与查询。
 
-用标准库 ``sqlite3`` 而非 ORM——V0.2 的表结构与查询都很直白，引入 ORM 只会多一层
-需要解释的间接（既定约束「不引入未实际需要的重型框架」）。
+支持两种后端（见 ``dbapi``）：SQLite 用于本地/批次/快照，MySQL 用于运行时。
+语句形状由 ``dialect`` 提供，连接差异由 ``dbapi`` 抹平；**本模块不写任何一方的**
+**专有语法**——出现 ``ON CONFLICT``、``RETURNING``、``PRAGMA`` 就说明漏到了这一层。
 
-**线程模型是这里唯一需要小心的地方。** ``sqlite3.Connection`` 不是线程安全的：
-默认甚至禁止跨线程使用，而 ``check_same_thread=False`` 只是关掉那道检查，并不能让
-并发访问变安全——多线程同时用一个连接会直接崩掉解释器（实测在 Windows + Python 3.14
-上表现为段错误，不是可捕获的异常）。
+**线程模型是这里唯一需要小心的地方。** 数据库连接不是线程安全的
+（``sqlite3.Connection`` 默认甚至禁止跨线程使用，``check_same_thread=False`` 只是
+关掉那道检查，多线程共用会直接崩掉解释器）。因此本模块让连接有**唯一所有者**：
+一个专属工作线程。所有读写都排进该线程的队列顺序执行，回调通过
+``concurrent.futures.Future`` 回到调用方。这样既没有跨线程访问，也不需要调用方加锁。
 
-因此本模块让连接有**唯一所有者**：一个专属工作线程。所有读写都排进该线程的队列顺序
-执行，回调通过 ``concurrent.futures.Future`` 回到调用方。这样既没有跨线程访问，也不
-需要调用方加锁。副作用是读写不再并发——V0.2 是单进程单 worker，留痕不是瓶颈，可以接受。
+这个工作线程**与用哪种数据库无关**，因此切 MySQL 后保留：它同时是 2026-11 那次
+「容器 Up、执行停止」的修复点（``Future`` 取消竞态），不是 SQLite 的附属物。
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from loguru import logger
 from ..definitions import RunStatus
 from ..workflow_scope import WorkflowScope, scope_predicate
 from . import archive
+from .dialect import MySqlDialect, SqliteDialect
 from .schema import (
     SCHEMA_STATEMENTS,
     RunRecordRow,
@@ -117,34 +119,40 @@ def _run_filter_clause(
 
 
 class _ConnectionThread:
-    """独占一个 ``sqlite3.Connection`` 的工作线程。
+    """独占一个数据库连接的工作线程。
 
     对外只暴露 :meth:`submit`：把一个可调用对象排进队列，在其上返回一个
     ``concurrent.futures.Future``。可调用对象由工作线程执行，因此它拿到的连接
     始终是同一个线程创建的。
+
+    ``work`` 收到的参数是 :class:`~.dbapi.DbConnection`，不是某个驱动的连接对象。
     """
 
     def __init__(
         self,
-        path: Path,
-        setup: Callable[[sqlite3.Connection], None],
-        busy_timeout_ms: int = 5000,
+        backend: Any,
+        setup: Callable[[Any], None],
     ) -> None:
-        self._path = path
+        self._backend = backend
+        self._label = getattr(backend, "name", "db")
         self._commands: "queue.Queue[Any]" = queue.Queue()
         self._thread = threading.Thread(
-            target=self._run, name=f"sqlite:{path.name}", daemon=True
+            target=self._run, name=f"{self._label}-store", daemon=True
         )
         self._setup = setup
-        self._busy_timeout_ms = busy_timeout_ms
         self._started = threading.Event()
         self._start_error: BaseException | None = None
+        self._last_result: Any = None
+        """最近一次成功的返回值。与 ``work()`` 分离，是为了让重连分支能统一写回。"""
+        self._last_ok_at_ms: int | None = None
+        self._db_error: str | None = None
+        self._reconnect_max_attempts = 3
         self._thread.start()
         self._started.wait()
 
     # ------------------------------------------------------------ 对外
 
-    def submit(self, work: Callable[[sqlite3.Connection], Any]) -> Future:
+    def submit(self, work: Callable[[Any], Any]) -> Future:
         """把一次数据库操作排进队列。连接已关闭时返回一个已置异常的 Future。
 
         返回 Future 而不是等待结果：调用方用 ``asyncio.wrap_future`` 把它接回协程，
@@ -168,27 +176,17 @@ class _ConnectionThread:
     def alive(self) -> bool:
         return self._thread.is_alive()
 
+    @property
+    def start_error(self) -> BaseException | None:
+        """建连/setup 阶段留下的异常。``None`` 表示连上了。"""
+        return self._start_error
+
     # ------------------------------------------------------------ 内部
 
     def _run(self) -> None:
-        connection: sqlite3.Connection | None = None
+        connection: Any = None
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            connection = sqlite3.connect(self._path)
-            connection.row_factory = sqlite3.Row
-            # 增量回收空闲页。留痕的载荷在收尾时被清空（存储瘦身），回收要跟着走，
-            # 否则删掉的行只会进 freelist、文件永不缩小。**必须在建表之前设置**：
-            # auto_vacuum 只在建库时生效，对既有库要另行 VACUUM 才切换模式。
-            connection.execute("PRAGMA auto_vacuum=INCREMENTAL")
-            # WAL 让读写互不阻塞；foreign_keys 默认关闭，需显式打开
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA foreign_keys=ON")
-            # V0.5.2 起 API 与 worker 是两个进程、各持一个连接，写-写相遇时若没有
-            # busy_timeout，SQLite 会立刻抛 "database is locked" 而不是等一会儿。
-            # WAL 下 synchronous=NORMAL 已足够安全（崩溃最多丢最后一个事务，
-            # 而任务队列本就设计为可被重新领取）。
-            connection.execute(f"PRAGMA busy_timeout={int(self._busy_timeout_ms)}")
-            connection.execute("PRAGMA synchronous=NORMAL")
+            connection = self._backend.connect()
             self._setup(connection)
         except BaseException as exc:  # 建库失败：把错误交给首个提交者
             self._start_error = exc
@@ -203,7 +201,9 @@ class _ConnectionThread:
             if future.cancelled():
                 continue
             try:
-                future.set_result(work(connection))
+                connection = self._execute_recovering(connection, work)
+                if not future.done():
+                    future.set_result(self._last_result)
             except BaseException as exc:
                 # **写回前必须再判一次 done()。** 上一行的 ``future.cancelled()`` 只覆盖
                 # 「排队期间就被取消」；如果取消发生在 ``work()`` 执行期间，``Future``
@@ -218,29 +218,126 @@ class _ConnectionThread:
                 #
                 # ``done()`` 对 CANCELLED 也返回 True，因此这一句同时覆盖
                 # 「已取消」与「已由别处设置结果」两种情形。
+                #
+                # 连接对象本身也在这里清掉：断开状态下后续操作必然再失败，留着它
+                # 只会让每次操作都付一次超时。
+                if self._backend.is_disconnect(exc):
+                    self._mark_disconnected(exc)
+                    connection = None
                 if not future.done():
                     future.set_exception(exc)
 
         if connection is not None:
             connection.close()
 
+    def _execute_recovering(self, connection: Any, work: Callable[[Any], Any]) -> Any:
+        """执行一次操作；遇到断连就重连并把**同一次**操作重试一次。
+
+        为什么可以重试：``work`` 里的写路径都是 upsert 或条件 UPDATE（幂等），
+        纯 INSERT 只有 ``insert_attempt``——它对 ``attempt_id`` 自增，重试会多一行。
+        因此这里判断的是「连接是不是已经死了」：连接在**开始执行前**就是断的，
+        重试是安全的（那次操作根本没发出去）；如果在执行中才断，无法区分「服务端已提交
+        但响应丢了」，此时**不重试**，把异常如实交给调用方（留痕是 fail_soft，不会让
+        业务失败，但会留下错误日志）。
+        """
+        if connection is None:
+            connection = self._reconnect()
+            return self._invoke(connection, work)
+
+        if not self._connection_alive(connection):
+            self._mark_disconnected(ConnectionResetError("连接已失效"))
+            connection = self._reconnect()
+        return self._invoke(connection, work)
+
+    def _invoke(self, connection: Any, work: Callable[[Any], Any]) -> Any:
+        try:
+            self._last_result = work(connection)
+            self._last_ok_at_ms = _now_ms()
+            return connection
+        except BaseException as exc:
+            if self._backend.is_disconnect(exc):
+                # 执行中断开：重试可能重复一次已经生效的写，故只重连不重试。
+                self._mark_disconnected(exc)
+                raise
+            raise
+
+    def _reconnect(self) -> Any:
+        """重建连接。连续失败会逐次放大间隔，避免把人打满。"""
+        attempt = 0
+        while True:
+            try:
+                connection = self._backend.connect()
+                if attempt:
+                    logger.warning("数据库已重连（此前失败 {} 次）", attempt)
+                return connection
+            except BaseException as exc:
+                attempt += 1
+                self._mark_disconnected(exc)
+                if attempt >= self._reconnect_max_attempts:
+                    raise
+                time.sleep(min(2.0 ** (attempt - 1), 10.0) * 0.1)
+
+    def _connection_alive(self, connection: Any) -> bool:
+        probe = getattr(connection, "is_connected", None)
+        if probe is None:
+            return True
+        try:
+            return bool(probe())
+        except Exception:
+            return False
+
+    def _mark_disconnected(self, exc: BaseException) -> None:
+        self._db_error = f"{type(exc).__name__}: {exc}"[:300]
+        logger.error("数据库连接中断：{}", self._db_error)
+
+    def healthy(self) -> dict[str, Any]:
+        """供 liveness 与健康检查读取的数据库状态。"""
+        alive = self.alive
+        fresh = self._last_ok_at_ms
+        return {
+            "db_alive": alive,
+            "db_last_ok_at_ms": fresh,
+            "db_error": self._db_error,
+        }
+
+    @property
+    def last_ok_at_ms(self) -> int | None:
+        return self._last_ok_at_ms
+
 
 class Store:
-    """留痕存储。所有方法都是协程，实际 sqlite 调用在专属线程内执行。"""
+    """留痕存储。所有方法都是协程，实际数据库调用在专属线程内执行。"""
 
     def __init__(
         self,
-        path: Path | str,
+        backend: Any,
         *,
         busy_timeout_ms: int = 5000,
         archive_dir: Path | str | None = None,
+        migrate: bool | None = None,
     ) -> None:
-        self.path = Path(path)
+        # 兼容旧构造：``Store(path)`` / ``Store(Path(...))``。
+        # 批次脚本、快照测试与排障工具都按「一个库文件」使用它，切 MySQL 不该逼它们改。
+        if isinstance(backend, (str, Path)):
+            from .dbapi import SqliteBackend
+
+            backend = SqliteBackend(Path(backend), busy_timeout_ms=busy_timeout_ms)
+        self._backend = backend
+        self.path = getattr(backend, "path", None)
+        """仅 SQLite 后端有意义；MySQL 上为 ``None``。保留是为了让「基线表在哪」这类
+        排障脚本不至于在切库当天全部失效。"""
         self._thread: _ConnectionThread | None = None
-        self._busy_timeout_ms = busy_timeout_ms
         self.archive_dir = Path(archive_dir) if archive_dir else None
         """运行时数据包目录（存储瘦身）。``None`` 表示不读包——此时 ``packed`` 的
         行会如实返回空载荷并标 ``payload_missing``，不会静默当成「没有输出」。"""
+        self._migrate = (backend.name == "sqlite") if migrate is None else migrate
+        """是否在连接时应用表结构。**缺省由后端决定，没有配置开关**：
+
+        - SQLite：建表 + 补列。文件是本地产物，「给个路径就能跑」是批次与测试的前提，
+          没有第二个进程能替它建表。
+        - MySQL：**不建表**。表由 ``runtime-migrate`` 容器建（随部署自动执行），
+          服务账号因此完全不需要 DDL 权限。多个副本同时启动也不会抢 DDL 锁。
+        """
         self._payload_cache: "OrderedDict[str, dict[str, Any] | None]" = OrderedDict()
         self._payload_cache_size = 4
         """按根运行缓存已解析的包。包解压后约数 MB，宁可重复解也不常驻太多。"""
@@ -248,22 +345,43 @@ class Store:
     # ------------------------------------------------------------ 生命周期
 
     def connect(self) -> None:
-        """建库并应用表结构。幂等。"""
+        """连接并按需应用表结构。幂等。"""
         if self._thread is not None and self._thread.alive:
             return
 
-        def setup(connection: sqlite3.Connection) -> None:
-            for statement in SCHEMA_STATEMENTS:
-                connection.execute(statement)
-            # 建表之后补列：CREATE TABLE IF NOT EXISTS 对**已存在**的库不会新增列，
-            # 而 data/customer_profile.db 已在磁盘上。不加这一步，新列在运行期
-            # 只表现为一句 "no such column"。
-            _apply_migrations(connection)
-            connection.commit()
+        def setup(connection: Any) -> None:
+            if self._backend.name == "sqlite":
+                if self._migrate:
+                    for statement in SCHEMA_STATEMENTS:
+                        connection.execute(statement)
+                    # 建表之后补列：CREATE TABLE IF NOT EXISTS 对**已存在**的库不会新增列，
+                    # 而 data/customer_profile.db 已在磁盘上。不加这一步，新列在运行期
+                    # 只表现为一句 "no such column"。
+                    _apply_migrations(connection)
+                    connection.commit()
+                return
 
-        self._thread = _ConnectionThread(
-            self.path, setup, busy_timeout_ms=self._busy_timeout_ms
-        )
+            from . import mysql_schema
+
+            if self._migrate:
+                mysql_schema.ensure_mysql_schema(connection)
+            # **无条件校验，且期望值直接取代码里的 SCHEMA_VERSION**：库里没有「该用什么
+            # 版本」这一项配置，代码就是唯一事实。结构对不上时拒绝启动——带着旧表结构
+            # 跑起来的问题要到第一个新列才暴露，而那时现场显示的是「服务 Up、任务全失败」。
+            mysql_schema.assert_expected_version(connection)
+
+        self._thread = _ConnectionThread(self._backend, setup)
+        # 启动期错误必须在这里抛出，而不是留给「第一次提交」。
+        #
+        # ``_ConnectionThread`` 把建连/setup 的异常存起来交给首个操作，这对 SQLite
+        # 是合理的（路径写错时静默降级到「读不到」）。但**版本不匹配不允许这样**：
+        # 那会让进程正常起来、健康检查通过、第一个业务任务才炸，现场表现是
+        # 「服务 Up、任务全失败」——正是本次切库要避免的那类故障。
+        error = self._thread.start_error
+        if error is not None:
+            self._thread.close()
+            self._thread = None
+            raise error
 
     def close(self) -> None:
         if self._thread is not None:
@@ -274,6 +392,20 @@ class Store:
     def connected(self) -> bool:
         return self._thread is not None and self._thread.alive
 
+    @property
+    def backend_name(self) -> str:
+        return getattr(self._backend, "name", "unknown")
+
+    @property
+    def dialect(self) -> Any:
+        return _dialect_for(self.backend_name)
+
+    def health(self) -> dict[str, Any]:
+        """数据库健康快照。未连接时也要能回答，而不是抛错。"""
+        if self._thread is None:
+            return {"db_alive": False, "db_last_ok_at_ms": None, "db_error": "未连接"}
+        return self._thread.healthy()
+
     def _require_thread(self) -> _ConnectionThread:
         if self._thread is None or not self._thread.alive:
             raise RuntimeError(
@@ -283,7 +415,7 @@ class Store:
 
     # ------------------------------------------------------------ 执行
 
-    async def _run(self, work: Callable[[sqlite3.Connection], Any]) -> Any:
+    async def _run(self, work: Callable[[Any], Any]) -> Any:
         """在专属线程上执行一次数据库操作并等待结果。"""
         future = self._require_thread().submit(work)
         return await asyncio.wrap_future(future)
@@ -291,8 +423,8 @@ class Store:
     @staticmethod
     def _execute(
         sql: str, params: Sequence[Any] = ()
-    ) -> Callable[[sqlite3.Connection], list[sqlite3.Row]]:
-        def work(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+    ) -> Callable[[Any], list[dict[str, Any]]]:
+        def work(connection: Any) -> list[dict[str, Any]]:
             cursor = connection.execute(sql, params)
             rows = cursor.fetchall()
             cursor.close()
@@ -303,17 +435,17 @@ class Store:
     @staticmethod
     def _execute_write(
         statements: Sequence[tuple[str, Sequence[Any]]],
-    ) -> Callable[[sqlite3.Connection], None]:
+    ) -> Callable[[Any], None]:
         """一次提交多条语句，共用一次 commit。"""
 
-        def work(connection: sqlite3.Connection) -> None:
+        def work(connection: Any) -> None:
             for sql, params in statements:
                 connection.execute(sql, params)
             connection.commit()
 
         return work
 
-    async def _read(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
+    async def _read(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
         return await self._run(self._execute(sql, params))
 
     async def _write(self, sql: str, params: Sequence[Any] = ()) -> None:
@@ -332,7 +464,7 @@ class Store:
         """登记一次定义快照，返回 ``version_id``。同一定义重复登记返回既有 ID。"""
         digest = definition_hash(definition)
 
-        def work(connection: sqlite3.Connection) -> int:
+        def work(connection: Any) -> int:
             row = connection.execute(
                 "SELECT version_id FROM definition_versions "
                 "WHERE workflow_id = ? AND definition_hash = ?",
@@ -383,24 +515,7 @@ class Store:
         ``running`` 覆盖已落定的终态。
         """
         await self._write(
-            "INSERT INTO workflow_runs (run_id, workflow_id, workflow_display_name, "
-            " parent_run_id, parent_node_id, call_path, business_ref, status, "
-            " definition_version_id, inputs_json, outputs_json, error, started_at_ms, "
-            " finished_at_ms, duration_ms, is_replay, queued_at_ms, claimed_at_ms, "
-            " claimed_by, lease_expires_at_ms, created_at_ms) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT (run_id) DO UPDATE SET "
-            " status = excluded.status, "
-            " workflow_display_name = COALESCE(excluded.workflow_display_name, "
-            "   workflow_runs.workflow_display_name), "
-            " definition_version_id = COALESCE(excluded.definition_version_id, "
-            "   workflow_runs.definition_version_id), "
-            " inputs_json = COALESCE(excluded.inputs_json, workflow_runs.inputs_json), "
-            " started_at_ms = COALESCE(excluded.started_at_ms, workflow_runs.started_at_ms), "
-            " claimed_at_ms = COALESCE(excluded.claimed_at_ms, workflow_runs.claimed_at_ms), "
-            " claimed_by = COALESCE(excluded.claimed_by, workflow_runs.claimed_by), "
-            " lease_expires_at_ms = COALESCE(excluded.lease_expires_at_ms, "
-            "   workflow_runs.lease_expires_at_ms)",
+            self.dialect.insert_run_sql(),
             (
                 run.run_id,
                 run.workflow_id,
@@ -469,11 +584,11 @@ class Store:
         """
         now = _now_ms()
 
-        def work(connection: sqlite3.Connection) -> bool:
+        def work(connection: Any) -> bool:
             cursor = connection.execute(
                 "UPDATE workflow_runs "
                 "SET status = ?, "
-                "    error = COALESCE(error || ' | ', '') || ?, "
+                f"    error = {self.dialect.append_error_sql()}, "
                 "    finished_at_ms = COALESCE(finished_at_ms, ?) "
                 "WHERE run_id = ? AND status = ?",
                 (
@@ -547,7 +662,7 @@ class Store:
             " JOIN tree ON child.parent_run_id = tree.run_id) "
         )
 
-        def work(connection: sqlite3.Connection) -> dict[str, Any] | None:
+        def work(connection: Any) -> dict[str, Any] | None:
             connection.execute("BEGIN")
             try:
                 captured_at_ms = _now_ms()
@@ -682,7 +797,7 @@ class Store:
 
     async def _root_run_id(self, run_id: str) -> str:
         """沿 ``parent_run_id`` 上溯到根运行。树只有一两层，但迭代会加深。"""
-        def work(connection: sqlite3.Connection) -> str:
+        def work(connection: Any) -> str:
             row = connection.execute(
                 "WITH RECURSIVE up(run_id, parent_run_id) AS ("
                 " SELECT run_id, parent_run_id FROM workflow_runs WHERE run_id = ?"
@@ -821,13 +936,13 @@ class Store:
     @staticmethod
     def _clear_payloads(
         run_ids: Sequence[str], root_run_id: str, mode: str
-    ) -> Callable[[sqlite3.Connection], None]:
+    ) -> Callable[[Any], None]:
         """清空这棵树各行的载荷列，并标上 ``packed``。
 
         标记写到树里**每一行**而不只是根运行：直接按 run_id 打开某个子运行时，
         读路径同样要知道它的载荷在包里，而不是「列是空的 = 没有输出」。
         """
-        def work(connection: sqlite3.Connection) -> None:
+        def work(connection: Any) -> None:
             now = _now_ms()
             try:
                 connection.execute("BEGIN")
@@ -892,7 +1007,7 @@ class Store:
             return 0
         run_ids = list(trace["runs"])
 
-        def work(connection: sqlite3.Connection) -> int:
+        def work(connection: Any) -> int:
             now = _now_ms()
             try:
                 connection.execute("BEGIN")
@@ -994,24 +1109,43 @@ class Store:
 
         ``running`` 只标不续跑：进程中断不能证明外部副作用未发生（既定约束），因此这些运行**保留已完成结果**并交人工处理。
         """
-        predicate, params = scope_predicate(workflow_scope)
+        predicate, params = self.dialect.scope_predicate(workflow_scope)
 
-        def work(connection: sqlite3.Connection) -> int:
+        def work(connection: Any) -> int:
             # 只沿在跑运行的祖先查找主任务，避免恢复时遍历全部历史子流程。
             # 同名共享子工作流必须按其主任务归属恢复。
-            cursor = connection.execute(
+            #
+            # 递归部分用 UNION ALL 而不是 UNION：树里同一 run_id 不会经由两条路径
+            # 到达（parent_run_id 单值），DISTINCT 是白付的开销；MySQL 上它还会让
+            # 临时表变大，而这里在启动路径上。
+            lineage = (
                 "WITH RECURSIVE lineage(run_id, parent_run_id, workflow_id) AS ("
                 " SELECT run_id, parent_run_id, workflow_id FROM workflow_runs WHERE status = ?"
-                " UNION SELECT lineage.run_id, parent.parent_run_id, parent.workflow_id"
+                " UNION ALL SELECT lineage.run_id, parent.parent_run_id, parent.workflow_id"
                 " FROM workflow_runs parent JOIN lineage ON parent.run_id = lineage.parent_run_id"
-                ") UPDATE workflow_runs SET status = ?, error = COALESCE(error, ?)"
-                " WHERE status = ? AND run_id IN ("
-                f" SELECT run_id FROM lineage WHERE parent_run_id IS NULL AND {predicate})"
-                " RETURNING run_id",
-                (RunStatus.RUNNING, RunStatus.INTERRUPTED,
-                 "进程中断：运行中任务未完成，已完成结果已保留", RunStatus.RUNNING, *params),
+                ") "
             )
-            marked = len(cursor.fetchall())
+            ids_sql = (
+                lineage + "SELECT run_id FROM lineage "
+                f"WHERE parent_run_id IS NULL AND {predicate}"
+            )
+            targets = connection.execute(
+                ids_sql, (RunStatus.RUNNING, *params)
+            ).fetchall()
+            run_ids = [row["run_id"] for row in targets]
+            if not run_ids:
+                connection.commit()
+                return 0
+            marks = ",".join("?" for _ in run_ids)
+            cursor = connection.execute(
+                "UPDATE workflow_runs SET status = ?, error = COALESCE(error, ?) "
+                f"WHERE status = ? AND run_id IN ({marks})",
+                (RunStatus.INTERRUPTED,
+                 "进程中断：运行中任务未完成，已完成结果已保留",
+                 RunStatus.RUNNING, *run_ids),
+            )
+            marked = int(cursor.rowcount)
+            cursor.close()
             connection.commit()
             return marked
 
@@ -1045,21 +1179,43 @@ class Store:
         await self.insert_run(row)
 
     async def enqueue_run_once(self, run: RunRecordRow) -> bool:
-        """仅首次写入队列；重复请求绝不把 running/终态改回 queued。"""
+        """仅首次写入队列；重复请求绝不把 running/终态改回 queued。
+
+        **用「纯 INSERT + 捕获唯一键冲突」而不是 upsert。** 两种后端的 upsert 在
+        「已存在但内容未变」时都不肯老实说明自己有没有插入：
+
+        - SQLite 的 ``ON CONFLICT DO NOTHING`` 还能靠 ``rowcount == 0`` 判断；
+        - MySQL 的 ``ON DUPLICATE KEY UPDATE`` 在开了 ``CLIENT_FOUND_ROWS`` 后，
+          「命中且未改变」返回 1、「确实插入」也返回 1——两者不可区分。
+
+        而 ``CLIENT_FOUND_ROWS`` 又是 ``abandon_run`` / ``renew_lease`` 必需的（见
+        ``dbapi.MySqlBackend.connect``）。与其为一条语句切换标志位，不如让「唯一键
+        冲突」以异常的形式出现：那是数据库层面的确定事实，两种后端语义一致。
+        """
         now = _now_ms()
 
-        def work(connection: sqlite3.Connection) -> bool:
-            cursor = connection.execute(
-                "INSERT INTO workflow_runs (run_id, workflow_id, workflow_display_name, "
-                "business_ref, status, inputs_json, is_replay, queued_at_ms, created_at_ms) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (run_id) DO NOTHING",
-                (run.run_id, run.workflow_id, run.workflow_display_name, run.business_ref,
-                 RunStatus.QUEUED, json_dumps(run.inputs), int(run.is_replay), now, now),
-            )
-            inserted = cursor.rowcount == 1
+        def work(connection: Any) -> bool:
+            try:
+                cursor = connection.execute(
+                    "INSERT INTO workflow_runs (run_id, workflow_id, "
+                    "workflow_display_name, business_ref, status, inputs_json, is_replay, "
+                    "queued_at_ms, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (run.run_id, run.workflow_id, run.workflow_display_name,
+                     run.business_ref, RunStatus.QUEUED, json_dumps(run.inputs),
+                     int(run.is_replay), now, now),
+                )
+            except BaseException as exc:
+                # 冲突不是错误：调用方会回读既有运行并比对提交内容。
+                # 但要让事务回到干净状态——SQLite 与 MySQL 都不会因唯一键冲突整体回滚，
+                # 显式 rollback 只是把「这条语句失败」的事实同步给驱动。
+                if getattr(self._backend, "is_duplicate_key", None) and \
+                        self._backend.is_duplicate_key(exc):
+                    connection.rollback()
+                    return False
+                raise
             cursor.close()
             connection.commit()
-            return inserted
+            return True
 
         return await self._run(work)
 
@@ -1068,18 +1224,80 @@ class Store:
     ) -> dict[str, Any] | None:
         """原子领取一个待跑运行；无待跑或已被别人领走时返回 ``None``。
 
-        **单条 UPDATE ... WHERE status='queued' + RETURNING 保证只被领一次。**
-        SQLite 的写事务是串行的，因此两个 worker 同时执行本语句时，只有一个能把
-        某一行从 ``queued`` 改成 ``running``——另一个的 ``WHERE`` 不再命中，
-        ``RETURNING`` 无行返回。这比「先 SELECT 再 UPDATE」安全：后者之间存在窗口，
-        窗口内两个 worker 会领到同一个 run_id 并把它跑两遍。
+        **两种后端各用自己最强的原语，但语义必须相同：同一行只被一方领到。**
 
-        ``RETURNING`` 需要 SQLite ≥ 3.35（本机实测 3.50.4）。
+        - SQLite：单条 ``UPDATE ... WHERE status='queued' RETURNING``。写事务串行，
+          两个 worker 同时执行时只有一个能把某行改成 ``running``，另一个 ``RETURNING``
+          无行返回。
+        - MySQL：事务内 ``SELECT ... FOR UPDATE SKIP LOCKED`` 锁住候选行，再条件 UPDATE。
+          不用 RETURNING（MySQL 不支持），也不用「先 SELECT 再 UPDATE」——后者两个 worker
+          会读到同一行。``SKIP LOCKED`` 让被别的 worker 锁住的行直接跳过，而不是排队等，
+          这正是多 worker 场景要的。
+
+        两条路径的共同点：**改状态的 UPDATE 都带 ``AND status = 'queued'``**，即便出现
+        意料之外的竞争也只会有一方 rowcount 为 1。
         """
         now = _now_ms()
-        predicate, params = scope_predicate(workflow_scope)
+        claimer = self.dialect.claim
 
-        def work(connection: sqlite3.Connection) -> dict[str, Any] | None:
+        def work(connection: Any) -> dict[str, Any] | None:
+            if self.dialect.claim_ready():
+                sql, params = claimer(connection, now, worker_id, lease_ms, workflow_scope)
+                cursor = connection.execute(
+                    sql,
+                    (
+                        RunStatus.RUNNING, now, worker_id, now + int(lease_ms),
+                        RunStatus.QUEUED, *params, RunStatus.QUEUED,
+                    ),
+                )
+                row = cursor.fetchone()
+                cursor.close()
+                connection.commit()
+                return dict(row) if row is not None else None
+
+            # ---- MySQL：加锁选中 → 条件更新 → 回读
+            sql, params = claimer(connection, now, worker_id, lease_ms, workflow_scope)
+            try:
+                cursor = connection.execute(sql, (RunStatus.QUEUED, *params))
+                candidate = cursor.fetchone()
+                cursor.close()
+                if candidate is None:
+                    connection.commit()
+                    return None
+                run_id = candidate["run_id"]
+                update = connection.execute(
+                    "UPDATE workflow_runs "
+                    "SET status = ?, claimed_at_ms = ?, claimed_by = ?, "
+                    "    lease_expires_at_ms = ? "
+                    "WHERE run_id = ? AND status = ?",
+                    (RunStatus.RUNNING, now, worker_id, now + int(lease_ms),
+                     run_id, RunStatus.QUEUED),
+                )
+                claimed = update.rowcount > 0
+                update.close()
+                if not claimed:
+                    connection.commit()
+                    return None
+                detail = connection.execute(
+                    "SELECT run_id, workflow_id, business_ref, inputs_json, "
+                    "       definition_version_id, is_replay, claimed_by, "
+                    "       claimed_at_ms, lease_expires_at_ms "
+                    "FROM workflow_runs WHERE run_id = ?",
+                    (run_id,),
+                )
+                row = detail.fetchone()
+                detail.close()
+                connection.commit()
+                return dict(row) if row is not None else None
+            except BaseException:
+                connection.rollback()
+                raise
+
+        return await self._run(work)
+        now = _now_ms()
+        predicate, params = self.dialect.scope_predicate(workflow_scope)
+
+        def work(connection: Any) -> dict[str, Any] | None:
             cursor = connection.execute(
                 "UPDATE workflow_runs "
                 "SET status = ?, claimed_at_ms = ?, claimed_by = ?, "
@@ -1118,7 +1336,7 @@ class Store:
         """
         now = _now_ms()
 
-        def work(connection: sqlite3.Connection) -> bool:
+        def work(connection: Any) -> bool:
             cursor = connection.execute(
                 "UPDATE workflow_runs SET lease_expires_at_ms = ? "
                 "WHERE run_id = ? AND claimed_by = ? AND status = ?",
@@ -1141,7 +1359,38 @@ class Store:
         """
         now = _now_ms()
 
-        def work(connection: sqlite3.Connection) -> int:
+        def work(connection: Any) -> int:
+            if self.dialect.name == "mysql":
+                # MySQL 报 "This version of MySQL doesn't yet support
+                # 'LIMIT & IN/ALL/ANY/SOME subquery'"：``UPDATE ... WHERE run_id IN
+                # (SELECT ... LIMIT n)`` 直接不被支持。改成先取候选（可在子查询里
+                # LIMIT），再按主键批量更新——两步之间**不需要**加锁：租约已过期，
+                # 任何一方把它改回 queued 或别人抢先重领，第二次 UPDATE 的
+                # ``status = running`` 条件会让它自然落空。
+                picked = connection.execute(
+                    "SELECT run_id FROM workflow_runs "
+                    "WHERE status = ? AND lease_expires_at_ms IS NOT NULL "
+                    "      AND lease_expires_at_ms <= ? "
+                    "ORDER BY lease_expires_at_ms LIMIT ?",
+                    (RunStatus.RUNNING, now, int(limit)),
+                ).fetchall()
+                run_ids = [row["run_id"] for row in picked]
+                if not run_ids:
+                    connection.commit()
+                    return 0
+                marks = ",".join("?" for _ in run_ids)
+                cursor = connection.execute(
+                    "UPDATE workflow_runs "
+                    "SET status = ?, claimed_at_ms = NULL, claimed_by = NULL, "
+                    "    lease_expires_at_ms = NULL "
+                    f"WHERE status = ? AND run_id IN ({marks})",
+                    (RunStatus.QUEUED, RunStatus.RUNNING, *run_ids),
+                )
+                changed = int(cursor.rowcount)
+                cursor.close()
+                connection.commit()
+                return changed
+
             cursor = connection.execute(
                 "UPDATE workflow_runs "
                 "SET status = ?, claimed_at_ms = NULL, claimed_by = NULL, "
@@ -1161,7 +1410,7 @@ class Store:
 
     async def queue_depth(self, *, workflow_scope: WorkflowScope = "all") -> int:
         """待跑（``queued``）的主运行条数。提交侧的容量判断用它。"""
-        predicate, params = scope_predicate(workflow_scope)
+        predicate, params = self.dialect.scope_predicate(workflow_scope)
         rows = await self._read(
             "SELECT COUNT(*) AS n FROM workflow_runs "
             f"WHERE status = ? AND parent_run_id IS NULL AND {predicate}",
@@ -1171,7 +1420,7 @@ class Store:
 
     async def queue_snapshot(self, *, workflow_scope: WorkflowScope = "all") -> dict[str, int]:
         """队列概览：待跑、在跑、中断待处理。供 ``GET /runtime`` 展示。"""
-        predicate, params = scope_predicate(workflow_scope)
+        predicate, params = self.dialect.scope_predicate(workflow_scope)
         rows = await self._read(
             "SELECT status, COUNT(*) AS n FROM workflow_runs "
             f"WHERE parent_run_id IS NULL AND {predicate} AND status IN (?, ?, ?) "
@@ -1212,19 +1461,7 @@ class Store:
         会多次执行，靠 ``call_path`` 区分。
         """
         await self._write(
-            "INSERT INTO node_executions (run_id, node_id, node_title, node_type, "
-            " call_path, status, branch, inputs_json, outputs_json, error, queued_at_ms, "
-            " started_at_ms, duration_ms, sub_run_id, attempt_count) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0)) "
-            "ON CONFLICT (run_id, node_id, call_path) DO UPDATE SET "
-            " status = excluded.status, branch = excluded.branch, "
-            " inputs_json = COALESCE(excluded.inputs_json, node_executions.inputs_json), "
-            " outputs_json = COALESCE(excluded.outputs_json, node_executions.outputs_json), "
-            " error = excluded.error, duration_ms = excluded.duration_ms, "
-            " sub_run_id = COALESCE(excluded.sub_run_id, node_executions.sub_run_id), "
-            " attempt_count = COALESCE(excluded.attempt_count, node_executions.attempt_count), "
-            " started_at_ms = COALESCE(excluded.started_at_ms, node_executions.started_at_ms), "
-            " queued_at_ms = COALESCE(excluded.queued_at_ms, node_executions.queued_at_ms)",
+            self.dialect.upsert_node_sql(),
             (
                 run_id,
                 node_id,
@@ -1488,9 +1725,12 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
                     raise
 
 
-def _row_to_dict(row: sqlite3.Row, json_fields: Iterable[str] = ()) -> dict[str, Any]:
-    """把一行转成字典，顺便把 JSON 文本字段解析回对象。"""
-    data = {key: row[key] for key in row.keys()}
+def _row_to_dict(row: Any, json_fields: Iterable[str] = ()) -> dict[str, Any]:
+    """把一行转成字典，顺便把 JSON 文本字段解析回对象。
+
+    行来自 ``dbapi``，统一是 ``dict``（MySQL 的 ``DictCursor`` 与 SQLite 适配层一致）。
+    """
+    data = dict(row)
     for field_name in json_fields:
         if field_name in data:
             parsed = data[field_name]
@@ -1502,6 +1742,15 @@ def _row_to_dict(row: sqlite3.Row, json_fields: Iterable[str] = ()) -> dict[str,
             if field_name == "definition_json" and data.get(field_name) is not None:
                 data["definition"] = data.pop(field_name)
     return data
+
+
+def _dialect_for(backend_name: str) -> Any:
+    """按后端名取方言实现。未知取值直接报错，不回落。"""
+    if backend_name == "sqlite":
+        return SqliteDialect()
+    if backend_name == "mysql":
+        return MySqlDialect()
+    raise ValueError(f"未知的持久化后端：{backend_name!r}")
 
 
 def _now_ms() -> int:

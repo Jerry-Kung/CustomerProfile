@@ -48,11 +48,16 @@ def write(
     worker_id: str,
     active_runs: int,
     last_claim_at_ms: int | None,
+    db: dict[str, Any] | None = None,
 ) -> None:
     """原子刷新存活信号。
 
     先写临时文件再 ``os.replace``：健康检查随时可能在读，读到半个 JSON 会把它
     判成「停滞」并触发一次无谓的告警。``replace`` 在同一文件系统上是原子的。
+
+    ``db`` 是数据库健康快照（``Store.health()``）。**进程活着不等于数据库能用**：
+    SQLite 时代连接线程死掉后进程仍然 Up；切 MySQL 后多了一种「线程活着但连不上
+    远端」的失效——两种都只有把库的状态写进信号才看得出来。
     """
     path = liveness_path(settings)
     payload = {
@@ -63,6 +68,8 @@ def write(
         "last_claim_at_ms": last_claim_at_ms,
         "updated_at_ms": int(time.time() * 1000),
     }
+    if db:
+        payload["db"] = db
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,6 +95,9 @@ def check(settings: Settings, *, now_ms: int | None = None) -> tuple[bool, str]:
 
     「健康」的口径是**最近一次刷新仍在阈值内**，不是「文件存在」：线程死掉后
     文件会一直留在卷上，只看存在与否等于永远判健康。
+
+    信号里带 ``db`` 时一并判定：**执行没有停滞、但数据库连不上**，同样是「领不到任务」
+    且更难从积压上看出来——它会表现为「队列深度不涨、也没有新日志」。
     """
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
     payload = read(settings)
@@ -102,7 +112,16 @@ def check(settings: Settings, *, now_ms: int | None = None) -> tuple[bool, str]:
             f"执行进程已 {age // 1000}s 未刷新存活信号"
             f"（阈值 {settings.worker_liveness_max_age_ms // 1000}s），判定消费停滞"
         )
-    return True, f"{age // 1000}s 前刷新，在飞 {payload.get('active_runs', 0)} 条"
+
+    db = payload.get("db") or {}
+    if db and db.get("db_alive") is False:
+        return False, f"执行进程存活，但数据库连接不可用：{db.get('db_error') or '未知原因'}"
+
+    detail = f"{age // 1000}s 前刷新，在飞 {payload.get('active_runs', 0)} 条"
+    last_ok = db.get("db_last_ok_at_ms") if isinstance(db, dict) else None
+    if isinstance(last_ok, int):
+        detail += f"，数据库 {(now_ms - last_ok) // 1000}s 前成功"
+    return True, detail
 
 
 def main(argv: list[str] | None = None) -> int:

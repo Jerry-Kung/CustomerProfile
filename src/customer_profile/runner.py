@@ -462,11 +462,16 @@ async def build_service(
     store: Store | None = None
     tracker: RunTracker | None = None
     if enable_store:
+        backend = settings.build_backend()
+        from .persistence.dbapi import log_backend
+
+        log_backend(backend)
         store = Store(
-            _database_path(settings),
-            busy_timeout_ms=settings.sqlite_busy_timeout_ms,
+            backend,
             # 读路径要按包回填载荷（存储瘦身）。目录与写入侧同源，两侧都从配置取。
             archive_dir=settings.trace_archive_path,
+            # 建不建表由后端决定（SQLite 建、MySQL 不建），不需要配置项：
+            # MySQL 的表由 runtime-migrate 容器随部署建好，服务进程只校验结构。
         )
         store.connect()
         if settings.interrupt_on_start and recover_running_runs:
@@ -627,10 +632,15 @@ def _per_process_quota_settings(settings: Settings) -> Any:
 
 
 def _database_path(settings: Settings) -> Path:
+    """SQLite 后端的库文件路径。非 SQLite 后端没有「路径」这个概念。
+
+    保留本函数只为「按路径取批次库」的脚本与测试；运行时装配走
+    :meth:`Settings.build_backend`。
+    """
     path = settings.sqlite_path
     if path is None:
         raise ValueError(
-            f"V0.2 仅支持 SQLite，当前 DATABASE_URL={settings.database_url!r}"
+            f"当前 DATABASE_URL={settings.database_url!r} 不是 sqlite:/// 形式，没有库文件路径"
         )
     return path
 

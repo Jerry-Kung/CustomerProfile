@@ -13,13 +13,17 @@ x-service: &service
     - "host.docker.internal:host-gateway"
 
 x-environment: &environment
-  DATABASE_URL: sqlite:////app/data/customer_profile.db
+  # 数据库地址**不在这里写死**：取 .env 的 DATABASE_URL。
+  # 写死在这里会盖掉 env_file，导致「改了 .env 却没生效」——而且 SQLite 与 MySQL
+  # 的切换只应是一次配置变更，不该重打镜像。
   DATA_DIR: /app/data
   INLINE_WORKER: "false"
   # Business concurrency belongs to backend; execute the jobs it has dispatched.
   WORKER_CONCURRENCY: ""
   # Two execution processes split the configured global LLM RPM/TPM budget.
   WORKER_REPLICAS: "2"
+  # 建不建表由后端类型决定，没有开关：SQLite 由服务进程自建（本地产物，给个路径
+  # 就能跑），MySQL 由 runtime-migrate 容器建，运行进程不持 DDL 权限。
 
 x-task-environment: &task-environment
   PYTHONPATH: /app/services/task-backend
@@ -52,6 +56,11 @@ services:
   runtime-profile-api:
     container_name: runtime-profile-api-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *service
+    # 等初始化容器成功退出再启动：库结构没就绪时启动，只会得到一个「Up 但写不进去」
+    # 的进程。初始化失败则这里根本不启动，故障在部署阶段暴露而不是在第一个任务上。
+    depends_on:
+      runtime-migrate:
+        condition: service_completed_successfully
     # Preserve the original internal hostname during the naming transition.
     networks:
       default:
@@ -86,6 +95,9 @@ services:
   runtime-profile-worker:
     container_name: runtime-profile-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *service
+    depends_on:
+      runtime-migrate:
+        condition: service_completed_successfully
     command: ["python", "-m", "customer_profile.worker"]
     environment:
       <<: *environment
@@ -109,6 +121,9 @@ services:
       default:
         aliases: [inbound]
     <<: *service
+    depends_on:
+      runtime-migrate:
+        condition: service_completed_successfully
     command: ["python", "-m", "customer_profile.inbound"]
     environment:
       <<: *environment
@@ -133,6 +148,9 @@ services:
   runtime-invitation-worker:
     container_name: runtime-invitation-worker-${COMPOSE_PROJECT_NAME:-customer-profile}
     <<: *service
+    depends_on:
+      runtime-migrate:
+        condition: service_completed_successfully
     command: ["python", "-m", "customer_profile.worker"]
     environment:
       <<: *environment
@@ -152,6 +170,33 @@ services:
     profiles: ["maintenance"]
     command: ["/opt/task-venv/bin/customer-profile-migrate"]
     restart: "no"
+
+  # ---- 运行时库初始化（每次部署自动执行，幂等，只补缺失项） --------------------
+  #
+  # **不是 maintenance profile**：它挂在每次 `up` 的启动链上，由
+  # `depends_on: service_completed_successfully` 让四个运行服务等它成功。
+  # 运维因此不需要记住「这个库初始化过没有」，也不需要判断升级后该补哪一列：
+  # 容器自己比对 information_schema 与代码里的 DDL，缺表建表、缺列加列。
+  #
+  #   docker compose up -d --no-build          # 自动带上它
+  #   docker compose run --rm runtime-migrate --check   # 只自检不改库
+  #
+  # DATABASE_URL 是 sqlite 时也照常建表（`--allow-sqlite`）：部署链对两种后端做同一件事，
+  # 服务启动前结构就已就绪。
+  #
+  # 失败即停：退出码非 0 时依赖它的服务不会启动，避免「服务 Up、表不齐、任务全失败」。
+  # 权限上，这个容器是唯一需要 DDL 权限的进程；运行服务完全不带建表能力。
+  runtime-migrate:
+    container_name: runtime-migrate-${COMPOSE_PROJECT_NAME:-customer-profile}
+    <<: *service
+    command:
+      - python
+      - -m
+      - customer_profile.persistence.init_db
+      - --allow-sqlite
+    restart: "no"
+    environment:
+      <<: *environment
 
   backend-api:
     container_name: backend-api-${COMPOSE_PROJECT_NAME:-customer-profile}
