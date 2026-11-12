@@ -156,17 +156,24 @@ def test_worker_concurrency_must_be_positive(value):
         Settings(_env_file=None, worker_concurrency=value)
 
 
-async def test_backend_dispatch_mode_starts_received_jobs_without_second_limit(
+async def test_backend_dispatch_mode_bounds_in_flight_jobs_to_claim_limit(
     tmp_path, monkeypatch
 ):
-    worker = await make_worker(tmp_path, None)
+    """派发模式有在飞上限：积压不会被一次性抽干。
+
+    这是 2026-11 UAT 事故的直接回归用例：不设上限时重启后积压的 50 条几乎同时
+    被领走，共用同一批出网名额互相等待，表现为「每条都在跑、每条都很慢」。
+    """
+    limit = 5
+    worker = await make_worker(tmp_path, None, worker_claim_limit=limit)
     service = worker.service
     started = asyncio.Queue()
     release = asyncio.Event()
     execute = worker._execute
+    total = limit + 4
     run_ids = [
         await service.submit(workflow.WORKFLOW_ID, workflow.default_inputs("[]"))
-        for _ in range(12)
+        for _ in range(total)
     ]
 
     async def held_execute(rid, *args):
@@ -177,17 +184,25 @@ async def test_backend_dispatch_mode_starts_received_jobs_without_second_limit(
     monkeypatch.setattr(worker, "_execute", held_execute)
     loop = asyncio.create_task(worker.run_forever())
     try:
-        observed = [await asyncio.wait_for(started.get(), timeout=5) for _ in run_ids]
-        assert set(observed) == set(run_ids)
-        assert await service.store.queue_depth() == 0
+        # 恰好上限条同时开跑，其余的留在队列里。
+        observed = [
+            await asyncio.wait_for(started.get(), timeout=5) for _ in range(limit)
+        ]
+        assert len(set(observed)) == limit
+        assert await service.store.queue_depth() == total - limit
         rows = [await service.store.get_run(rid) for rid in run_ids]
-        assert all(row["status"] == RunStatus.RUNNING for row in rows)
+        assert sum(1 for row in rows if row["status"] == RunStatus.RUNNING) == limit
+        assert sum(1 for row in rows if row["status"] == RunStatus.QUEUED) == total - limit
+
         worker.request_stop()
         assert not loop.done()
         release.set()
         await asyncio.wait_for(loop, timeout=5)
+
+        # 已领的跑完；未领的**留在队列里**等别的 worker，不丢也不跑。
         rows = [await service.store.get_run(rid) for rid in run_ids]
-        assert all(row["status"] == RunStatus.SUCCEEDED for row in rows)
+        assert sum(1 for row in rows if row["status"] == RunStatus.SUCCEEDED) == limit
+        assert sum(1 for row in rows if row["status"] == RunStatus.QUEUED) == total - limit
     finally:
         worker.request_stop()
         release.set()

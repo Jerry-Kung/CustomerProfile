@@ -20,6 +20,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from .definitions import RunStatus
+from . import liveness
 from .logging_config import configure_logging
 from .runner import QueueFull, RunSlotUnavailable, Service, build_service
 from .workflow_scope import accepts_workflow
@@ -272,6 +273,7 @@ def create_app(service_factory: Any = None) -> FastAPI:
             if service.store is not None else None
         )
         quota = service.quota.snapshot() if service.quota is not None else {}
+        worker_consuming, worker_liveness_detail = liveness.check(settings)
         return {
             "replay_mode": settings.replay_mode,
             # 入口与增量开关原样报：前端据此决定提交页写哪个 workflow_id。
@@ -297,6 +299,10 @@ def create_app(service_factory: Any = None) -> FastAPI:
             "inline_worker": settings.inline_worker,
             "workflow_scope": settings.workflow_scope,
             "worker_concurrency": settings.worker_concurrency,
+            # 执行进程是否还在消费。**进程 Up 不等于在干活**：数据库线程死掉时
+            # 容器与 /health 都正常，只有这里能看出来。缺信号时如实报 false。
+            "worker_consuming": worker_consuming,
+            "worker_liveness_detail": worker_liveness_detail,
             "serve_ui": settings.serve_ui,
         }
 
