@@ -463,7 +463,11 @@ class Settings(BaseSettings):
     """
 
     sqlite_busy_timeout_ms: int = 5000
-    """SQLite 写冲突的等待时长。API 与 worker 双进程共库后必需，否则写相遇会直接报 database is locked。"""
+    """SQLite 写冲突的等待时长。API 与 worker 双进程共库后必需，否则写相遇会直接报 database is locked。
+
+    切 MySQL 后这一项只对 SQLite 后端生效（批次库、快照、本地复现）；MySQL 的锁等待
+    由实例的 ``innodb_lock_wait_timeout`` 决定。
+    """
 
     # ------------------------------------------------------------ 留痕存储瘦身
     trace_persist_mode: Literal["high", "low"] = "high"
@@ -628,6 +632,18 @@ class Settings(BaseSettings):
         raw = self.database_url[len(prefix) :]
         path = Path(raw)
         return path if path.is_absolute() else (PROJECT_ROOT / path)
+
+    def build_backend(self) -> Any:
+        """按 ``DATABASE_URL`` 构造持久化后端。
+
+        支持的写法与取舍见 ``persistence.dbapi.build_backend``；这里只补配置项。
+        """
+        from .persistence.dbapi import build_backend
+
+        return build_backend(
+            self.database_url,
+            sqlite_busy_timeout_ms=self.sqlite_busy_timeout_ms,
+        )
 
     @property
     def is_replaying(self) -> bool:

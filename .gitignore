@@ -267,3 +267,7 @@ test_phone_numbers.txt
 
 # Container image exports are build artifacts, not source files.
 *.tar
+
+# 复盘/缺陷报告：常含同事本机路径与现场细节，属个人资料，不入库。
+# 需要长期留存时，先脱敏再移动到 docs/history/ 并单独提交。
+docs/sqlite缺陷报告.md

@@ -162,16 +162,29 @@ class Worker:
                 stopper.cancel()
 
     def _write_liveness(self) -> None:
-        """刷新存活信号。失败不阻断执行，见 ``liveness.write`` 的说明。"""
+        """刷新存活信号。失败不阻断执行，见 ``liveness.write`` 的说明。
+
+        一并写入数据库健康快照：**进程活着、数据库连不上**与「执行停滞」是两种
+        不同故障，但都表现为领不到任务。只把 in-flight 条数写进信号时，两者在
+        外部看起来完全一样。
+        """
         now_ms = int(time.time() * 1000)
         if self._last_claim_ms is None:
             self._last_claim_ms = now_ms
+        db = None
+        store = self.service.store
+        if store is not None:
+            try:
+                db = store.health()
+            except Exception:  # 观测手段不该成为新的故障源
+                db = None
         try:
             liveness.write(
                 self.settings,
                 worker_id=self.worker_id,
                 active_runs=len(self._executions),
                 last_claim_at_ms=self._last_claim_ms,
+                db=db,
             )
         except Exception:  # 观测手段不该成为新的故障源
             pass

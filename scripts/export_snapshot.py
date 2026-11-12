@@ -164,20 +164,46 @@ def _chunks(values: Sequence[str], size: int = CHUNK) -> Iterable[Sequence[str]]
         yield values[start : start + size]
 
 
-def _columns(connection: sqlite3.Connection, table: str) -> list[str]:
+def _columns(connection: Any, table: str, *, mysql: bool = False) -> list[str]:
+    if mysql:
+        return [
+            row["COLUMN_NAME"]
+            for row in connection.execute(
+                "SELECT COLUMN_NAME FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = ? "
+                "ORDER BY ORDINAL_POSITION",
+                (table,),
+            ).fetchall()
+        ]
     return [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
 
 
 # ---------------------------------------------------------------- 拷贝
 
 
-def create_target(source: sqlite3.Connection, target: sqlite3.Connection) -> None:
+def create_target(source: Any, target: sqlite3.Connection) -> None:
     """按源库的建表语句建目标库。
 
-    直接照抄 ``sqlite_master`` 而不是复用 ``persistence.schema``：后者是「当前代码的
-    期望结构」，而既有库里经 ``_apply_migrations`` 补出来的列（``anomaly`` 等）不在其中。
+    **源库是 SQLite 时**直接照抄 ``sqlite_master``：后者是「当前代码的期望结构」，
+    而既有库里经 ``_apply_migrations`` 补出来的列（``anomaly`` 等）不在其中。
     快照要的是**当时的结构**，抄源库才不会漏列。
+
+    **源库是 MySQL 时**没有 ``sqlite_master`` 可抄，改用 ``persistence.schema`` 的
+    当前 DDL 建一个 SQLite 目标库。这是有意的取舍：MySQL 源一定是「按当前
+    ``mysql_schema`` 建出来的」，不存在历史补列，所以当前 DDL 就是它的结构。
     """
+    if _is_mysql_connection(source):
+        from customer_profile.persistence.schema import SCHEMA_STATEMENTS
+
+        for statement in SCHEMA_STATEMENTS:
+            target.execute(statement)
+        # MySQL 侧没有「补列」概念，但旧快照脚本产出的目标库可能缺列，
+        # 这里复用同一套补列逻辑保证目标可读。
+        from customer_profile.persistence.store import _apply_migrations
+
+        _apply_migrations(target)
+        return
+
     statements = [
         row[0]
         for row in source.execute(
@@ -190,8 +216,24 @@ def create_target(source: sqlite3.Connection, target: sqlite3.Connection) -> Non
         target.execute(statement)
 
 
+def _is_mysql_connection(connection: Any) -> bool:
+    """靠类型判断而不是配置：连接对象是唯一权威来源。"""
+    return type(connection).__name__ in {"MySqlConnection", "CMySQLConnection"} or hasattr(
+        connection, "is_connected"
+    )
+
+
+def _scalar(row: Any) -> int:
+    """取一行里唯一的那一列。SQLite 给 tuple，MySQL 给 dict。"""
+    if row is None:
+        return 0
+    if isinstance(row, dict):
+        return int(next(iter(row.values())))
+    return int(row[0])
+
+
 def copy_rows(
-    source: sqlite3.Connection,
+    source: Any,
     target: sqlite3.Connection,
     table: str,
     where: str = "",
@@ -201,8 +243,12 @@ def copy_rows(
 
     列取源表与目标表的交集：源库若比目标多/少一列（脚本与库版本不同步），
     交集拷贝仍能进行，并在返回值上如实反映行数。
+
+    **MySQL 源没有 ``rowid``**，按第一列（各表都是主键，且都是稳定排序键）排序：
+    导出只需确定性，不需要物理顺序。
     """
-    source_columns = _columns(source, table)
+    mysql = _is_mysql_connection(source)
+    source_columns = _columns(source, table, mysql=mysql)
     target_columns = set(_columns(target, table))
     columns = [name for name in source_columns if name in target_columns]
     if not columns:
@@ -210,12 +256,21 @@ def copy_rows(
     select = f"SELECT {', '.join(columns)} FROM {table}"
     if where:
         select += f" WHERE {where}"
-    select += " ORDER BY rowid"
+    select += f" ORDER BY {columns[0]}"
     insert = (
         f"INSERT INTO {table} ({', '.join(columns)}) "
         f"VALUES ({', '.join('?' for _ in columns)})"
     )
     count = 0
+    if mysql:
+        # MySQL 连接没有 fetchmany 游标语义，且行是 dict：按列名取值后交给 SQLite。
+        rows = source.execute(select, params).fetchall()
+        if rows:
+            target.executemany(
+                insert, [tuple(row[name] for name in columns) for row in rows]
+            )
+        return len(rows)
+
     cursor = source.execute(select, params)
     while True:
         batch = cursor.fetchmany(CHUNK)
@@ -278,7 +333,14 @@ def _verify_gzip(path: Path) -> None:
         handle.read(1)
 
 
-def _has_table(connection: sqlite3.Connection, table: str) -> bool:
+def _has_table(connection: Any, table: str) -> bool:
+    if _is_mysql_connection(connection):
+        row = connection.execute(
+            "SELECT 1 AS hit FROM information_schema.tables "
+            "WHERE table_schema = DATABASE() AND table_name = ?",
+            (table,),
+        ).fetchone()
+        return row is not None
     row = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
     ).fetchone()
@@ -305,7 +367,7 @@ def copy_baselines(
 
 
 def export(
-    source_path: Path,
+    source_path: Path | str | None,
     out_dir: Path,
     name: str,
     since_ms: int | None,
@@ -313,26 +375,90 @@ def export(
     business_refs: Sequence[str] | None,
     dry_run: bool = False,
     source_archive_dir: Path | None = None,
+    source_url: str = "",
 ) -> dict[str, Any]:
     """执行一次快照导出，返回 manifest。
 
     **库只是骨架，包才是运行时数据。** 打包之后库里的载荷列是空的，只拷库会得到一份
     处处空白的快照——而且看起来一切正常。因此凡是 ``payload_state='packed'`` 的根运行，
     它的包必须一起带出来，缺一个都要报出来。
+
+    ``source_url`` 给了 ``mysql://`` 时从运行时库读，``source_path`` 则读本地 SQLite。
+    **产物永远是 SQLite**：快照要能过一个文件拷走、在本地零改动打开，这个性质不该
+    因为源库换成 MySQL 而改变。
     """
+    if source_url.startswith("mysql://"):
+        source = _open_mysql_source(source_url)
+        started = time.time()
+        source.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
+        return _export_from(source, out_dir, name, since_ms, until_ms, business_refs,
+                            dry_run, source_archive_dir, source_label=_mask(source_url),
+                            started=started, source_backend="mysql")
+
+    if source_path is None:
+        raise SystemExit("未给出源库：用 --db 指定 SQLite 文件，或用 --source-url 指定 MySQL")
+    source_path = Path(source_path)
     if not source_path.exists():
         raise SystemExit(f"trace db not found: {source_path}")
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    target_path = out_dir / f"{name}.db"
-    if target_path.exists():
-        raise SystemExit(f"refusing to overwrite: {target_path}")
 
     started = time.time()
     # ``mode=ro`` 只是表态；WAL 库在只读连线下也能读到已提交的最新内容。
     source = sqlite3.connect(f"file:{source_path}?mode=ro", uri=True, timeout=30)
     try:
         source.execute("BEGIN")  # 一个读事务 = 一个一致快照
+        return _export_from(source, out_dir, name, since_ms, until_ms, business_refs,
+                            dry_run, source_archive_dir,
+                            source_label=str(source_path), started=started,
+                            source_path=source_path, source_backend="sqlite")
+    finally:
+        source.close()
+
+
+def _open_mysql_source(url: str) -> Any:
+    """打开 MySQL 源连接。一致性由调用方的 ``CONSISTENT SNAPSHOT`` 保证。"""
+    import sys as _sys
+
+    _sys.path.insert(0, str(REPO_ROOT / "src"))
+    from customer_profile.persistence.dbapi import MySqlBackend, build_backend
+
+    backend = build_backend(url)
+    if not isinstance(backend, MySqlBackend):
+        raise SystemExit(customer_profile_error(url))
+    return backend.connect()
+
+
+def customer_profile_error(url: str) -> str:
+    return f"不是 MySQL 连接串：{_mask(url)}"
+
+
+def _mask(url: str) -> str:
+    if "@" not in url:
+        return url
+    head, _, tail = url.partition("://")[2].rpartition("@")
+    return f"{url.partition('://')[0]}://{head.split(':', 1)[0]}:***@{tail}"
+
+
+def _export_from(
+    source: Any,
+    out_dir: Path,
+    name: str,
+    since_ms: int | None,
+    until_ms: int | None,
+    business_refs: Sequence[str] | None,
+    dry_run: bool,
+    source_archive_dir: Path | None,
+    *,
+    source_label: str,
+    started: float,
+    source_path: Path | None = None,
+    source_backend: str = "sqlite",
+) -> dict[str, Any]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target_path = out_dir / f"{name}.db"
+    if target_path.exists():
+        raise SystemExit(f"refusing to overwrite: {target_path}")
+
+    try:
         run_ids = select_runs(source, since_ms, until_ms, business_refs)
         roots = select_root_runs(source, since_ms, until_ms, business_refs)
         if dry_run:
@@ -342,15 +468,15 @@ def export(
             if _has_table(source, BASELINE_TABLE):
                 if business_refs:
                     marks = ",".join("?" for _ in business_refs)
-                    baselines = source.execute(
-                        f"SELECT COUNT(*) FROM {BASELINE_TABLE} "
+                    baselines = _scalar(source.execute(
+                        f"SELECT COUNT(*) AS n FROM {BASELINE_TABLE} "
                         f"WHERE phone IN ({marks})",
                         list(business_refs),
-                    ).fetchone()[0]
+                    ).fetchone())
                 else:
-                    baselines = source.execute(
-                        f"SELECT COUNT(*) FROM {BASELINE_TABLE}"
-                    ).fetchone()[0]
+                    baselines = _scalar(source.execute(
+                        f"SELECT COUNT(*) AS n FROM {BASELINE_TABLE}"
+                    ).fetchone())
             return {
                 "dry_run": True,
                 "selected_runs": len(run_ids),
@@ -414,7 +540,7 @@ def export(
             target.execute("VACUUM")
         finally:
             target.close()
-        source.execute("COMMIT")
+        source.execute("COMMIT" if not _is_mysql_connection(source) else "ROLLBACK")
     finally:
         source.close()
 
@@ -427,8 +553,9 @@ def export(
         "database": target_path.name,
         "bytes": target_path.stat().st_size,
         "source": {
-            "path": str(source_path),
-            "bytes": source_path.stat().st_size,
+            "path": source_label,
+            "bytes": source_path.stat().st_size if source_path is not None else None,
+            "backend": source_backend,
             "code_commit": _code_commit(),
         },
         "filters": {
@@ -464,7 +591,12 @@ def _code_commit() -> str | None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="按时间窗/号码导出留痕库快照")
-    parser.add_argument("--db", default=str(DEFAULT_DB), help="源留痕库路径")
+    parser.add_argument("--db", default=str(DEFAULT_DB), help="源 SQLite 留痕库路径")
+    parser.add_argument(
+        "--source-url",
+        default="",
+        help="源 MySQL DSN（mysql://…）。给了它就不读 --db；产物仍是 SQLite",
+    )
     parser.add_argument("--out-dir", required=True, help="快照输出目录")
     parser.add_argument("--name", default=None, help="快照文件名（不含扩展名）")
     parser.add_argument("--since", default=None, help="起始时间，含；YYYY-MM-DD 或 ISO 8601")
@@ -497,7 +629,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     name = args.name or datetime.now().strftime("snapshot-%Y%m%d-%H%M%S")
 
     if args.dry_run:
-        source = sqlite3.connect(f"file:{Path(args.db)}?mode=ro", uri=True)
+        source = _open_mysql_source(args.source_url) if args.source_url else sqlite3.connect(
+            f"file:{Path(args.db)}?mode=ro", uri=True
+        )
         try:
             run_ids = select_runs(source, since_ms, until_ms, phones)
             roots = select_root_runs(source, since_ms, until_ms, phones)
@@ -505,14 +639,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if _has_table(source, BASELINE_TABLE):
                 if phones:
                     marks = ",".join("?" for _ in phones)
-                    baselines = source.execute(
-                        f"SELECT COUNT(*) FROM {BASELINE_TABLE} WHERE phone IN ({marks})",
+                    baselines = _scalar(source.execute(
+                        f"SELECT COUNT(*) AS n FROM {BASELINE_TABLE} WHERE phone IN ({marks})",
                         list(phones),
-                    ).fetchone()[0]
+                    ).fetchone())
                 else:
-                    baselines = source.execute(
-                        f"SELECT COUNT(*) FROM {BASELINE_TABLE}"
-                    ).fetchone()[0]
+                    baselines = _scalar(source.execute(
+                        f"SELECT COUNT(*) AS n FROM {BASELINE_TABLE}"
+                    ).fetchone())
             else:
                 baselines = 0
         finally:
@@ -525,13 +659,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     manifest = export(
-        Path(args.db),
+        None if args.source_url else Path(args.db),
         Path(args.out_dir),
         name,
         since_ms,
         until_ms,
         phones,
         source_archive_dir=Path(args.archive_dir) if args.archive_dir else None,
+        source_url=args.source_url,
     )
     counts = manifest["counts"]
     archives = manifest["archives"]
