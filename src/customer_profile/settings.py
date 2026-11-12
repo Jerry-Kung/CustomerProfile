@@ -431,6 +431,25 @@ class Settings(BaseSettings):
     worker_heartbeat_ms: int = 20_000
     """续租心跳间隔。必须显著小于租约时长，否则长运行会被误判为「租约过期」而被跑第二遍。"""
 
+    worker_claim_limit: int = 8
+    """单个 worker 进程同时在飞的**主运行**上限（``_dispatch`` 路径）。
+
+    不设上限时，重启后积压的 50 条会被几乎同时领走：它们共用 8 个出网请求名额，
+    录音、模型分析与回写互相排队等待，结果是「每条都在跑、每条都很慢」——
+    2026-11 UAT 重启后第一条直到 10:33 才结束，正是这个现象。
+
+    缺省 8 与 ``MAX_CONCURRENT_REQUESTS`` 的单进程口径对齐：多领不会更快，
+    只会让在途状态、内存与排队时间一起膨胀。设为 0 或负值按 1 处理。
+    """
+
+    worker_liveness_max_age_ms: int = 120_000
+    """worker 存活信号的过期阈值。超过这个时长没有刷新即判定「消费已停滞」。
+
+    存在的理由：数据库线程死掉时**进程仍然存活**，Docker 显示 ``Up``、API 的
+    ``/health`` 也照常返回 ok，故障因此持续到人工发现。阈值取 120 s：远大于
+    5 s 的信号刷新周期，不会误报；又远小于「积压没人处理」的可容忍时长。
+    """
+
     worker_id: str = ""
     """worker 标识。置空时按 ``主机名:pid`` 生成，用于区分「谁在跑这次运行」。"""
 
@@ -530,6 +549,8 @@ class Settings(BaseSettings):
         "worker_poll_interval_ms",
         "worker_lease_ms",
         "worker_heartbeat_ms",
+        "worker_claim_limit",
+        "worker_liveness_max_age_ms",
         "sqlite_busy_timeout_ms",
         "llm_rpm_burst",
         "llm_tpm_burst",
@@ -589,6 +610,14 @@ class Settings(BaseSettings):
                 "如需变更请先修改配置并记入 ``docs/design/执行语义口径.md``"
             )
         return value
+
+    def worker_liveliness_interval_s(self) -> float:
+        """存活信号的刷新周期（秒）。
+
+        取阈值的一半，且不低于 2 s：刷新要明显快于判定过期，否则一次轻微停顿就会
+        被读成「停滞」；过密则只是在本地卷上白写文件。
+        """
+        return max(2.0, self.worker_liveness_max_age_ms / 2000)
 
     @property
     def sqlite_path(self) -> Path | None:

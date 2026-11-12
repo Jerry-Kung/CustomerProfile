@@ -417,3 +417,80 @@ async def test_tracker_fails_loud_when_asked(store):
 
     with pytest.raises(RuntimeError, match="留痕"):
         await tracker.run_started(DummyRun())
+
+
+# ---------------------------------------------------------------- 线程生命周期回归
+
+
+async def test_cancelled_await_does_not_kill_the_connection_thread(tmp_path):
+    """协程被取消不得让数据库线程退出。
+
+    2026-11 UAT 的长时间积压即由此而来：``Store._run`` 用 ``asyncio.wrap_future``
+    接回协程，取消会链式传到内层 ``Future``；若取消发生在 ``work()`` 执行期间，
+    工作线程回写结果时抛 ``InvalidStateError``，异常分支再对同一个已取消对象
+    ``set_exception`` 再抛一次——那次没有外层捕获，线程死亡且跳过 ``connection.close()``。
+
+    线程一死，``_require_thread`` 就抛「留痕读写需要活动连接」，而进程仍存活：
+    容器 Up、API 健康检查照常通过，积压无人处理。本用例钉住「取消后线程仍活着」。
+    """
+    import threading
+
+    store = Store(tmp_path / "ledger.db")
+    store.connect()
+    try:
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_work(connection):
+            started.set()
+            release.wait(timeout=5)
+            return "done"
+
+        task = asyncio.create_task(store._run(slow_work))
+        # 等到「work 已在执行」，此时取消才落在回写阶段——正是缺陷的触发窗口。
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # 放行 work，让它执行完并尝试回写结果。
+        release.set()
+        await asyncio.sleep(0.5)
+
+        assert store._thread is not None
+        assert store._thread.alive, "取消后数据库线程已退出"
+        # 线程必须还能服务后续读写，而不是只剩一个「活着但不可用」的壳。
+        version_id = await store.ensure_definition_version("wf-after-cancel", {"a": 1})
+        assert version_id >= 1
+    finally:
+        store.close()
+
+
+async def test_thread_survives_repeated_cancellation(tmp_path):
+    """连续多次取消不得累积伤害：健康检查靠线程长期存活来保命。"""
+    import threading
+
+    store = Store(tmp_path / "ledger.db")
+    store.connect()
+    try:
+        for _ in range(5):
+            started = threading.Event()
+            release = threading.Event()
+
+            def slow_work(connection):
+                started.set()
+                release.wait(timeout=5)
+                return 1
+
+            task = asyncio.create_task(store._run(slow_work))
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            release.set()
+            await asyncio.sleep(0.1)
+
+        assert store._thread is not None and store._thread.alive
+        assert await store.ensure_definition_version("wf", {"a": 1}) >= 1
+    finally:
+        store.close()

@@ -205,7 +205,21 @@ class _ConnectionThread:
             try:
                 future.set_result(work(connection))
             except BaseException as exc:
-                future.set_exception(exc)
+                # **写回前必须再判一次 done()。** 上一行的 ``future.cancelled()`` 只覆盖
+                # 「排队期间就被取消」；如果取消发生在 ``work()`` 执行期间，``Future``
+                # 会链式收到 CANCELLED，此时 ``set_result`` 抛 ``InvalidStateError``，
+                # 再对同一个已取消对象 ``set_exception`` 会抛第二次——那次没有外层捕获，
+                # 异常直接冲出 while 循环，工作线程死亡且跳过 ``connection.close()``。
+                #
+                # 线程一死，``Store._require_thread`` 就抛「留痕读写需要活动连接」，
+                # 而这个进程仍存活，表现为「容器 Up、执行已停止」。2026-11 UAT 的
+                # 长时间积压即由此而来；触发路径是心跳续租（``worker._heartbeat``）
+                # 在任务收尾 ``heartbeat.cancel()`` 时正好撞上这次写回。
+                #
+                # ``done()`` 对 CANCELLED 也返回 True，因此这一句同时覆盖
+                # 「已取消」与「已由别处设置结果」两种情形。
+                if not future.done():
+                    future.set_exception(exc)
 
         if connection is not None:
             connection.close()

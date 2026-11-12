@@ -94,6 +94,14 @@ services:
     # Workflows can take more than 30 minutes. SIGTERM stops new claims and
     # lets the current workflow finish before Docker may force termination.
     stop_grace_period: 60m
+    # 进程存活不等于**还在消费**：数据库线程死掉后容器仍是 Up，积压却无人处理。
+    # 这里读 worker 周期性写的存活信号，过期即判 unhealthy，让故障自己浮出来。
+    healthcheck:
+      test: ["CMD", "python", "-m", "customer_profile.liveness", "--check"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 2
 
   runtime-invitation-api:
     container_name: runtime-invitation-api-${COMPOSE_PROJECT_NAME:-customer-profile}
@@ -131,6 +139,12 @@ services:
       WORKFLOW_SCOPE: invitation
       INTERRUPT_ON_START: "true"
     stop_grace_period: 60m
+    healthcheck:
+      test: ["CMD", "python", "-m", "customer_profile.liveness", "--check"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 2
 
   backend-migrate:
     container_name: backend-migrate-${COMPOSE_PROJECT_NAME:-customer-profile}

@@ -23,6 +23,7 @@ from typing import Any
 
 from loguru import logger
 
+from . import liveness
 from .definitions import RunStatus
 from .logging_config import configure_logging
 from .runner import Service, build_service
@@ -45,6 +46,11 @@ class Worker:
         self._execution_error: BaseException | None = None
         self._last_retention_ms: int | None = None
         """上次跑保留期清理的时刻。按天节流，不引入外部 cron。"""
+
+        self._last_claim_ms: int | None = None
+        """最近一次成功领取的时刻。写进存活信号，用来区分「空闲无任务」与「领不到任务」。"""
+
+        self._liveness_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------ 生命周期
 
@@ -86,6 +92,11 @@ class Worker:
             settings.worker_concurrency or "跟随 backend 派发",
             settings.writeback_enabled, settings.replay_mode,
         )
+        # 存活信号与消费**分开**驱动：消费循环卡死时这里也停更，健康检查才看得出
+        # 「执行已停止」。放在同一循环里刷新，恰恰会在最需要它的时刻一起停掉。
+        self._liveness_task = asyncio.create_task(
+            self._liveness_loop(), name="worker-liveness"
+        )
         try:
             if settings.worker_concurrency is None:
                 await self._dispatch()
@@ -100,13 +111,32 @@ class Worker:
             # 任一槽位异常时停止其他槽位的新领取，等已领取的运行收敛后再退出。
             self.request_stop()
             await self._drain()
+            if self._liveness_task is not None:
+                self._liveness_task.cancel()
+                await asyncio.gather(self._liveness_task, return_exceptions=True)
         if self._execution_error is not None:
             raise self._execution_error
         logger.info("执行进程已停止，标识={}", self.worker_id)
 
     async def _dispatch(self) -> None:
-        """把 backend 已派发的持久化任务交给执行协程，不再设业务槽位限制。"""
+        """把 backend 已派发的持久化任务交给执行协程。
+
+        **在飞主运行有上限**（``WORKER_CLAIM_LIMIT``）。不设上限的重启表现是：
+        积压的几十条被同时领走，共用同一批出网请求名额，录音、模型分析与回写
+        互相等待——每条都在跑、每条都很慢，看起来像「重启后长时间不动」。
+
+        上限按**已完成收敛**而非定时轮询：一处 ``await`` 等待任一在飞任务结束，
+        再领下一条。这样既不会空转，也不会在积压时一次性抽干队列。
+        """
+        limit = max(1, self.settings.worker_claim_limit)
         while not self._stopping.is_set():
+            # 名额已满：等在飞任务中任意一个结束（或收到停机请求）。
+            while len(self._executions) >= limit and not self._stopping.is_set():
+                await self._await_any_execution()
+
+            if self._stopping.is_set():
+                break
+
             claimed = await self._claim()
             if claimed is None:
                 await self._wait_for_work()
@@ -116,6 +146,45 @@ class Worker:
             )
             self._executions.add(task)
             task.add_done_callback(self._execution_finished)
+
+    async def _await_any_execution(self) -> None:
+        """等待任一在飞任务结束或收到停机请求，先到者为准。"""
+        pending = [task for task in self._executions if not task.done()]
+        if not pending:
+            return
+        stopper = asyncio.create_task(self._stopping.wait())
+        try:
+            await asyncio.wait(
+                [*pending, stopper], return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            if not stopper.done():
+                stopper.cancel()
+
+    def _write_liveness(self) -> None:
+        """刷新存活信号。失败不阻断执行，见 ``liveness.write`` 的说明。"""
+        now_ms = int(time.time() * 1000)
+        if self._last_claim_ms is None:
+            self._last_claim_ms = now_ms
+        try:
+            liveness.write(
+                self.settings,
+                worker_id=self.worker_id,
+                active_runs=len(self._executions),
+                last_claim_at_ms=self._last_claim_ms,
+            )
+        except Exception:  # 观测手段不该成为新的故障源
+            pass
+
+    async def _liveness_loop(self) -> None:
+        """周期性刷新存活信号。**与消费循环分开**，这样消费卡住时信号也会停更。"""
+        interval = max(1.0, self.settings.worker_liveliness_interval_s())
+        while not self._stopping.is_set():
+            self._write_liveness()
+            try:
+                await asyncio.wait_for(self._stopping.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
 
     def _execution_finished(self, task: asyncio.Task[None]) -> None:
         self._executions.discard(task)
@@ -190,10 +259,13 @@ class Worker:
         store = self.service.store
         if store is None:
             return None
-        return await store.claim_next_queued_run(
+        claimed = await store.claim_next_queued_run(
             self.worker_id, lease_ms=self.settings.worker_lease_ms,
             workflow_scope=self.settings.workflow_scope,
         )
+        if claimed is not None:
+            self._last_claim_ms = int(time.time() * 1000)
+        return claimed
 
     async def _execute_claimed(self, claimed: dict[str, Any]) -> None:
         run_id = str(claimed["run_id"])
@@ -208,6 +280,9 @@ class Worker:
             finally:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
+                # 在飞条数变了，立刻刷新一次：健康检查看到的是真实占用，
+                # 不必等下一个周期。
+                self._write_liveness()
 
     async def _execute(
         self,
