@@ -287,6 +287,22 @@ def test_model_readable_text_is_whitespace_collapsed():
     assert nodes[0]["contents"][1] == "第一句。 第二句。"
 
 
+def test_omitting_readable_leaves_a_single_content_line():
+    """原文已经读得懂时，模型**不给** ``readable``，``contents`` 就只出一条原文。
+
+    2026-11-16 UAT 反馈：销售原文（「电话接通自报家门 客户直接挂断」）本身已是完整句子，
+    次段再改写一遍等于同一句话说两遍。提示词改为「原文可读时省略 `readable`」，
+    这里钉住渲染层不替模型补一条——``contents`` 宽度由模型决定，代码只负责原文一定在。
+    """
+    records = fu.parse_records(_records_json(_record("电话接通自报家门 客户直接挂断")))
+    for model in (
+        {"nodes": [{"records": [1], "node_name": "电话邀约试驾被挂断"}]},
+        {"nodes": [{"records": [1], "node_name": "电话邀约试驾被挂断", "readable": []}]},
+    ):
+        nodes, _ = fu.assemble(records, model)
+        assert nodes[0]["contents"] == ["电话接通自报家门 客户直接挂断"]
+
+
 def test_node_caps_at_contract_limits():
     """契约 §3.3 的条数与字数上限在装配时就生效。"""
     long_text = "长" * (fu.MAX_CONTENT_CHARS + 500)
