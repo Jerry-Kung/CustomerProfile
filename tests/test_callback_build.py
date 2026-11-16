@@ -67,8 +67,13 @@ def test_top_level_is_exactly_three_keys():
     assert payload["batch_id"] == "b-1"
 
 
-def test_analysis_result_never_exceeds_the_six_contract_keys():
-    """``analysis_result`` 的键恒是契约六键的子集——多一个键就是契约外的载荷。"""
+def test_analysis_result_never_exceeds_the_seven_contract_keys():
+    """``analysis_result`` 的键恒是契约七键的子集——多一个键就是契约外的载荷。
+
+    「六键」是 v2 初版（四区块 + 两基础键）。2026-11-16 起契约新增
+    ``follow_up_history``（见 ``docs/reference/AI画像回传接口变更说明-客户跟进履历.md``），
+    因此白名单同步扩到七键。**扩白名单不等于必须出键**：见下面那条「无数据不出键」。
+    """
     payload = _build(
         facts=_facts(core_concerns="油耗", old_car_model="2019款别克君威"),
         express=_express(resistances=[{"resistance_name": "价格不透明"}]),
@@ -81,9 +86,47 @@ def test_analysis_result_never_exceeds_the_six_contract_keys():
         "purchase_decisions",
         "deal_battle",
         "decision_psychology",
+        "follow_up_history",
     }
     # 两个基础键恒在
     assert {"profile_summary", "basic_notes_updates"} <= keys
+
+
+def test_missing_follow_up_omits_the_key_instead_of_sending_empty_array():
+    """没有履历时**不出这个键**。
+
+    契约 §3.4：``follow_up_history`` 缺失＝保留原值，而 ``[]``＝**清空该客户全部履历**。
+    这次只是没取到数据，发空数组等于一次破坏性删除。这条用例是该语义的唯一挡板。
+    """
+    without = _build()["analysis_result"]
+    assert "follow_up_history" not in without
+
+    # 显式给空数组与完全不给，行为必须一致。
+    explicit = json.loads(
+        cb.build_analysis_result("13500000000", "b-1", follow_up_json="[]")
+    )["analysis_result"]
+    assert "follow_up_history" not in explicit
+
+
+def test_follow_up_history_lands_as_sent():
+    """有履历时原样落进区块：本模块不重新推导、不改写它的内容。"""
+    nodes = [
+        {
+            "id": "fu-1",
+            "sequence": 1,
+            "node_name": "首次电话邀约",
+            "contents": ["电话没接通", "销售顾问电话联系客户，客户未接听。"],
+            "followed_at": "2026-11-01T15:38:40",
+            "followed_at_text": "2026年11月1日下午",
+            "extra_info": {"跟进渠道": "电话"},
+        }
+    ]
+    payload = json.loads(
+        cb.build_analysis_result(
+            "13500000000", "b-1", follow_up_json=json.dumps(nodes, ensure_ascii=False)
+        )
+    )
+    assert payload["analysis_result"]["follow_up_history"] == nodes
 
 
 def test_result_is_a_json_string():
@@ -763,7 +806,7 @@ def test_tolerates_unparsable_inputs():
 # ---------------------------------------------------------------- 图接线（业务测试臂）
 
 def test_callback_nodes_exist_in_the_business_test_arm():
-    """回传旁支的两个节点必须在业务测试臂的图里，且接在 L3 之后。"""
+    """回传旁支的两个节点必须在业务测试臂的图里，且接在 L3 与跟进履历之后。"""
     from customer_profile.workflows import customer_profile_pipeline as pipe
 
     nodes = {n.node_id: n for n in pipe.WORKFLOW.nodes}
@@ -771,7 +814,8 @@ def test_callback_nodes_exist_in_the_business_test_arm():
 
     build = nodes[pipe.CALLBACK_BUILD]
     assert build.node_type == "code"
-    assert build.predecessors == (pipe.PRODUCTION,)
+    # 2026-11-16 起多一条前置：跟进履历是回传体的第七个键，构造体必须等它算完。
+    assert build.predecessors == (pipe.PRODUCTION, pipe.FOLLOW_UP)
     assert build.outputs == ("callback_json",)
     # 指向 ``main`` 而不是 ``build_analysis_result``：后者返回 JSON 字符串，
     # 而 execute_code 要求 code 函数返回字段字典。
@@ -780,6 +824,32 @@ def test_callback_nodes_exist_in_the_business_test_arm():
     write = nodes[pipe.CALLBACK_WRITE]
     assert write.node_type == "http-request"
     assert write.predecessors == (pipe.CALLBACK_BUILD,)
+
+
+def test_follow_up_node_hangs_off_the_record_layer():
+    """跟进履历节点接在 L0 之后，而不是回传之前。
+
+    **接在 L0 是刻意的**：它只吃「销售跟进记录」一个渠道，与 L1/L2/L3 无数据依赖；
+    挂到回传前会让这次 LLM 调用的时延落在关键路径上。同时它必须是 ``code`` 节点
+    （``llm`` 节点失败会阻塞下游子树，挡掉回传）。
+    """
+    from customer_profile.workflows import customer_profile_pipeline as pipe
+
+    nodes = {n.node_id: n for n in pipe.WORKFLOW.nodes}
+    follow = nodes[pipe.FOLLOW_UP]
+    assert follow.node_type == "code"
+    assert follow.predecessors == (pipe.L0_RECORDS,)
+    assert follow.config["function"] == "customer_profile.follow_up:build"
+    assert "follow_up_json" in follow.outputs
+
+
+def test_callback_build_receives_follow_up_json():
+    """回传体构造节点确实绑了履历出参——不绑的话第七个键永远是空的，且不会报错。"""
+    from customer_profile.workflows import customer_profile_pipeline as pipe
+
+    nodes = {n.node_id: n for n in pipe.WORKFLOW.nodes}
+    bindings = {b.target: b.source for b in nodes[pipe.CALLBACK_BUILD].bindings}
+    assert bindings["follow_up_json"] == (pipe.FOLLOW_UP, "follow_up_json")
 
 
 def test_writeback_node_is_gated_by_the_persistent_switch():

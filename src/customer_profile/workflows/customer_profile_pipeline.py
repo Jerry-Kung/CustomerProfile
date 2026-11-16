@@ -224,6 +224,16 @@ PRODUCTION，``result1`` 的来源与形状一个字不改。"""
 CALLBACK_WRITE = "pipeline_callback_writeback"
 """回写节点。带 ``@writeback``，受既有的 ``WRITEBACK_ENABLED`` 闸门管辖（缺省不发送）。"""
 
+FOLLOW_UP = "pipeline_follow_up"
+"""跟进履历整理（code 节点，内部 1 次 LLM 调用）。
+
+**为什么接在 L0 之后、与主链并行**：它只吃「销售跟进记录」一个渠道，与 L1/L2/L3
+没有任何数据依赖；挂在回传前会让这段时延落在关键路径上。
+
+**为什么是 code 节点**：调度器对失败节点会阻塞整棵下游子树，做成 ``llm`` 节点则
+一次调用失败就挡掉回传。无记录时在发起调用前返回（实测 31% 的案例没有这个渠道），
+失败则由代码按记录 1:1 兜底——见 :mod:`customer_profile.follow_up`。"""
+
 SHARED_CODE_MODULE = "customer_profile.workflows.shared_code"
 SLUG = "customer_profile_pipeline"
 SYSTEM_TEXT = "You are a helpful AI assistant."
@@ -4311,11 +4321,33 @@ WORKFLOW = WorkflowDef(
             },
         ),
         # ---------------------------------------------------------- v2 回传（旁支）
+        # ---- 跟进履历（独立 1 次 LLM）
+        # 接在 L0 之后而不是回传之前：它只吃「销售跟进记录」一个渠道，与 L1/L2/L3
+        # 无数据依赖，挂在回传前会让这次调用的时延落在关键路径上。
+        make_node(
+            FOLLOW_UP,
+            "跟进履历整理",
+            "code",
+            after=(L0_RECORDS,),
+            inputs={"records_json": (L0_RECORDS, "records_json")},
+            outputs=(
+                "follow_up_json",
+                "follow_status",
+                "follow_calls",
+                "follow_error",
+                "record_count",
+                "node_count",
+                "supplemented",
+                "fallback_used",
+                "sanitize_dropped",
+            ),
+            function="customer_profile.follow_up:build",
+        ),
         make_node(
             CALLBACK_BUILD,
             "回传体构造",
             "code",
-            after=(PRODUCTION,),
+            after=(PRODUCTION, FOLLOW_UP),
             inputs={
                 "phone": (START, "phone_number"),
                 "batch_id": (START, "batch_id"),
@@ -4333,6 +4365,8 @@ WORKFLOW = WorkflowDef(
                 # 回传体不读，于是客户说了某项信息而管线判不实时，销售只看得到一条
                 # 空白，分不清是「客户没提」还是「提了但对不上」。
                 "to_confirm_json": (L2_ENUM_MAP, "to_confirm_json"),
+                # 跟进履历。空数组时整个区块不出——契约里 ``[]`` 是「清空」语义。
+                "follow_up_json": (FOLLOW_UP, "follow_up_json"),
             },
             outputs=("callback_json",),
             # 指向 ``main`` 而不是 ``build_analysis_result``：后者返回的是 JSON **字符串**，
