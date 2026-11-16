@@ -370,6 +370,7 @@ def _checker_functions(llm: Any, templates: Any) -> dict[str, Any]:
     """
     from functools import partial
 
+    from . import follow_up
     from .workflows import customer_profile_pipeline as pipeline
 
     def _ref(func: Any) -> str:
@@ -384,6 +385,11 @@ def _checker_functions(llm: Any, templates: Any) -> dict[str, Any]:
         # 失败不阻断。它原先是个 llm 节点，失败会阻塞下游子树（见 L2_FALLBACK 常量说明）。
         _ref(pipeline.fallback_verdict): partial(
             pipeline.fallback_verdict, llm=llm, templates=templates
+        ),
+        # 跟进履历与上面三个同形：code 节点调 LLM，无记录时零成本短路，
+        # 失败由代码兜底、不阻断回传。它不属于管线模块，因此单独取引用。
+        "customer_profile.follow_up:build": partial(
+            follow_up.build, llm=llm, templates=templates
         ),
     }
 

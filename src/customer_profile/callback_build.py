@@ -32,6 +32,7 @@ import hashlib
 import json
 from typing import Any, Iterable, Mapping, Sequence
 
+from . import follow_up
 from . import internal_fields as inf
 from . import notes_contract as nc
 from . import projection as proj
@@ -1343,6 +1344,36 @@ def _express_emotion_state(express: Mapping[str, Any]) -> str:
 
 
 # ====================================================================
+# 区块五：follow_up_history
+# ====================================================================
+
+
+def build_follow_up_history(follow_up_json: Any = "[]") -> list[dict[str, Any]]:
+    """``follow_up_history``：销售跟进履历。
+
+    **与另外四个区块的一个根本区别**：那四个由 ``facts`` 纯代码投影，本项目对它们
+    拥有完整的取值来源；这一块的内容来自 ``follow_up`` 节点的产出（真人对客户做过
+    什么），本模块既不重新推导、也不改写，只做**契约形状的最后一道核对**。
+
+    **空数组必须返回空数组**：调用侧据此判断「不出这个键」。契约 §3.4 里
+    ``[]`` 是「清空该客户全部履历」，而我们没有任何一条履历可写时发出 ``[]``，
+    等于把一个「没取到数据」变成一次**破坏性删除**。
+    """
+    data = _payload(follow_up_json)
+    if isinstance(data, dict):
+        data = data.get("follow_up_history", data.get("nodes"))
+    if not isinstance(data, (list, tuple)):
+        return []
+
+    out: list[dict[str, Any]] = []
+    for entry in data:
+        if isinstance(entry, dict):
+            out.append(dict(entry))
+    # 节点侧已经做过一次自检；这里再按契约的上限裁一次，防止上游换了实现。
+    return out[: follow_up.MAX_NODES]
+
+
+# ====================================================================
 # 组装
 # ====================================================================
 
@@ -1355,6 +1386,7 @@ def build_analysis_result(
     express_json: Any = "{}",
     claims_json: Any = "{}",
     to_confirm_json: Any = "[]",
+    follow_up_json: Any = "[]",
 ) -> str:
     """把一份已定稿的事实装成回传请求体（顶层三键），返回 **JSON 字符串**。
 
@@ -1373,6 +1405,8 @@ def build_analysis_result(
       换车动因）不在 Notes 契约内，或会被 ``thin`` 档清空，Notes 里因此没有它们的条目。
       这一项让出口能取到那些字段的 ``reasoning_chain`` 与 ``basis_of_inference``，
       渲染出销售读得懂的推导链，而不是退到一句内部审计话。缺省为空——旧调用方不受影响。
+    - ``follow_up_json``：跟进履历节点（``follow_up.build``）的产出。**缺省空数组**，
+      此时整个 ``follow_up_history`` 键不出现——与契约里 ``[]``＝「清空」的语义区分开。
 
     **本函数不发任何请求**：它只造请求体。真实回传由带 ``@writeback`` 的节点负责，
     默认开关关闭（``WRITEBACK_ENABLED=false``）。
@@ -1418,6 +1452,13 @@ def build_analysis_result(
     if psychology:
         analysis_result["decision_psychology"] = psychology
 
+    # ---- follow_up_history：**只在有内容时才出这个键**。
+    # 契约 §3.4：``[]`` 是「清空该客户全部履历」。没有数据时出空数组等于一次
+    # 破坏性删除，因此这里与另外四个区块的 ``if xxx:`` 同形，且更需要它。
+    follow_up = build_follow_up_history(follow_up_json)
+    if follow_up:
+        analysis_result["follow_up_history"] = follow_up
+
     # ---- 全局唯一性：``(phone, item_id)`` 与 ``(phone, psychology_key)``。
     # id 重复会让整次回传递交失败，因此**在这里就拦下**，而不是等接口返回 500。
     item_ids: list[str] = []
@@ -1446,6 +1487,7 @@ def main(
     express_json: Any = "{}",
     claims_json: Any = "{}",
     to_confirm_json: Any = "[]",
+    follow_up_json: Any = "[]",
 ) -> dict[str, Any]:
     """工作流 ``code`` 节点的入口（返回 ``{出参名: 值}``，由执行器逐字段取出）。
 
@@ -1463,6 +1505,7 @@ def main(
             express_json,
             claims_json,
             to_confirm_json,
+            follow_up_json,
         )
     }
 
@@ -1481,6 +1524,7 @@ __all__ = [
     "build_purchase_decisions",
     "build_deal_battle",
     "build_decision_psychology",
+    "build_follow_up_history",
     "build_profile_summary",
     "build_basic_notes_updates",
     "main",
