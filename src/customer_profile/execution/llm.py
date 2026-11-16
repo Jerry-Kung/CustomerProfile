@@ -358,7 +358,7 @@ class LlmClient:
     """统一 LLM 客户端。
 
     模型、temperature、thinking 全部由 ``Settings`` 给定，不在调用点配置（§6.4.4）：
-    全项目同一款模型、``temperature=0.5``、thinking 开启、不设其他参数。
+    全项目同一款模型、``temperature=0.5``，思考开关与输出上限按配置发送。
     """
 
     def __init__(
@@ -445,7 +445,9 @@ class LlmClient:
     ) -> dict[str, Any]:
         """构造请求体。除模型、 messages 与 temperature 外，
 
-        仅在 ``LLM_ENABLE_THINKING`` 被显式设置时额外带上 ``enable_thinking``。
+        仅在 ``LLM_ENABLE_THINKING`` 被显式设置时发送对应格式的思考开关。
+        火山使用 ``thinking.type``，原有阿里等接口使用 ``enable_thinking``；
+        格式由 ``LLM_THINKING_FORMAT`` 显式指定或按接口域名识别。
         未设置（``None``）时不发这个键，沿用服务端默认值——
         ``LLM_MAX_TOKENS`` 同理。
         不同服务商对该开关的默认取值不同，发一个我们猜测的值
@@ -457,7 +459,14 @@ class LlmClient:
             "temperature": self._settings.llm_temperature,
         }
         if self._settings.llm_enable_thinking is not None:
-            payload["enable_thinking"] = self._settings.llm_enable_thinking
+            if self._settings.resolved_llm_thinking_format == "thinking":
+                payload["thinking"] = {
+                    "type": (
+                        "enabled" if self._settings.llm_enable_thinking else "disabled"
+                    )
+                }
+            else:
+                payload["enable_thinking"] = self._settings.llm_enable_thinking
         if self._settings.llm_max_tokens is not None:
             payload["max_tokens"] = self._settings.llm_max_tokens
         return payload

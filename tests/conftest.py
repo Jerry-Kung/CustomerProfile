@@ -38,6 +38,7 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
         # 显式钉定为 None：测试不得从开发者的 .env 取值，
         # 否则本地配置会悄悄改变请求体形状并让用例忽红忽绿。
         "llm_enable_thinking": None,
+        "llm_thinking_format": "auto",
         "llm_max_tokens": None,
     }
     defaults.update(overrides)
