@@ -227,19 +227,34 @@ def test_assemble_groups_by_model_and_backfills_the_rest():
             _record("三", created_at="2026-11-01 11:00:00", record_id="c"),
         )
     )
-    model = {"nodes": [{"records": [1, 2], "node_name": "连续两次邀约", "readable": ["两次都没接通。"]}]}
+    model = {
+        "nodes": [
+            {
+                "records": [1, 2],
+                "node_name": "连续两次邀约",
+                "summary": "销售顾问连续两次电话联系客户邀请试驾，均未接通。",
+                "next_step": "本次仍需后续跟进，约定次日再沟通。",
+            }
+        ]
+    }
     nodes, supplemented = fu.assemble(records, model)
     assert supplemented == [2]
     assert len(nodes) == 2
     assert nodes[0]["node_name"] == "连续两次邀约"
-    # 组内两条原文都在（两段式的首段）。
-    assert nodes[0]["contents"][:2] == ["一", "二"]
-    # 第三条回到时间序末尾，而不是被挤到最前。
+    assert nodes[0]["contents"] == [
+        "销售顾问连续两次电话联系客户邀请试驾，均未接通。",
+        "本次仍需后续跟进，约定次日再沟通。",
+    ]
+    # 模型没覆盖的第三条回落到兜底，仍在时间序末尾。
     assert nodes[1]["contents"] == ["三"]
 
 
-def test_assemble_keeps_every_raw_line_from_a_group():
-    """一句可读陈述**不能**把组内多条原文吃掉——这是最容易溜过去的退化路径。"""
+def test_contents_are_summary_then_next_step_never_the_raw_text():
+    """``contents`` 是模型的「跟进小结 + 后续安排」两段，销售原文不进卡片。
+
+    2026-11-17 口径：原文大量是「电话没接通」「白天联系。。。。。。」这类碎片，与小结并列
+    只是让读者把同一件事读两遍，因此整段去掉。这里钉住「原文一条都不出现」。
+    """
     records = fu.parse_records(
         _records_json(
             _record("电话没接通", record_id="a"),
@@ -247,9 +262,101 @@ def test_assemble_keeps_every_raw_line_from_a_group():
             _record("通话转入语音留言", record_id="c"),
         )
     )
-    model = {"nodes": [{"records": [1, 2, 3], "node_name": "电话跟进", "readable": ["多次联系未接通。"]}]}
+    model = {
+        "nodes": [
+            {
+                "records": [1, 2, 3],
+                "node_name": "电话跟进",
+                "summary": "销售顾问三次电话联系客户邀请试驾，均未接通。",
+                "next_step": "本次仍需后续跟进，约定次日再联系。",
+            }
+        ]
+    }
     nodes, _ = fu.assemble(records, model)
-    assert nodes[0]["contents"] == ["电话没接通", "用户忙无法接通", "通话转入语音留言", "多次联系未接通。"]
+    assert nodes[0]["contents"] == [
+        "销售顾问三次电话联系客户邀请试驾，均未接通。",
+        "本次仍需后续跟进，约定次日再联系。",
+    ]
+
+
+def test_next_step_absent_still_yields_the_summary():
+    """模型漏写 ``next_step`` 时只出小结，不编造一条后续安排。"""
+    records = fu.parse_records(_records_json(_record("电话没接通")))
+    model = {"nodes": [{"records": [1], "node_name": "首次电话邀约", "summary": "销售顾问电话联系客户，客户未接听。"}]}
+    nodes, _ = fu.assemble(records, model)
+    assert nodes[0]["contents"] == ["销售顾问电话联系客户，客户未接听。"]
+
+
+def test_model_paragraph_may_arrive_as_a_list():
+    """模型偶尔把一段给成数组：内容非空就照收，不因形态不合预期整段丢掉。"""
+    records = fu.parse_records(_records_json(_record("电话没接通")))
+    model = {
+        "nodes": [
+            {
+                "records": [1],
+                "node_name": "首次电话邀约",
+                "summary": ["销售顾问电话联系客户，客户未接听。"],
+                "next_step": ["约定次日再联系。"],
+            }
+        ]
+    }
+    nodes, _ = fu.assemble(records, model)
+    assert nodes[0]["contents"] == ["销售顾问电话联系客户，客户未接听。", "约定次日再联系。"]
+
+
+def test_extra_info_reflects_the_latest_record_of_a_merged_node():
+    """合并节点下方的标签取**最新**那条记录，与正文写的结论对齐。
+
+    实测踩到：节点把两次未接通合并成一条，正文按最新那条写「A 级、11 月 3 日」，
+    而标签取首条显示「C 级、2026-11-01」——同一张卡片上两个说法。
+    """
+    records = fu.parse_records(
+        _records_json(
+            _record(
+                "客户忙",
+                created_at="2026-10-31 12:54:05",
+                level="C 级意向（中）",
+                record_id="a",
+            ),
+            _record(
+                "客户没接听",
+                created_at="2026-10-31 12:54:09",
+                level="A 级意向（高）",
+                record_id="b",
+            ),
+        )
+    )
+    model = {
+        "nodes": [
+            {
+                "records": [1, 2],
+                "node_name": "两次未接通",
+                "summary": "销售顾问两次电话联系客户邀请试驾，均未接通。",
+                "next_step": "本次仍需后续跟进，意向级别为 A 级（高）。",
+            }
+        ]
+    }
+    nodes, _ = fu.assemble(records, model)
+    assert nodes[0]["extra_info"]["意向级别"] == "A 级意向（高）"
+    # 时间轴位置仍按首条记录。
+    assert nodes[0]["followed_at"] == "2026-10-31T12:54:05"
+
+
+def test_merged_node_keeps_every_consultant_who_took_part():
+    """合并节点里每个顾问都参与过——只留最后一位会把前面的人从卡片上抹掉。"""
+    records = fu.parse_records(
+        _records_json(
+            _record("一", created_at="2026-11-01 09:00:00", consultant="李凡", record_id="a"),
+            _record("二", created_at="2026-11-01 10:00:00", consultant="王宇昕", record_id="b"),
+        )
+    )
+    model = {"nodes": [{"records": [1, 2], "node_name": "两次邀约", "summary": "两次电话邀约。"}]}
+    nodes, _ = fu.assemble(records, model)
+    assert nodes[0]["extra_info"]["参与人"] == [
+        "销售顾问李凡",
+        "销售顾问王宇昕",
+        "客户本人",
+    ]
 
 
 def test_model_groups_reject_out_of_range_and_duplicate_indexes():
@@ -267,11 +374,10 @@ def test_model_groups_reject_out_of_range_and_duplicate_indexes():
 
 
 def test_raw_content_is_kept_verbatim_including_inner_whitespace():
-    """首段是**销售原文**，连空白都不改。
+    """兜底路径展示的是**销售原文**，连空白都不改。
 
     实测有销售在跟进内容里连打多个空格（「女士关注了x700   目前在展会上…」）。
-    把它折叠成单空格更好看，但那就不是他写下的话了——而这段原文是交接时的凭据
-    （``方案设计.md`` §7 第 3 条「逐字保留」）。
+    把它折叠成单空格更好看，但那就不是他写下的话了——而兜底展示时那是读者唯一能看到的凭据。
     """
     raw = "女士关注了x700   目前在展会上表示下周可以到店看车 请跟进 "
     records = fu.parse_records(_records_json(_record(raw)))
@@ -279,28 +385,21 @@ def test_raw_content_is_kept_verbatim_including_inner_whitespace():
     assert nodes[0]["contents"][0] == raw.strip()
 
 
-def test_model_readable_text_is_whitespace_collapsed():
-    """次段（模型陈述）反而要折叠空白：那里是模型偶发的换行与多余空格。"""
+def test_model_paragraphs_are_whitespace_collapsed():
+    """模型写的两段反而要折叠空白：那里是模型偶发的换行与多余空格。"""
     records = fu.parse_records(_records_json(_record("原文")))
-    model = {"nodes": [{"records": [1], "node_name": "A", "readable": ["第一句。\n\n   第二句。"]}]}
+    model = {
+        "nodes": [
+            {
+                "records": [1],
+                "node_name": "A",
+                "summary": "第一句。\n\n   第二句。",
+                "next_step": "约定次日再联系。",
+            }
+        ]
+    }
     nodes, _ = fu.assemble(records, model)
-    assert nodes[0]["contents"][1] == "第一句。 第二句。"
-
-
-def test_omitting_readable_leaves_a_single_content_line():
-    """原文已经读得懂时，模型**不给** ``readable``，``contents`` 就只出一条原文。
-
-    2026-11-16 UAT 反馈：销售原文（「电话接通自报家门 客户直接挂断」）本身已是完整句子，
-    次段再改写一遍等于同一句话说两遍。提示词改为「原文可读时省略 `readable`」，
-    这里钉住渲染层不替模型补一条——``contents`` 宽度由模型决定，代码只负责原文一定在。
-    """
-    records = fu.parse_records(_records_json(_record("电话接通自报家门 客户直接挂断")))
-    for model in (
-        {"nodes": [{"records": [1], "node_name": "电话邀约试驾被挂断"}]},
-        {"nodes": [{"records": [1], "node_name": "电话邀约试驾被挂断", "readable": []}]},
-    ):
-        nodes, _ = fu.assemble(records, model)
-        assert nodes[0]["contents"] == ["电话接通自报家门 客户直接挂断"]
+    assert nodes[0]["contents"] == ["第一句。 第二句。", "约定次日再联系。"]
 
 
 def test_node_caps_at_contract_limits():
@@ -412,7 +511,7 @@ def test_missing_llm_also_falls_back():
     assert len(json.loads(out["follow_up_json"])) == 1
 
 
-def test_happy_path_uses_model_names_and_keeps_raw_text():
+def test_happy_path_uses_model_names_and_writes_both_paragraphs():
     import asyncio
 
     llm = _FakeLLM(
@@ -421,7 +520,8 @@ def test_happy_path_uses_model_names_and_keeps_raw_text():
                 {
                     "records": [1],
                     "node_name": "首次电话邀约",
-                    "readable": ["销售顾问电话联系客户，客户未接听，约定次日再沟通。"],
+                    "summary": "销售顾问电话联系客户邀请试驾，客户未接听。",
+                    "next_step": "本次仍需后续跟进，约定次日再沟通。",
                 }
             ]
         }
@@ -431,9 +531,11 @@ def test_happy_path_uses_model_names_and_keeps_raw_text():
     assert out["follow_status"] == "ok"
     assert out["fallback_used"] == "false"
     assert nodes[0]["node_name"] == "首次电话邀约"
-    # 两段式：原文在，模型的可读陈述在。
-    assert nodes[0]["contents"][0] == "电话没接通"
-    assert "未接听" in nodes[0]["contents"][1]
+    # 两段式：跟进小结在前，后续安排在后；销售原文不上卡片。
+    assert nodes[0]["contents"] == [
+        "销售顾问电话联系客户邀请试驾，客户未接听。",
+        "本次仍需后续跟进，约定次日再沟通。",
+    ]
     assert nodes[0]["followed_at"] == "2026-11-01T15:38:40"
     assert nodes[0]["followed_at_text"] == "2026年11月1日下午"
 
