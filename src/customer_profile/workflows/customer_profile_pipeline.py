@@ -1355,6 +1355,14 @@ _BASIS_RANK: dict[str, int] = {
 }
 
 
+def _chain_steps(entry: dict) -> tuple[str, ...]:
+    """一条 L1 结论是否带了推导链（``reasoning_chain``），按与 ``project_claims`` 同口径判。"""
+    value = entry.get("reasoning_chain") or ()
+    if isinstance(value, str):
+        return (value,) if value.strip() else ()
+    return tuple(str(item) for item in value if str(item).strip())
+
+
 def merge_l1_layers(facts_json, fields_json) -> dict:
     """L1 合并层（纯代码，0 token）：把 1a 事实层与 1c 分析投影层按字段求并集。
 
@@ -1431,6 +1439,24 @@ def merge_l1_layers(facts_json, fields_json) -> dict:
             target["subject"] = declared
             subject_overrides += 1
 
+    # v3.6：**推导链不从 1a 覆盖到 1c 的空链上**（2026-11-17 UAT 核查问题一/建议 3）。
+    #
+    # 1a 只负责「原文里有什么」，实测 43.8% 的事实条目根本没给 ``reasoning_chain``；
+    # 1c 则被要求给每条结论写链。此前同档位一律以 1a 为准，于是 1c 为同一个字段补齐的
+    # 那条链被整条丢弃，字段落到投影层的代码兜底句——「没变化」的那 2296 条正是这么来的。
+    # 规则：1a 胜出但链为空时，沿用 1c 那条的链；两边都有链则仍用 1a 的（1a 的锚点更硬）。
+    # 只补链，不动 ``value`` / ``basis`` / 锚点——那仍是 1a 占优的那一份。
+    steps_from_fields = 0
+    for entry in fields:
+        attribute = str(entry.get("attribute") or "").strip()
+        target = merged.get(attribute) if attribute else None
+        if target is None or target is entry:
+            continue
+        if _chain_steps(target) or not _chain_steps(entry):
+            continue
+        target["reasoning_chain"] = list(entry.get("reasoning_chain") or ())
+        steps_from_fields += 1
+
     return {
         "claims_json": json.dumps({"fields": payload}, ensure_ascii=False, default=str),
         "merged_count": len(payload),
@@ -1439,6 +1465,7 @@ def merge_l1_layers(facts_json, fields_json) -> dict:
         "from_facts_only": from_facts_only,
         "overrode": overrode,
         "subject_overrides": subject_overrides,
+        "steps_from_fields": steps_from_fields,
     }
 
 
@@ -2945,6 +2972,12 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
 
     并入时**保持产物形状不变**：`basic_notes_updates` 的三键结构是下游契约，
     兜底改的只是取值与置信度，不新增键。
+
+    改判后推导链**替换「结论推断」这一段**，不往末尾追加（2026-11-17 UAT 核查问题二）：
+    此前 ``steps.append(lead)`` 在已有四段后挂一条无标签的尾巴，交付里 551 条因此变成
+    「五段式」，前端按前缀着色时分不清它属于哪一段。L2 兜底的定位是「只改取值与置信度」，
+    理由属于结论推断——那一段该换成什么就换成什么，``信源整合`` / ``信息缺位`` /
+    ``检查核对`` 三段照旧沿用 L1 的（见 :func:`customer_profile.readable.merge_stage`）。
     """
     candidates = _claims_payload(candidates_json)[0]
     verdict = proj.apply_l2_verdict(candidates, verdict_json)
@@ -2970,19 +3003,24 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
         # v3.3：移除 reason 中的工程术语措辞（问题2修复）。
         # L2 提示词已规范，但为防止模型偶发漏出，代码再清洗一遍。
         if soft:
-            lead = f"根据已有信息推断：{reason}" if reason else "据已有事实归纳（低置信，供核对）"
+            # 不带「推断：」前缀：这一段进链时会由 ``merge_stage`` 统一加「结论推断：」，
+            # 自带一个前缀就成了「结论推断：根据已有信息推断：…」。
+            lead = reason or "只凭已有事实能判断到这一档，置信低，待向客户核对"
         else:
             lead = reason if reason else "多条来源同向，取一致结论"
         # 证据位填**理由里的事实部分**（结论从句之前的那段），而不是留空让前端整块不渲染。
         # 兜底补的字段本就没有原文锚点，这是能给到销售的最接近「依据」的内容。
-        factual = proj._strip_conclusion(reason) if reason else ""
+        factual = proj._evidence_basis(reason) if reason else ""
         existing = by_key.get(key)
         if existing is not None:
             existing["attribute_value"] = item["attribute_value"]
             detail = existing.setdefault("reasoning_detail", {})
             detail["confidence"] = confidence
-            steps = detail.setdefault("steps", [])
-            steps.append(lead)
+            # 替换「结论推断」段，而不是往链尾挂一句：追加会破坏前端按前缀着色的四段
+            # 结构（见本函数 docstring 与 ``readable.merge_stage``）。
+            detail["steps"] = rdb.merge_stage(
+                detail.get("steps"), rdb.STAGE_CONCLUSION, lead
+            )
             if factual and not detail.get("evidence"):
                 detail["evidence"] = [factual]
         else:
@@ -2996,7 +3034,7 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
                             if soft
                             else "由多条来源同向归纳得到"
                         ),
-                        "steps": [lead],
+                        "steps": rdb.merge_stage((), rdb.STAGE_CONCLUSION, lead),
                         "evidence": [factual] if factual else [],
                         "confidence": confidence,
                     },
@@ -3983,7 +4021,8 @@ WORKFLOW = WorkflowDef(
                 "fields_json": (L1_FIELDS, "result"),
             },
             outputs=("claims_json", "merged_count", "facts_count", "fields_count",
-                     "from_facts_only", "overrode", "subject_overrides"),
+                     "from_facts_only", "overrode", "subject_overrides",
+                     "steps_from_fields"),
             function=f"customer_profile.workflows.{SLUG}:merge_l1_layers",
         ),
         make_node(

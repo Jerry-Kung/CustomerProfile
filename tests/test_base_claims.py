@@ -65,16 +65,32 @@ def test_same_value_inherits_evidence_from_the_copy():
     assert field["base_origin"] == "A=B"
 
 
-def test_value_difference_uses_the_api_and_drops_the_old_evidence():
-    """A 与 B 不同：以 A 为准，只剩 A 的 summary，**不臆造**证据与置信度。"""
+def test_value_difference_uses_the_api_and_keeps_the_old_derivation():
+    """A 与 B 不同：以 A 为准，只有 A 的 summary，**不臆造**证据与置信度。
+
+    **但推导链沿用 B**（2026-11-17）：A 读回的字段根本没有 steps，整条丢掉会让这个
+    字段在出口退回代码兜底句。``steps`` 说的是「上回怎么想到这一层的」，取值换了它通常
+    仍然成立；证据与置信度指的是旧值，不沿用。
+    """
     outcome = assemble_base_claims(
         _profile(occupation=_note("医生", summary="客户自述在医院工作")),
-        _callback([_entry("occupation", "教师", evidence=["销售跟进记录：我在学校教书"], confidence=0.9)]),
+        _callback(
+            [
+                _entry(
+                    "occupation",
+                    "教师",
+                    evidence=["销售跟进记录：我在学校教书"],
+                    steps=["客户提到带学生上课", "结论推断：职业记为教师"],
+                    confidence=0.9,
+                )
+            ]
+        ),
     )
     field = _fields(outcome)["occupation"]
     assert field["value"] == "医生"
     assert field["basis_of_inference"] == ["客户自述在医院工作"]
     assert field["confidence"] is None
+    assert field["reasoning_chain"] == ["客户提到带学生上课", "结论推断：职业记为教师"]
     assert field["base_origin"] == "A!=B"
 
 

@@ -31,6 +31,17 @@
 
 **为什么要记 `source_quote`**：它是一个诚实的标记——告诉下游「这个值不是客户原话，是模型改过的」。漏了它，销售就分不清「客户说的」和「模型改的」。
 
+### 每条结论都要带推导链（`reasoning_chain`），锚定型事实也不例外
+
+`reasoning_chain` 写的是「**由这条依据怎么推到这个取值**」，按四段式组织、标签写在句首
+（`信源整合：` / `信息缺位：` / `结论推断：` / `检查核对：`），格式见 §六。
+
+**锚定型事实最容易漏**（实测 43.8% 的事实条目没有给链）：客户说了一句原话，不等于
+这句话一眼就能看出取值。销售点开看到的会是「客户说了一句话」，但看不懂你为什么把它记成
+这个字段、这个值——这层必须由 `reasoning_chain` 补上。**只有能从原文逐字取到的值
+（另有 `value_signal` 兜底的信号型字段）可以只写「信源整合 + 结论推断」两句，但一条都不写会
+被下游当作没有推导，整条丢弃。**
+
 ### 关于 `value_signal`（**信号型字段必填**）
 
 对 `title`（性别/称呼）、`customer_name`（姓名）、`driver_license_status`（驾照）、
@@ -89,11 +100,11 @@
 只输出若干行，**每行一个 JSON 对象**，不要数组、不要围栏、不要说明文字：
 
 ```
-{"attribute": "old_car_model", "value": "2019款中型轿车", "basis": "fact", "anchor_kind": "verbatim", "subject": "customer", "record_channel": "外呼录音信息", "anchor": "我现在开的是一九年的那台轿车", "confidence": 0.9}
-{"attribute": "title", "value": "Mr", "basis": "fact", "anchor_kind": "verbatim", "subject": "customer", "record_channel": "外呼录音信息", "anchor": "李先生说下周来", "value_signal": "先生", "confidence": 0.8}
-{"attribute": "annual_income", "value": "30-50万", "basis": "inferred_high", "subject": "customer", "basis_of_inference": ["职业为互联网中层", "关注 30 万以上车型"], "reasoning_chain": ["职业属互联网中层，收入区间偏高", "关注的车型集中在 30 万以上", "两条线索同向，故收敛到 30-50 万"], "confidence": 0.7}
-{"attribute": "age", "value": "50岁及以上", "basis": "inferred_high", "subject": "customer", "record_channel": "第三方画像数据", "anchor": "预测年龄段", "anchor_kind": "verbatim", "basis_of_inference": ["第三方画像标签“预测年龄段”给出“50岁及以上”（置信度 0.985）"], "reasoning_chain": ["第三方画像直接给出年龄段预测，故按其取值"], "confidence": 0.75}
-{"attribute": "competing_model", "value": "某某 C10", "basis": "fact", "anchor_kind": "normalized", "subject": "customer", "record_channel": "试驾录音信息", "anchor": "某某 C 幺零", "source_quote": "我也看了某某 C 幺零", "normalize_reason": "ASR 音近纠错（同音字纠回本来写法）", "confidence": 0.85}
+{"attribute": "old_car_model", "value": "2019款中型轿车", "basis": "fact", "anchor_kind": "verbatim", "subject": "customer", "record_channel": "外呼录音信息", "anchor": "我现在开的是一九年的那台轿车", "reasoning_chain": ["信源整合：客户自述现车是「一九年的那台轿车」，车龄约六年", "结论推断：按轿车定位与车龄，记为 2019 款中型轿车"], "confidence": 0.9}
+{"attribute": "title", "value": "Mr", "basis": "fact", "anchor_kind": "verbatim", "subject": "customer", "record_channel": "外呼录音信息", "anchor": "李先生说下周来", "value_signal": "先生", "reasoning_chain": ["信源整合：外呼接通时客户自报「李先生」", "结论推断：称呼为先生，性别记为男"], "confidence": 0.8}
+{"attribute": "annual_income", "value": "30-50万", "basis": "inferred_high", "subject": "customer", "basis_of_inference": ["职业为互联网中层", "关注 30 万以上车型"], "reasoning_chain": ["信源整合：职业登记为互联网中层，来店看的都是 30 万以上车型", "结论推断：两路线索同向抬升收入量级，收敛到 30-50 万", "检查核对：没有客户自述的收入数字，未再上调"], "confidence": 0.7}
+{"attribute": "age", "value": "50岁及以上", "basis": "inferred_high", "subject": "customer", "record_channel": "第三方画像数据", "anchor": "预测年龄段", "anchor_kind": "verbatim", "basis_of_inference": ["第三方画像标签“预测年龄段”给出“50岁及以上”（置信度 0.985）"], "reasoning_chain": ["信源整合：第三方画像「预测年龄段」给出「50岁及以上」，置信度 0.985", "结论推断：按标签取值，记为 50 岁以上"], "confidence": 0.75}
+{"attribute": "competing_model", "value": "某某 C10", "basis": "fact", "anchor_kind": "normalized", "subject": "customer", "record_channel": "试驾录音信息", "anchor": "某某 C 幺零", "source_quote": "我也看了某某 C 幺零", "normalize_reason": "ASR 音近纠错（同音字纠回本来写法）", "reasoning_chain": ["信源整合：客户说「我也看了某某 C 幺零」，是他在拿来比的车", "结论推断：车型名按转写纠错为 C10，记为对比车型"], "confidence": 0.85}
 {"attribute": "competing_model", "value": "某某 C11", "basis": "fact", "anchor_kind": "normalized", "subject": "customer", "record_channel": "试驾录音信息", "anchor": "某某 C 幺幺", "source_quote": "我也看了某某 C 幺幺", "normalize_reason": "ASR 音近纠错（同音字纠回本来写法）", "confidence": 0.85}
 ```
 
