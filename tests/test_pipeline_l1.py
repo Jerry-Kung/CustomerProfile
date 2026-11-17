@@ -441,6 +441,41 @@ def test_l1_input_places_guide_before_records():
     assert built["output"].rstrip().endswith(body)
 
 
+# ---------------------------------------------------------------- 同源多记录的时间关系
+
+def test_timeline_note_added_only_when_a_source_repeats():
+    """UAT ``15903771774``：同一渠道四条跟进，正文里没有任何一句说「靠后的是更新」。
+
+    模型因此把「11-04 不着急」与「11-17 已下大定」当成并列事实，两条结论同时上了卡片。
+    """
+    two = pipe.build_l1_input(
+        records_json(
+            record("销售跟进记录", "顾客说，等车子稳定之后再看吧，不着急。", created_at="2026-11-04"),
+            record("销售跟进记录", "顾客已经下大定了，但是暂时车子还是没考虑好。", created_at="2026-11-17"),
+        )
+    )
+    assert "同一来源的多次记录要看时间先后" in two["output"]
+    assert "「销售跟进记录」" in two["output"]
+
+    # 每条来源都只有一条时不加——输出与接入前逐字节相同。
+    single = pipe.build_l1_input(records_json(record("销售跟进记录", "只有一条记录")))
+    assert pipe._timeline_block([record("销售跟进记录", "x")]) == ""
+    assert "同一来源的多次记录" not in single["output"]
+
+
+def test_timeline_note_stays_before_record_body():
+    """声明属约束，必须仍让记录原文是模型最后读到的内容。"""
+    body = "（客户）我上次说的那个价格……"
+    built = pipe.build_l1_input(
+        records_json(
+            record("外呼录音信息", "第一通", kind="transcript", created_at="2026-11-08"),
+            record("外呼录音信息", body, kind="transcript", created_at="2026-11-13"),
+        )
+    )
+    assert built["output"].index("同一来源的多次记录") < built["output"].index(body)
+    assert built["output"].rstrip().endswith(body)
+
+
 # ---------------------------------------------------------------- project_claims
 
 def test_project_claims_enforces_attribution():

@@ -550,3 +550,49 @@ def test_prompt_carries_records_and_excludes_internal_ids():
     assert "电话没接通" in prompt
     assert "邀请试驾" in prompt
     assert "MSCHUB023" not in prompt
+
+
+# ---------------------------------------------------------------- 渠道标签与正文打架
+
+def test_channel_label_dropped_when_record_text_says_another_channel():
+    """UAT ``15903771774``：正文写「微信已经联系」，沟通方式码却是「电话」。
+
+    码值不可信是实测出来的（11-02 批次 110 条含「微信」的原文里 99 条标「电话」）。
+    卡片上宁可少一行「跟进渠道」，也不能出现与节点名相反的小图标。
+    """
+    item = {"method": "电话", "content": "微信已经联系说找个时间过来门店看一下具体的权益政策。"}
+    assert fu.channel_conflicts(item["method"], [item["content"]]) is True
+    extra = fu.fallback_extra(item)
+    # 记录字段本身仍解出「电话」——守卫在装配层，不在取值层。
+    assert extra["跟进渠道"] == "电话"
+
+
+def test_channel_label_kept_when_text_agrees_or_is_silent():
+    """正文同意、或压根没提渠道时，标签照常输出——这是绝大多数记录。"""
+    assert fu.channel_conflicts("电话", ["顾客说，等车子稳定之后再看吧，不着急。"]) is False
+    assert fu.channel_conflicts("电话", ["电话联系客户邀请试驾。"]) is False
+    assert fu.channel_conflicts("微信", ["微信沟通了价格。"]) is False
+    # 两者都提到（电话没接通、改加微信）不算冲突。
+    assert fu.channel_conflicts("电话", ["电话没接通，后来加了微信发资料。"]) is False
+
+
+def test_node_omits_channel_when_it_contradicts_node_name():
+    """节点名说「微信」、码值说「电话」：装配出的节点不带 ``跟进渠道``。
+
+    这是 ``15903771774`` 第 3 条的现场复现。
+    """
+    record = _record("微信已经联系说找个时间过来门店看一下具体的权益政策。", method="电话")
+    nodes, _ = fu.assemble(
+        fu.parse_records(_records_json(record)),
+        {"nodes": [{
+            "records": [1],
+            "node_name": "微信邀约到店",
+            "summary": "销售顾问通过微信联系客户，邀请其到门店了解具体权益政策。",
+            "next_step": "客户尚未确定到店时间，约定11月18日再次跟进。",
+        }]},
+    )
+    node = nodes[0]
+    assert node["node_name"] == "微信邀约到店"
+    assert "跟进渠道" not in node["extra_info"]
+    # 其余标签不受影响。
+    assert node["extra_info"]["意向级别"] == "A 级意向（高）"

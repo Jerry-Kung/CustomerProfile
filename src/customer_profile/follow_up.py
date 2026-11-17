@@ -325,6 +325,43 @@ def fallback_name(item: Mapping[str, str]) -> str:
     return "客户跟进"
 
 
+CHANNEL_KEYWORDS: Mapping[str, tuple[str, ...]] = {
+    "电话": ("电话", "致电", "通话", "外呼"),
+    "微信": ("微信",),
+    "上门": ("上门",),
+}
+"""沟通方式码 → 正文里指代该方式的词。
+
+**不含「到店」**：「邀约到店」是跟进目的，一次电话沟通同样可以邀约到店，
+把它当渠道词会把大量正常记录判成冲突。
+"""
+
+
+def channel_conflicts(method: str, texts: Iterable[Any]) -> bool:
+    """解码出的沟通方式与正文/小结说的是不是同一件事。
+
+    码值不可信是实测出来的：11-02 批次 110 条含「微信」的跟进原文里，99 条的
+    ``communicationmethods`` 是 ``90441``（解作「电话」），涉及 85 个客户。在拿到
+    ``prefix_id = 9044`` 的字典原文之前，只能以正文为准——**正文与码值打架时不给这个
+    标签**。宁可少一行标签，也不让卡片出现与节点名相反的小图标。
+
+    判据有意宽松：正文只要提到别的渠道、而没提到码值那个渠道，就算冲突。
+    正文同时提到两者（「电话联系后又加了微信」）不算冲突——那是同一件事的两个环节。
+    """
+    method = _text(method)
+    if not method:
+        return False
+    joined = "".join(_text(text) for text in texts)
+    if not joined:
+        return False
+    mentioned = {
+        name
+        for name, words in CHANNEL_KEYWORDS.items()
+        if any(word in joined for word in words)
+    }
+    return bool(mentioned) and method not in mentioned
+
+
 def fallback_extra(item: Mapping[str, str]) -> dict[str, Any]:
     """从记录字段确定性取 ``extra_info``。取不到的键不出现，不留空串。"""
     extra: dict[str, Any] = {}
@@ -488,6 +525,14 @@ def _node(
     # 11 月 3 日」而标签写「C 级、11 月 1 日」。时间轴位置仍用首条（``followed_at`` 不动）。
     tail = members[-1]
     extra = fallback_extra(tail)
+    # 渠道标签是**唯一**可能与正文打架的一项：其余键取自记录字段，与措辞无关。
+    # 码值不可信时（见 :func:`channel_conflicts`），宁可不出这个键，也不让卡片上的
+    # 小图标与节点名写反。
+    if "跟进渠道" in extra and channel_conflicts(
+        extra["跟进渠道"],
+        [node["node_name"], *contents, *(item.get("content") for item in members)],
+    ):
+        extra.pop("跟进渠道")
     # 参与人是个例外：合并节点里每个顾问都参与过，只留最后一位会把前面的人抹掉。
     consultants = list(
         dict.fromkeys(

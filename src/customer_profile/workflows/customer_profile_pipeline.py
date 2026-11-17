@@ -1742,6 +1742,49 @@ def _is_new_record(record: dict, ctx: dict[str, Any]) -> bool:
     return record_key(record) in keys or logical_key(record) in logical
 
 
+def _timeline_block(records: list[dict]) -> str:
+    """《同一来源多次记录的时间关系》——只在**确有**同源多记录时才出。
+
+    为什么要这一段：记录正文按来源档排成分节，同档内虽按时间升序，但没有任何一句
+    告诉模型「靠后的是靠前的更新」。实测 UAT ``15903771774`` 就栽在这里——四条跟进
+    记录里 11-04 说「等车子稳定之后再看，不着急」，11-17 说「已经下大定了」，模型
+    把它们当成同一平面的并列事实，于是 ``viewing_progress=已经下定`` 与
+    ``planned_purchase_time=3 个月以上``、``emotion_state=观望不着急`` 同时上了卡片。
+
+    **不改模板**：模板属业务资产，正文改动须单独确认；这一段是可选段，拼在
+    约束区（与《合法取值清单》同性质，仍在记录正文之前）。
+
+    只列**确有两条以上**的来源，且最多点名 :data:`_TIMELINE_LIST_LIMIT` 个来源——
+    全部单条时返回空串，本案输出与接入前逐字节相同。
+    """
+    counts: dict[str, int] = {}
+    for record in records:
+        name = str(record.get("source_name") or record.get("channel") or "").strip()
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    repeated = [name for name, count in counts.items() if count > 1]
+    if not repeated:
+        return ""
+    shown = repeated[:_TIMELINE_LIST_LIMIT]
+    more = len(repeated) - len(shown)
+    names = "、".join(f"「{name}」" for name in shown)
+    tail = f"等 {len(repeated)} 个来源" if more else ""
+    return (
+        "## 同一来源的多次记录要看时间先后\n\n"
+        f"下列来源各有**多条**记录，正文里已按时间**从早到晚**排列：{names}{tail}。\n\n"
+        "- 先说过的结论，可以被同一来源后到的记录更新。判断客户**当前**的状态时，"
+        "以这批记录里**最晚**的那条为准。\n"
+        "- 但「被更新」只对**随流程变化的进展**成立（看车进度、计划时间、当前态度、"
+        "在意的点）。身份、家庭、籍贯这类不变的事实不因后到记录而改写。\n"
+        "- 若早先与最近的记录互相矛盾，**取最近的那条写进字段**，并在推导链的"
+        "「检查核对」里点明「某月某日的表述已被某月某日的记录更新」，不要两条并列写出去。\n"
+    )
+
+
+_TIMELINE_LIST_LIMIT = 6
+"""点名几个来源。再多就变成一行噪声，且多出来的来源模型本来也分得清。"""
+
+
 def _settled_facts_block(ctx: dict[str, Any]) -> str:
     """《上一版已定稿事实》——只给字段与取值，**不给证据与推理**。
 
@@ -1844,6 +1887,9 @@ def build_l1_input(records_json, kb_brief: str = "", incremental_ctx: Any = "") 
     if settled:
         # 清单放在记录正文**之前**：与其它约束同性质，让记录原文仍是最后读到的内容。
         guide = f"{guide}\n\n{settled}"
+    timeline = _timeline_block(usable)
+    if timeline:
+        guide = f"{guide}\n\n{timeline}"
     output = f"{guide}\n\n---\n\n{body}" if body else guide
     return {
         "output": output,

@@ -121,3 +121,17 @@ def test_three_evidence_types_are_named_in_both(prompt_text, spec_text):
         squashed = _squash(text)
         for kind in ("需求证据", "时间证据", "行动证据"):
             assert kind in squashed, f"{name}缺「{kind}」"
+
+
+def test_closed_order_floors_level_at_b(prompt_text):
+    """已有成交动作时不得评 C（UAT ``15903771774`` 的回归）。
+
+    65 位已大定客户复盘里「订单证据存在，却被时间窗口一票否决」命中 14 例；
+    ``15903771774`` 是第 15 例——订单状态已锁单，却因「计划 3 个月以上、不着急」定了低档。
+    这条兜底只有提示词通道能承载：订单在各案里的落点不固定，代码判不准。
+    """
+    squashed = _squash(prompt_text)
+    assert "检查有没有已经发生的成交动作" in squashed
+    assert "下限是B，不得评C" in squashed
+    # 例外必须写明，否则模型会把已取消的订单也托住。
+    assert "已取消" in squashed and "退订" in squashed
