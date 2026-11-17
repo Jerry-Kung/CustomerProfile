@@ -100,6 +100,46 @@
       "path": "src/customer_profile/templates/invitation_audio__17732152003520.txt",
       "brand": "猛士",
       "reason": "LLM 节点「录音无效性判断」的提示词正文，运行期生效。「猛士」同样只出现在输入格式示例的 ASR 示例转写里，与校对节点的示例同源，不是客户数据"
+    },
+    {
+      "path": "src/customer_profile/templates/customer_profile_pipeline__pipeline_l1_fields.txt",
+      "brand": "猛士",
+      "reason": "本方品牌：范例演示 intended_model / test_driven_models 的写法，取值必须写具体车型，写「某品牌」则范例不成立"
+    },
+    {
+      "path": "src/customer_profile/templates/customer_profile_pipeline__pipeline_l1_fields.txt",
+      "brand": "红旗",
+      "reason": "L1 字段层提示词的成品范例（ADR 0005）中，competing_brand / intended_model / test_driven_models 等字段的取值举例。品牌名在这里是示范取值域所必需，删掉范例即失去示范意义；ADR 0005 的脱敏目标只含姓名、手机号、企业、门店、住址，不含竞品枚举"
+    },
+    {
+      "path": "src/customer_profile/templates/customer_profile_pipeline__pipeline_l1_fields.txt",
+      "brand": "特斯拉",
+      "reason": "L1 字段层提示词的成品范例（ADR 0005）中，competing_brand / intended_model / test_driven_models 等字段的取值举例。品牌名在这里是示范取值域所必需，删掉范例即失去示范意义；ADR 0005 的脱敏目标只含姓名、手机号、企业、门店、住址，不含竞品枚举"
+    },
+    {
+      "path": "src/customer_profile/templates/customer_profile_pipeline__pipeline_l1_fields.txt",
+      "brand": "蔚来",
+      "reason": "L1 字段层提示词的成品范例（ADR 0005）中，competing_brand / intended_model / test_driven_models 等字段的取值举例。品牌名在这里是示范取值域所必需，删掉范例即失去示范意义；ADR 0005 的脱敏目标只含姓名、手机号、企业、门店、住址，不含竞品枚举"
+    },
+    {
+      "path": "src/customer_profile/templates/customer_profile_pipeline__pipeline_l1_fields.txt",
+      "brand": "坦克",
+      "reason": "L1 字段层提示词的成品范例（ADR 0005）中，competing_brand / intended_model / test_driven_models 等字段的取值举例。品牌名在这里是示范取值域所必需，删掉范例即失去示范意义；ADR 0005 的脱敏目标只含姓名、手机号、企业、门店、住址，不含竞品枚举"
+    },
+    {
+      "path": "src/customer_profile/templates/customer_profile_pipeline__pipeline_l1_fields.txt",
+      "brand": "方程豹",
+      "reason": "L1 字段层提示词的成品范例（ADR 0005）中，competing_brand / intended_model / test_driven_models 等字段的取值举例。品牌名在这里是示范取值域所必需，删掉范例即失去示范意义；ADR 0005 的脱敏目标只含姓名、手机号、企业、门店、住址，不含竞品枚举"
+    },
+    {
+      "path": "src/customer_profile/templates/customer_profile_pipeline__pipeline_l1_fields.txt",
+      "brand": "比亚迪",
+      "reason": "L1 字段层提示词的成品范例（ADR 0005）中，competing_brand / intended_model / test_driven_models 等字段的取值举例。品牌名在这里是示范取值域所必需，删掉范例即失去示范意义；ADR 0005 的脱敏目标只含姓名、手机号、企业、门店、住址，不含竞品枚举"
+    },
+    {
+      "path": "src/customer_profile/templates/customer_profile_pipeline__pipeline_l1_fields.txt",
+      "brand": "吉利",
+      "reason": "L1 字段层提示词的成品范例（ADR 0005）中，competing_brand / intended_model / test_driven_models 等字段的取值举例。品牌名在这里是示范取值域所必需，删掉范例即失去示范意义；ADR 0005 的脱敏目标只含姓名、手机号、企业、门店、住址，不含竞品枚举"
     }
   ]
 }
