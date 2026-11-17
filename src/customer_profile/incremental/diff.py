@@ -88,7 +88,7 @@ def diff_by_keys(previous_keys: Iterable[str] | None, current_rows: Iterable[dic
 
     :func:`diff_histories` 需要上一轮的原始记录才能判「同逻辑键换版本 = 改版」；基线里
     只有键，因此这里退一步：**键不存在即新增**。这会漏掉「版本递增」这一类改版在
-    P1 的档位判定上造成的差异——但 P1 只做 T0 / T3，T0 的判据恰恰是「键集合无差异」，
+    P1 的档位判定上造成的差异——但 P1 只做 T0 / T3，T0 的判据恰恰是「没有新增的键」，
     与 :func:`diff_histories` 在 T0 上的结论完全一致。P2 引入底座与合并账本后，
     若需要区分改版，再让基线多存一份 ``logical_key`` 索引。
     """

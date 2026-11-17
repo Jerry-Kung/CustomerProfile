@@ -18,7 +18,7 @@
 - 只收状态 ``succeeded`` 的运行；第一次落 ``<号码>/``，之后 ``<号码>__run2``……
 - 相邻运行**开始早于上一次结束**的（重叠对）剔除：两次取到的 history 可能互相穿插，
   不能当作「后一次看到前一次之后的数据」。
-- 档位判定顺序与 ``01`` §4 一致：无基线 → T3；记录键集合无差异 → T0；新增含试驾录音
+- 档位判定顺序与 ``01`` §4 一致：无基线 → T3；无新增记录 → T0；新增含试驾录音
   → T3（阶段跃迁）；新增含其他录音 → T2；仅文本 → T1。
 
 ## 变体（``--variant``）
@@ -282,7 +282,8 @@ def expected_tier(previous: list[dict] | None, current: list[dict], delta: dict)
     if previous is None:
         return "T3"
     touched = delta["added_records"] + delta["changed_records"]
-    if not touched and not delta["removed"]:
+    # 只看有无新增/改版，不看移除：与 ``dispatch.decide`` 同口径（2026-11-17 改）。
+    if not touched:
         return "T0"
     channels = {str(row.get("channel") or "") for row in touched}
     if RECORDING_PREFIX in channels:
@@ -541,7 +542,8 @@ def variant_removed(target: Path, sequence: dict, use_operation: bool) -> dict:
         kept = kept + [marker]
     dump_json(target / f"t{last}" / "history.json", kept)
     step = sequence["steps"][-1]
-    step["expected_tier"] = "T1"
+    # 纯移除、无新增：按 T0 沿用上一版（``dispatch.decide`` 只看有无新增）。
+    step["expected_tier"] = "T0"
     step["expected_change"] = {
         "removed_source_key": str(candidates[-1].get("source_key") or ""),
         "channel": str(candidates[-1].get("channel") or ""),
