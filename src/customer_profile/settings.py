@@ -291,17 +291,6 @@ class Settings(BaseSettings):
     生产副作用。真实冒烟也保持 false——V0.3 的验收目标是端到端**读**通，不含写。
     """
 
-    incremental_enabled: bool = False
-    """是否启用增量画像入口（``INCREMENTAL_ENABLED``）。
-
-    缺省 **false**：关闭时入口仍是 ``customer_profile_pipeline``，产物与接入增量前
-    逐字节一致，也不写基线。开启后入口解析为 ``customer_profile_incremental``，
-    由它按档位分流（P1 只有 T0 / T3 两档）。
-
-    **前后端必须同改**：前端 ``SubmitRun.tsx`` 里的入口常量决定提交页写哪个 ID，
-    这里决定入参校验与入站接口认哪个 ID。只改一侧会让手机号校验或批次号补全静默失效。
-    """
-
     incremental_tiers: str = "T0,T1,T2"
     """增量入口放行哪些档位（``INCREMENTAL_TIERS``，逗号分隔，缺省 ``T0,T1,T2``）。
 
@@ -312,8 +301,10 @@ class Settings(BaseSettings):
     baseline_enabled: bool = True
     """是否在运行成功后写回传体基线（``BASELINE_ENABLED``）。
 
-    缺省 **true**，但只在 ``incremental_enabled`` 打开时生效——没有增量入口就没有
-    读基线的地方，白写一表业务数据没有意义。
+    缺省 **true**，正常部署**不需要配置**。增量入口自 2026-11-17 起恒启用（原
+    ``INCREMENTAL_ENABLED`` 开关已移除），基线是它判断「有没有新数据」的唯一依据。
+    置 false 时增量入口读不到也不写基线，每次运行都落全量重建——这是不改代码退回
+    全量行为的应急手段。
 
     **回写关闭时也写**（``WRITEBACK_ENABLED=false``）：基线描述的是「我们算出来的
     上一版」，不是「后台收到的那份」（``03`` T1-2）。
@@ -348,17 +339,6 @@ class Settings(BaseSettings):
 
     缺省 **false**：checker 是新增的 LLM 调用，先离线跑通再开。关闭时规则层的
     code / prompt 通道照常工作，checker 动作集为空。
-    """
-
-    enum_mapping_enabled: bool = False
-    """枚举语义映射总开关（``ENUM_MAPPING_ENABLED``）。
-
-    缺省 **false**：关闭时投影层之后**不发起**映射调用，产物与启用前逐字节一致。
-    开启后，L1 给出的、归不到契约合法键的中文自由文本（「已婚有子女」「分期」）会先经
-    一次批量 LLM 映射落到合法键，再进 gate 与回写。
-
-    与 ``rule_checker_enabled`` 分开是刻意的：两者方向相反（checker 只判不补，映射只补
-    不判），成本模型与风险面都不同，用一个开关会把「想省钱」与「想救字段」绑死。
     """
 
     # ------------------------------------------------------------ 知识库

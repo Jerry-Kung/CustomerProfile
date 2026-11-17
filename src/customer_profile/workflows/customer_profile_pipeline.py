@@ -2686,7 +2686,6 @@ async def enum_map(
     channels_json="{}",
     llm=None,
     templates=None,
-    enabled=None,
     template_name: str = "customer_profile_pipeline__pipeline_enum_map",
     node_ref=None,
 ) -> dict:
@@ -2696,8 +2695,8 @@ async def enum_map(
     不判。**失败一律不抛**——调用异常、解析失败、模型返回空，都退回今天的「保留原值 +
     转确认」，管线不因这一步中断（规则层不能成为新单点）。
 
-    关闭开关（``ENUM_MAPPING_ENABLED``，缺省 false）时在**发起调用之前**返回，产物逐
-    字节原样透传：开关的意义就是省钱，走到调用那一步再判断等于没关。
+    **恒启用，没有开关**（2026-11-17 起移除 ``ENUM_MAPPING_ENABLED``）。没有需要映射的
+    取值时在发起调用之前返回（``no_candidate``），零 token。
     """
     facts = _loads_object(facts_json)
     notes = _loads_list(notes_updates_json)
@@ -2747,8 +2746,6 @@ async def enum_map(
             "enum_map_error": error,
         }
 
-    if not enum_mapping.enabled(enabled):
-        return _out("disabled")
     groups = enum_mapping.collect(facts, notes)
     if not groups:
         return _out("no_candidate")
@@ -4108,12 +4105,12 @@ WORKFLOW = WorkflowDef(
             ),
             function=f"customer_profile.workflows.{SLUG}:merge_l2_verdict",
         ),
-        # ---------------------------------------------------------- 枚举语义映射（1 次受约束 LLM，缺省关闭）
+        # ---------------------------------------------------------- 枚举语义映射（至多 1 次受约束 LLM，恒启用）
         # L1 稳定给出契约外的中文自由文本（「已婚有子女」「分期」），投影层归不了就保留
         # 原值、回写出口再整条剔除——静默掉字段。本节点把「有信息但格式不对」的取值
         # 一次性映射成合法键，**在 gate 与回写之前**落定，因此 facts 与 Notes 同时受益。
         # 必须接在 ``L2_APPLY`` 之后：兜底写进 Notes 的中文原值在投影层还不存在。
-        # 关闭开关（ENUM_MAPPING_ENABLED，缺省 false）时在发起调用前即返回，零 token。
+        # 没有需要映射的取值时在发起调用前即返回，零 token。
         make_node(
             L2_ENUM_MAP,
             "枚举语义映射",

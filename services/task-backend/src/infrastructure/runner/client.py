@@ -17,9 +17,12 @@ from src.config.settings import ProfileRunnerConfig
 from src.infrastructure.runner.errors import RunnerRequestFailed, RunnerTimeout, RunnerWorkflowTerminated
 from src.infrastructure.workflow.errors import WorkflowOutputInvalidJson, WorkflowOutputSchemaMismatch
 
-WORKFLOW_ID = "customer_profile_pipeline"
+# Incremental entry: reuses the previous profile when nothing changed and falls back to a
+# full rebuild (customer_profile_pipeline as a sub-run) otherwise. Must stay in sync with
+# INCREMENTAL_WORKFLOW_ID in src/customer_profile/api.py of the profile runner.
+WORKFLOW_ID = "customer_profile_incremental"
 # Existing runs must remain queryable after switching the submission entry.
-_RECOVERABLE_WORKFLOW_IDS = (WORKFLOW_ID, "customer_profile_entry")
+_RECOVERABLE_WORKFLOW_IDS = (WORKFLOW_ID, "customer_profile_pipeline", "customer_profile_entry")
 _FAILURE_STATUSES = {"failed", "cancelled", "interrupted", "skipped"}
 _RUN_ID = re.compile(r"[a-zA-Z0-9_-]{1,64}\Z")
 _log = logging.getLogger(__name__)

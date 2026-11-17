@@ -37,10 +37,11 @@ ENTRY_WORKFLOW_ID = "customer_profile_pipeline"
 """
 
 INCREMENTAL_WORKFLOW_ID = "customer_profile_incremental"
-"""增量画像入口（``INCREMENTAL_ENABLED=true`` 时生效）。
+"""增量画像入口，**恒为主入口**（2026-11-17 起，原 ``INCREMENTAL_ENABLED`` 开关已移除）。
 
-**前后端必须同改**：前端提交页从 ``GET /runtime`` 读当前入口，本模块决定入参校验与
-入站接口认哪个 ID。只改一侧会让手机号校验或批次号补全静默失效。
+前端提交页从 ``GET /runtime`` 读当前入口，入站接口取 :func:`entry_workflow_id`；
+任务后端（``services/task-backend`` 的 ``runner/client.py``）自带一份同名常量，
+**改入口时必须同改**，否则那条提交路径会继续绕过增量。
 """
 
 ENTRY_WORKFLOWS = frozenset({ENTRY_WORKFLOW_ID, INCREMENTAL_WORKFLOW_ID})
@@ -48,9 +49,12 @@ ENTRY_WORKFLOWS = frozenset({ENTRY_WORKFLOW_ID, INCREMENTAL_WORKFLOW_ID})
 
 
 def entry_workflow_id(settings: Any = None) -> str:
-    """当前生效的主入口 ID。开关关闭时与接入增量前逐字节一致。"""
-    settings = settings or get_settings()
-    return INCREMENTAL_WORKFLOW_ID if getattr(settings, "incremental_enabled", False) else ENTRY_WORKFLOW_ID
+    """当前生效的主入口 ID：恒为增量入口。
+
+    ``settings`` 参数保留只为不改调用点的签名。``ENTRY_WORKFLOW_ID`` 仍是合法的提交
+    目标（增量入口的全量档就是把它当子运行调用），直接提交它等于跳过增量。
+    """
+    return INCREMENTAL_WORKFLOW_ID
 
 
 DEFAULT_BATCH_ID = "batch_001"
@@ -276,10 +280,9 @@ def create_app(service_factory: Any = None) -> FastAPI:
         worker_consuming, worker_liveness_detail = liveness.check(settings)
         return {
             "replay_mode": settings.replay_mode,
-            # 入口与增量开关原样报：前端据此决定提交页写哪个 workflow_id。
+            # 入口原样报：前端据此决定提交页写哪个 workflow_id。
             # 这是唯一一处让前后端入口常量不各写一份的地方。
             "entry_workflow_id": entry_workflow_id(settings),
-            "incremental_enabled": bool(settings.incremental_enabled),
             "baseline_enabled": bool(settings.baseline_enabled),
             "writeback_enabled": settings.writeback_enabled,
             "llm_model": settings.llm_model,

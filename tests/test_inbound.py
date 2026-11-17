@@ -159,7 +159,8 @@ async def test_valid_request_is_accepted_and_persisted(tmp_path):
     body = response.json()
     assert body["status"] == "accepted"
     assert body["run_id"]
-    assert body["workflow_id"] == ib.ENTRY_WORKFLOW_ID
+    # 入站任务恒走增量入口（不再有开关），全量管线只作为它的子运行出现。
+    assert body["workflow_id"] == "customer_profile_incremental"
 
     db = tmp_path / "test.db"
     connection = sqlite3.connect(db)

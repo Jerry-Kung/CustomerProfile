@@ -378,7 +378,7 @@ def _checker_functions(llm: Any, templates: Any) -> dict[str, Any]:
 
     return {
         _ref(pipeline.rule_check): partial(pipeline.rule_check, llm=llm, templates=templates),
-        # 枚举语义映射与 checker 同形：code 节点调 LLM，失败全吞、关闭即零 token。
+        # 枚举语义映射与 checker 同形：code 节点调 LLM，失败全吞；无可映射项时零 token。
         # 两者共用同一个客户端，因而共享限额、重试与留痕。
         _ref(pipeline.enum_map): partial(pipeline.enum_map, llm=llm, templates=templates),
         # L2 兜底同样是 code 节点调 LLM：候选为空时零成本短路、输出量下限按候选数生效，
@@ -516,10 +516,11 @@ async def build_service(
     )
     # 增量入口的两个 code 节点需要 Store（读基线、写基线）。注入方式与 checker 同形：
     # code 节点拿不到 NodeRuntime，只能走 rt.extra["code_functions"]。
-    # 基线关闭或没有存储时传 None——节点自己会退回「无基线 → T3」，不会报错。
+    # 基线关闭（BASELINE_ENABLED=false）或没有存储时传 None——节点自己会退回
+    # 「无基线 → T3」，不会报错；这也是不改代码退回全量行为的应急手段。
     from .incremental import nodes as incremental_nodes
 
-    baseline_store = store if (settings.baseline_enabled or settings.incremental_enabled) else None
+    baseline_store = store if settings.baseline_enabled else None
     for func in (incremental_nodes.incremental_dispatch, incremental_nodes.baseline_commit):
         runtime.extra["code_functions"][
             f"customer_profile.incremental.nodes:{func.__name__}"
