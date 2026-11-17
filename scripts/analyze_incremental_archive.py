@@ -32,6 +32,8 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from customer_profile import profile_readback as readback  # noqa: E402
+
 BATCH_ROOT = REPO_ROOT / "experiments" / "uat_data"
 
 
@@ -106,14 +108,18 @@ def _b_fields(callback: dict) -> dict[str, dict]:
 
 
 def _a_fields(profile: dict) -> dict[str, dict]:
+    """接口画像侧的字段表。读回体归一走 ``profile_readback``——新旧两种响应形状都认
+    （2026-11-17 起容器是列表 ``basic_notes_updates``）。"""
     out: dict[str, dict] = {}
-    for key, item in (profile.get("basic_notes") or {}).items():
-        if not isinstance(item, dict):
-            continue
+    for key, item in readback.notes(profile).items():
+        value = readback.value_of(item)
+        detail = readback.detail(item)
         out[str(key)] = {
-            "value": "" if item.get("value") is None else str(item["value"]).strip(),
-            "locked": bool(item.get("is_locked")),
-            "has_summary": bool(str(item.get("reasoning_summary") or "").strip()),
+            "value": "" if value is None else str(value).strip(),
+            "locked": readback.is_locked(item),
+            "has_summary": bool(str(detail.get("summary") or "").strip()),
+            "has_evidence": bool(detail.get("evidence")),
+            "has_confidence": isinstance(detail.get("confidence"), (int, float)),
         }
     return out
 

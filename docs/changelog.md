@@ -2,6 +2,27 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-11-17 — 适配取画像接口新返回结构；增量底座改以 A 自带推导为准
+
+`GET /api/v1/remote/data/profile/{phone}` 的返回改为与回传体同形：容器从字典
+`basic_notes` 换成列表 `basic_notes_updates`，单条改 `attribute_key` / `attribute_value` /
+`reasoning_detail`；顶层 `main_summary` / `profile_version` 消失，新增
+`profile_summary{name,gender}` 与 `follow_up_history`。旧代码四处按旧结构读，**读不到不报错**，
+只是静默拿到空。
+
+- **读回体归一集中到一处**：新增 `customer_profile.profile_readback`，新旧两种形状都在那里
+  归一成 `{属性键: {value, reasoning_detail, is_locked, ai_feedback}}`。四处读取方
+  （增量底座、人工确认信息、用户反馈、邀约上下文）与三个归档脚本都改走它——
+  旧归档批次存的是旧响应，回放仍要读得出，因此**不是**直接改成只认新结构。
+- **`is_locked` / `ai_feedback` 已由业务方补回**：改版当天这两个键整体消失，直连 mhero
+  实测（三客户 / 90+ 条 Notes）每条都带，未锁定 `0`、未反馈 `null`。两个渠道不须下线。
+- **增量底座三条合并规则按新形态重写**：A 现在自带完整 `reasoning_detail`，原设计
+  「A 只有 summary、需要 B 补证据」的前提不成立。取值以 A 为准时直接用 A 的推导链、
+  证据与置信度（说的是本次取值）；A 缺这项或旧形状无推导时才回退到 B。
+  实测底座 `a_notes` 从恒 0 变为 17~45 条。
+- 新增 `tests/test_user_feedback_data.py`；`test_base_claims.py` 补新结构用例；
+  回放夹具 `human_corrected_info.json` 增加两条新结构响应。
+
 ## 2026-11-17 — 四段式推导链收口：兜底句不再冒充推导、L2 改判不再追加
 
 UAT 11-16/17 批次（455 次根运行 / 12698 条 Notes）核查（`docs/bug-fix/2026-11-17-uat-notes-chain-audit.md`）

@@ -37,12 +37,16 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from customer_profile import profile_readback as readback  # noqa: E402
 
 DROP_CHANNELS = {
     "OntologyOrder",
@@ -146,10 +150,35 @@ def sanitize_history(items: list[dict], cutoff: datetime, report: CaseReport) ->
 
 
 def sanitize_profile(profile: dict) -> dict:
-    """只留 basic_notes（去静态意向字段），其余清空。"""
-    notes = dict(profile.get("basic_notes") or {})
-    for key in STRIP_NOTES:
-        notes.pop(key, None)
+    """只留 Notes（去静态意向字段），其余清空。
+
+    **按原响应的形状改写**：旧批次是字典 ``basic_notes``，2026-11-17 起的响应是同形的
+    列表 ``basic_notes_updates``。保留来源形状，回来的批次才与它出自的那批可比。
+    """
+    kept = {
+        key: item
+        for key, item in readback.notes(profile).items()
+        if key not in STRIP_NOTES
+    }
+    if isinstance(profile.get("basic_notes_updates"), list):
+        out = dict(profile)
+        out["basic_notes_updates"] = [
+            {
+                "attribute_key": key,
+                "attribute_value": item.get("value"),
+                "reasoning_detail": item.get("reasoning_detail") or None,
+                "is_locked": item.get("is_locked"),
+                "ai_feedback": item.get("ai_feedback"),
+            }
+            for key, item in kept.items()
+        ]
+        out.setdefault("profile_summary", {})
+        out["ai_insight"] = {}
+        out["purchase_decisions"] = []
+        out["deal_battle"] = {}
+        out["decision_psychology"] = []
+        return out
+
     return {
         "main_summary": {
             "deal_level": "",
@@ -157,7 +186,13 @@ def sanitize_profile(profile: dict) -> dict:
             "personality_summary": None,
             "profile_summary": None,
         },
-        "basic_notes": notes,
+        # 旧形状只摘字段、其余原样保留：``reasoning_summary`` 这类旧键不经归一，
+        # 免得顺手把值改造一遍（这份批次要拿来与它出自的那批对照）。
+        "basic_notes": {
+            key: item
+            for key, item in (profile.get("basic_notes") or {}).items()
+            if key not in STRIP_NOTES
+        },
         "profile_version": profile.get("profile_version"),
         "ai_insight": {},
         "purchase_decisions": [],

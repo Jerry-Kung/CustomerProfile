@@ -5,21 +5,23 @@
 ==============  ==========================  ==================================
 情形            取值                        证据 / 置信度
 ==============  ==========================  ==================================
-A 有值且 = B     A（等于 B）                 **沿用 B** 的 steps / evidence / 置信度
-A 有值且 ≠ B    **A 为准**                  沿用 B 的 steps；证据与置信度留空，不臆造
-A 没有该项      B                           沿用 B 的全部信息
+A 有值且 = B     A                           **A 自带**；A 缺项时用 B 的
+A 有值且 ≠ B    **A 为准**                  A 自带；A 缺项时步骤沿用 B，证据与置信度留空
+A 没有该项      B                           B 的全部信息
 ==============  ==========================  ==================================
 
-第二条是这套方案**唯一的质量让步**，写清楚在此：它发生在「上一版之后接口侧被别的
-来源改过」的时刻（多数是人工上锁或人工修改），那时以 A 为准本来就是正确的业务选择。
-A 与 B 取值不同时**仍沿用 B 的推导链**（2026-11-17）：A 本身没有 steps，整条丢掉会让
-该字段在出口退回代码兜底句；而「上回是怎么想到这一层的」对同一字段通常仍然成立。
-证据与置信度不沿用——取值已变，它们指向的是旧值。
+**2026-11-17 接口改版后规则为什么变了。** 改版前 ``GET /data/profile/{phone}`` 返回的是
+字典 ``basic_notes``，每条只有 ``value`` / ``reasoning_summary`` / ``is_locked`` /
+``ai_feedback``——**没有** ``steps`` / ``evidence`` / ``confidence``。那时只能拿 B 补证据，
+「A 为准」就要放弃推导链，代价是那个字段在出口只剩代码兜底句。
 
-为什么必须补缺（``01`` §2.3）：接口读回的证据信息不完整——792 次读回实测 ``basic_notes``
-每个字段只有 ``value`` / ``reasoning_summary`` / ``is_locked`` / ``ai_feedback``，
-**没有** ``steps``、``evidence``、``confidence``。只用 A 当底座，未被新数据影响的字段
-回写时证据位会整体退化，而这不会报错。
+改版后 A 与我们回传同形（列表 ``basic_notes_updates``，每条带完整 ``reasoning_detail``），
+**A 自己就有证据与置信度**，上面那套补缺的前提随之消失：取值以 A 为准时，A 那一段
+推导链说的就是**这次的取值**，直接用它，比沿用 B 的（说的是旧值）更准确。
+B 只在 A 缺这项时使用。
+
+读取一律走 :mod:`customer_profile.profile_readback`——新旧两种响应形状都在那里归一，
+本模块不自己判断容器是字典还是列表。旧归档批次的响应仍是旧形状，照样读得出。
 
 输出形状与 ``localize_claims`` 一致（``{"fields": [...]}``），可直接喂 ``project_claims``；
 来源名统一为 :data:`BASE_CHANNEL`，归「人工/系统登记」档。
@@ -29,6 +31,8 @@ from __future__ import annotations
 
 import json
 from typing import Any, Iterable, Mapping
+
+from .. import profile_readback as readback
 
 BASE_CHANNEL = "上一版画像"
 """底座断言的来源名。在 :data:`customer_profile.projection.CHANNEL_TIER` 里登记为
@@ -82,29 +86,28 @@ def _norm(value: Any) -> str:
 
 
 def _note_value(note: Any) -> Any:
-    if not isinstance(note, Mapping):
-        return None
-    return note.get("value")
+    """标准 Notes 项的取值。``profile_readback`` 已把新旧两种写法归到 ``value`` 上。"""
+    return readback.value_of(note)
 
 
 def _locked(note: Any) -> bool:
-    if not isinstance(note, Mapping):
-        return False
-    return note.get("is_locked") in (True, 1, "1")
+    return readback.is_locked(note)
 
 
 def _summary(note: Any) -> str:
-    if not isinstance(note, Mapping):
-        return ""
-    text = note.get("reasoning_summary")
+    """A 侧那一句推理摘要：新结构在 ``reasoning_detail.summary``，旧结构在顶层。"""
+    detail = readback.detail(note)
+    text = detail.get("summary")
+    if not text and isinstance(note, Mapping):
+        # 旧形状经 ``profile_readback`` 归一时把 ``reasoning_summary`` 放进了 evidence。
+        evidence = detail.get("evidence") or []
+        if isinstance(evidence, list) and len(evidence) == 1:
+            text = evidence[0]
     return str(text).strip() if text else ""
 
 
 def _detail(entry: Any) -> Mapping[str, Any]:
-    if not isinstance(entry, Mapping):
-        return {}
-    detail = entry.get("reasoning_detail")
-    return detail if isinstance(detail, Mapping) else {}
+    return readback.detail(entry)
 
 
 def _hints(detail: Mapping[str, Any]) -> list[str]:
@@ -174,14 +177,8 @@ def _b_entries(callback: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
 
 
 def _a_notes(profile: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
-    notes = (profile or {}).get("basic_notes")
-    if not isinstance(notes, Mapping):
-        return {}
-    return {
-        str(key): value
-        for key, value in notes.items()
-        if isinstance(value, Mapping)
-    }
+    """A 侧 Notes，已归一成 ``{属性键: 标准 Notes 项}``。新旧两种响应形状都认。"""
+    return readback.notes(profile)
 
 
 def _entry_value(entry: Mapping[str, Any]) -> Any:
@@ -229,45 +226,66 @@ def assemble_base_claims(
         a_text = _norm(a_value)
         b_value = _entry_value(entry) if entry is not None else None
         b_text = _norm(b_value)
-        detail = _detail(entry)
+        b_detail = _detail(entry)
+        a_detail = readback.detail(note)
         basis = "fact" if _locked(note) else "inferred_high"
 
         if a_text:
+            # A 自带完整 ``reasoning_detail``（2026-11-17 起的读回体）。它说的正是
+            # **本次取值**怎么推出来的，因此无论 A 与 B 是否相同，证据位都优先用 A——
+            # 旧结构经 ``profile_readback`` 归一出的那句 summary 不算，按 ``legacy_detail``
+            # 识别后走原来的「沿用 B」路径。
+            use_a_detail = bool(a_detail.get("steps") or a_detail.get("evidence")) and not (
+                isinstance(note, Mapping) and note.get("legacy_detail")
+            )
             if b_text and a_text == b_text:
-                # 情形一：值没变，证据沿用 B——那时给出的依据对本条结论仍然准确。
                 same += 1
+                if use_a_detail:
+                    hints, steps, confidence = (
+                        _hints(a_detail),
+                        _steps(a_detail),
+                        _confidence(a_detail),
+                    )
+                else:
+                    # 旧形状：A 只有一句摘要，证据与置信度沿用 B——那时给出的依据对本条
+                    # 结论仍然准确。
+                    hints, steps, confidence = (
+                        _hints(b_detail),
+                        _steps(b_detail),
+                        _confidence(b_detail),
+                    )
                 fields.append(
                     _entry(
                         attribute,
                         a_value,
                         basis=basis,
-                        hints=_hints(detail),
-                        steps=_steps(detail),
-                        confidence=_confidence(detail),
+                        hints=hints,
+                        steps=steps,
+                        confidence=confidence,
                         observed_at=observed,
                         origin="A=B",
                     )
                 )
                 continue
-            # 情形二：A 为准。**推导链沿用 B**（2026-11-17 UAT 核查建议 5）：
-            # 「取值变了」不等于「上一版的论证全作废」——A 是接口侧那一份，它只有
-            # ``summary``，``steps`` / ``evidence`` / ``confidence`` 一概没有（实测 792 次
-            # 读回全都没有这三项）。整条丢弃之后，这个字段在出口只剩代码兜底句，
-            # 销售看到的「客户资料中有明确记录」就是这么来的。
-            #
-            # 只沿用**论证**（steps），不沿用证据（evidence）与置信度：证据是上一版引用
-            # 的原文，取值已经变了，它可能指不回这次的取值；置信度是模型上次对**旧值**
-            # 的打分，换值之后不再成立。论证说的是「上回是怎么想到这一层的」，对同一个
-            # 字段通常仍然成立，且它正是出口缺的那一份。
+            # 情形二：A 为准。取值变了，A 的推导链说的仍是**这次**的取值，直接用；
+            # 旧形状没有推导链，退回到「summary 当依据 + 沿用 B 的步骤」。
             differ += 1
-            summary = _summary(note)
+            if use_a_detail:
+                hints, steps, confidence = _hints(a_detail), _steps(a_detail), _confidence(a_detail)
+            else:
+                # 旧形状的取舍（2026-11-17 UAT 核查建议 5）：「取值变了」不等于「上一版的
+                # 论证全作废」。只沿用**论证**（steps），不沿用证据与置信度——证据是上一版
+                # 引用的原文，可能指不回这次的取值；置信度是模型对**旧值**的打分。
+                summary = _summary(note)
+                hints, steps, confidence = ([summary] if summary else []), _steps(b_detail), None
             fields.append(
                 _entry(
                     attribute,
                     a_value,
                     basis=basis,
-                    hints=[summary] if summary else [],
-                    steps=_steps(detail),
+                    hints=hints,
+                    steps=steps,
+                    confidence=confidence,
                     observed_at=observed,
                     origin="A!=B" if b_text else "A_only",
                 )
@@ -282,9 +300,9 @@ def assemble_base_claims(
                     attribute,
                     b_value,
                     basis="inferred_high",
-                    hints=_hints(detail),
-                    steps=_steps(detail),
-                    confidence=_confidence(detail),
+                    hints=_hints(b_detail),
+                    steps=_steps(b_detail),
+                    confidence=_confidence(b_detail),
                     observed_at=observed,
                     origin="B_only",
                 )

@@ -82,6 +82,34 @@ async def test_unlocked_fields_are_excluded(service, replay):
     assert "customer_remark" not in names
 
 
+# ---------------------------------------------------------------- 2026-11-17 新结构
+
+
+async def test_new_list_container_is_read(service, replay):
+    """改版后 Notes 容器是列表 ``basic_notes_updates``：锁定项照样挑得出来。
+
+    这一路在改版当天恒产出 ``{"locked_notes": []}``——读不到不会报错，只是静默为空，
+    因此必须有一条用例钉住「新结构读得出数据」。
+    """
+    outcome = await _run(service, replay, "13800000005")
+
+    assert outcome.status == RunStatus.SUCCEEDED, outcome.error
+    payload = json.loads(outcome.outputs["result"])
+    assert payload == {"locked_notes": [{"customer_name": {"value": "李四"}}]}
+
+
+async def test_new_structure_empty_list_gives_empty_result(service, replay):
+    outcome = await _run(service, replay, "13800000006")
+    assert json.loads(outcome.outputs["result"]) == {"locked_notes": []}
+
+
+async def test_null_value_and_detail_entries_are_tolerated(service, replay):
+    """新结构里有 ``attribute_value`` 与 ``reasoning_detail`` 同时为 null 的条目。"""
+    outcome = await _run(service, replay, "13800000005")
+    payload = json.loads(outcome.outputs["result"])
+    assert "hobbies" not in [list(entry)[0] for entry in payload["locked_notes"]]
+
+
 # ---------------------------------------------------------------- 非 2xx
 
 

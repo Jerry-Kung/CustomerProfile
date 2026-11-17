@@ -17,6 +17,11 @@
 - ``code`` 节点的两个解析辅助函数在本模块内同名（``_strip_code_fence`` 在两段迁移前的定义
   正文里都有但实现不同），因此第二个被重命名为 ``_strip_code_fence__6946``；改名只动
   函数名，正文一字未改。
+- **2026-11-17 接口改版**：读回体的 Notes 容器从字典 ``basic_notes`` 换成与回传体同形的
+  列表 ``basic_notes_updates``，``reasoning_summary`` 也改名为 ``reasoning_detail.summary``。
+  ``split_feedback_notes`` 因此改了读取来源（走
+  :mod:`customer_profile.profile_readback`），输出两键与判据不变。
+  ``ai_feedback`` 在改版当天一度整体消失，业务方随后补回。
 - 回写类接口不在此工作流内；这里只有一次 GET 读请求（mhero），按幂等重试。
 """
 
@@ -26,6 +31,8 @@ from typing import Any
 
 from ..definitions import WorkflowDef, make_node
 from .. import text_utils as tut
+from .. import profile_readback as readback
+from ..profile_readback import notes as notes_of, value_of
 
 
 # ---- 迁移前的定义节点 1779414084761 的正文（逐字符，仅函数名不同）
@@ -98,14 +105,17 @@ def _build_feedback_item(field_name, field_content):
       }
     }
 
-    如果你只想保留 value，可以删除 reasoning_summary 相关部分。
+    ``reasoning_summary`` 在 2026-11-17 的读回体里改名为 ``reasoning_detail.summary``
+    （容器同时从字典 ``basic_notes`` 换成列表 ``basic_notes_updates``）。这里由
+    :func:`customer_profile.profile_readback.notes` 归一后再取，新旧形状都能读到。
     """
     item_content = {
-        "value": field_content.get("value")
+        "value": value_of(field_content)
     }
 
-    if "reasoning_summary" in field_content:
-        item_content["reasoning_summary"] = field_content.get("reasoning_summary")
+    summary = readback.detail(field_content).get("summary")
+    if summary:
+        item_content["reasoning_summary"] = summary
 
     return {
         field_name: item_content
@@ -119,21 +129,17 @@ def split_feedback_notes(input_json) -> dict:
     return:
       approved_feedback_json: 用户赞同字段汇总，JSON 字符串，不是 Object
       rejected_feedback_json: 用户反对字段汇总，JSON 字符串，不是 Object
+
+    ``ai_feedback`` 在改版当天一度整体消失，业务方随后补回（线上实测每条 Note 都带，
+    未被反馈的取 ``null``）。读取统一走 :func:`customer_profile.profile_readback`。
     """
 
     data = _parse_json_string(input_json)
 
-    basic_notes = data.get("basic_notes", {})
-    if not isinstance(basic_notes, dict):
-        basic_notes = {}
-
     approved_notes = []
     rejected_notes = []
 
-    for field_name, field_content in basic_notes.items():
-        if not isinstance(field_content, dict):
-            continue
-
+    for field_name, field_content in notes_of(data).items():
         feedback = field_content.get("ai_feedback")
         item = _build_feedback_item(field_name, field_content)
 
