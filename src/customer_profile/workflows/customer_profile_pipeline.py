@@ -1355,6 +1355,14 @@ _BASIS_RANK: dict[str, int] = {
 }
 
 
+def _chain_steps(entry: dict) -> tuple[str, ...]:
+    """一条 L1 结论是否带了推导链（``reasoning_chain``），按与 ``project_claims`` 同口径判。"""
+    value = entry.get("reasoning_chain") or ()
+    if isinstance(value, str):
+        return (value,) if value.strip() else ()
+    return tuple(str(item) for item in value if str(item).strip())
+
+
 def merge_l1_layers(facts_json, fields_json) -> dict:
     """L1 合并层（纯代码，0 token）：把 1a 事实层与 1c 分析投影层按字段求并集。
 
@@ -1431,6 +1439,24 @@ def merge_l1_layers(facts_json, fields_json) -> dict:
             target["subject"] = declared
             subject_overrides += 1
 
+    # v3.6：**推导链不从 1a 覆盖到 1c 的空链上**（2026-11-17 UAT 核查问题一/建议 3）。
+    #
+    # 1a 只负责「原文里有什么」，实测 43.8% 的事实条目根本没给 ``reasoning_chain``；
+    # 1c 则被要求给每条结论写链。此前同档位一律以 1a 为准，于是 1c 为同一个字段补齐的
+    # 那条链被整条丢弃，字段落到投影层的代码兜底句——「没变化」的那 2296 条正是这么来的。
+    # 规则：1a 胜出但链为空时，沿用 1c 那条的链；两边都有链则仍用 1a 的（1a 的锚点更硬）。
+    # 只补链，不动 ``value`` / ``basis`` / 锚点——那仍是 1a 占优的那一份。
+    steps_from_fields = 0
+    for entry in fields:
+        attribute = str(entry.get("attribute") or "").strip()
+        target = merged.get(attribute) if attribute else None
+        if target is None or target is entry:
+            continue
+        if _chain_steps(target) or not _chain_steps(entry):
+            continue
+        target["reasoning_chain"] = list(entry.get("reasoning_chain") or ())
+        steps_from_fields += 1
+
     return {
         "claims_json": json.dumps({"fields": payload}, ensure_ascii=False, default=str),
         "merged_count": len(payload),
@@ -1439,6 +1465,7 @@ def merge_l1_layers(facts_json, fields_json) -> dict:
         "from_facts_only": from_facts_only,
         "overrode": overrode,
         "subject_overrides": subject_overrides,
+        "steps_from_fields": steps_from_fields,
     }
 
 
@@ -1715,6 +1742,49 @@ def _is_new_record(record: dict, ctx: dict[str, Any]) -> bool:
     return record_key(record) in keys or logical_key(record) in logical
 
 
+def _timeline_block(records: list[dict]) -> str:
+    """《同一来源多次记录的时间关系》——只在**确有**同源多记录时才出。
+
+    为什么要这一段：记录正文按来源档排成分节，同档内虽按时间升序，但没有任何一句
+    告诉模型「靠后的是靠前的更新」。实测 UAT ``15903771774`` 就栽在这里——四条跟进
+    记录里 11-04 说「等车子稳定之后再看，不着急」，11-17 说「已经下大定了」，模型
+    把它们当成同一平面的并列事实，于是 ``viewing_progress=已经下定`` 与
+    ``planned_purchase_time=3 个月以上``、``emotion_state=观望不着急`` 同时上了卡片。
+
+    **不改模板**：模板属业务资产，正文改动须单独确认；这一段是可选段，拼在
+    约束区（与《合法取值清单》同性质，仍在记录正文之前）。
+
+    只列**确有两条以上**的来源，且最多点名 :data:`_TIMELINE_LIST_LIMIT` 个来源——
+    全部单条时返回空串，本案输出与接入前逐字节相同。
+    """
+    counts: dict[str, int] = {}
+    for record in records:
+        name = str(record.get("source_name") or record.get("channel") or "").strip()
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    repeated = [name for name, count in counts.items() if count > 1]
+    if not repeated:
+        return ""
+    shown = repeated[:_TIMELINE_LIST_LIMIT]
+    more = len(repeated) - len(shown)
+    names = "、".join(f"「{name}」" for name in shown)
+    tail = f"等 {len(repeated)} 个来源" if more else ""
+    return (
+        "## 同一来源的多次记录要看时间先后\n\n"
+        f"下列来源各有**多条**记录，正文里已按时间**从早到晚**排列：{names}{tail}。\n\n"
+        "- 先说过的结论，可以被同一来源后到的记录更新。判断客户**当前**的状态时，"
+        "以这批记录里**最晚**的那条为准。\n"
+        "- 但「被更新」只对**随流程变化的进展**成立（看车进度、计划时间、当前态度、"
+        "在意的点）。身份、家庭、籍贯这类不变的事实不因后到记录而改写。\n"
+        "- 若早先与最近的记录互相矛盾，**取最近的那条写进字段**，并在推导链的"
+        "「检查核对」里点明「某月某日的表述已被某月某日的记录更新」，不要两条并列写出去。\n"
+    )
+
+
+_TIMELINE_LIST_LIMIT = 6
+"""点名几个来源。再多就变成一行噪声，且多出来的来源模型本来也分得清。"""
+
+
 def _settled_facts_block(ctx: dict[str, Any]) -> str:
     """《上一版已定稿事实》——只给字段与取值，**不给证据与推理**。
 
@@ -1817,6 +1887,9 @@ def build_l1_input(records_json, kb_brief: str = "", incremental_ctx: Any = "") 
     if settled:
         # 清单放在记录正文**之前**：与其它约束同性质，让记录原文仍是最后读到的内容。
         guide = f"{guide}\n\n{settled}"
+    timeline = _timeline_block(usable)
+    if timeline:
+        guide = f"{guide}\n\n{timeline}"
     output = f"{guide}\n\n---\n\n{body}" if body else guide
     return {
         "output": output,
@@ -2686,7 +2759,6 @@ async def enum_map(
     channels_json="{}",
     llm=None,
     templates=None,
-    enabled=None,
     template_name: str = "customer_profile_pipeline__pipeline_enum_map",
     node_ref=None,
 ) -> dict:
@@ -2696,8 +2768,8 @@ async def enum_map(
     不判。**失败一律不抛**——调用异常、解析失败、模型返回空，都退回今天的「保留原值 +
     转确认」，管线不因这一步中断（规则层不能成为新单点）。
 
-    关闭开关（``ENUM_MAPPING_ENABLED``，缺省 false）时在**发起调用之前**返回，产物逐
-    字节原样透传：开关的意义就是省钱，走到调用那一步再判断等于没关。
+    **恒启用，没有开关**（2026-11-17 起移除 ``ENUM_MAPPING_ENABLED``）。没有需要映射的
+    取值时在发起调用之前返回（``no_candidate``），零 token。
     """
     facts = _loads_object(facts_json)
     notes = _loads_list(notes_updates_json)
@@ -2747,8 +2819,6 @@ async def enum_map(
             "enum_map_error": error,
         }
 
-    if not enum_mapping.enabled(enabled):
-        return _out("disabled")
     groups = enum_mapping.collect(facts, notes)
     if not groups:
         return _out("no_candidate")
@@ -2948,6 +3018,12 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
 
     并入时**保持产物形状不变**：`basic_notes_updates` 的三键结构是下游契约，
     兜底改的只是取值与置信度，不新增键。
+
+    改判后推导链**替换「结论推断」这一段**，不往末尾追加（2026-11-17 UAT 核查问题二）：
+    此前 ``steps.append(lead)`` 在已有四段后挂一条无标签的尾巴，交付里 551 条因此变成
+    「五段式」，前端按前缀着色时分不清它属于哪一段。L2 兜底的定位是「只改取值与置信度」，
+    理由属于结论推断——那一段该换成什么就换成什么，``信源整合`` / ``信息缺位`` /
+    ``检查核对`` 三段照旧沿用 L1 的（见 :func:`customer_profile.readable.merge_stage`）。
     """
     candidates = _claims_payload(candidates_json)[0]
     verdict = proj.apply_l2_verdict(candidates, verdict_json)
@@ -2973,19 +3049,24 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
         # v3.3：移除 reason 中的工程术语措辞（问题2修复）。
         # L2 提示词已规范，但为防止模型偶发漏出，代码再清洗一遍。
         if soft:
-            lead = f"根据已有信息推断：{reason}" if reason else "据已有事实归纳（低置信，供核对）"
+            # 不带「推断：」前缀：这一段进链时会由 ``merge_stage`` 统一加「结论推断：」，
+            # 自带一个前缀就成了「结论推断：根据已有信息推断：…」。
+            lead = reason or "只凭已有事实能判断到这一档，置信低，待向客户核对"
         else:
             lead = reason if reason else "多条来源同向，取一致结论"
         # 证据位填**理由里的事实部分**（结论从句之前的那段），而不是留空让前端整块不渲染。
         # 兜底补的字段本就没有原文锚点，这是能给到销售的最接近「依据」的内容。
-        factual = proj._strip_conclusion(reason) if reason else ""
+        factual = proj._evidence_basis(reason) if reason else ""
         existing = by_key.get(key)
         if existing is not None:
             existing["attribute_value"] = item["attribute_value"]
             detail = existing.setdefault("reasoning_detail", {})
             detail["confidence"] = confidence
-            steps = detail.setdefault("steps", [])
-            steps.append(lead)
+            # 替换「结论推断」段，而不是往链尾挂一句：追加会破坏前端按前缀着色的四段
+            # 结构（见本函数 docstring 与 ``readable.merge_stage``）。
+            detail["steps"] = rdb.merge_stage(
+                detail.get("steps"), rdb.STAGE_CONCLUSION, lead
+            )
             if factual and not detail.get("evidence"):
                 detail["evidence"] = [factual]
         else:
@@ -2999,7 +3080,7 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
                             if soft
                             else "由多条来源同向归纳得到"
                         ),
-                        "steps": [lead],
+                        "steps": rdb.merge_stage((), rdb.STAGE_CONCLUSION, lead),
                         "evidence": [factual] if factual else [],
                         "confidence": confidence,
                     },
@@ -3986,7 +4067,8 @@ WORKFLOW = WorkflowDef(
                 "fields_json": (L1_FIELDS, "result"),
             },
             outputs=("claims_json", "merged_count", "facts_count", "fields_count",
-                     "from_facts_only", "overrode", "subject_overrides"),
+                     "from_facts_only", "overrode", "subject_overrides",
+                     "steps_from_fields"),
             function=f"customer_profile.workflows.{SLUG}:merge_l1_layers",
         ),
         make_node(
@@ -4108,12 +4190,12 @@ WORKFLOW = WorkflowDef(
             ),
             function=f"customer_profile.workflows.{SLUG}:merge_l2_verdict",
         ),
-        # ---------------------------------------------------------- 枚举语义映射（1 次受约束 LLM，缺省关闭）
+        # ---------------------------------------------------------- 枚举语义映射（至多 1 次受约束 LLM，恒启用）
         # L1 稳定给出契约外的中文自由文本（「已婚有子女」「分期」），投影层归不了就保留
         # 原值、回写出口再整条剔除——静默掉字段。本节点把「有信息但格式不对」的取值
         # 一次性映射成合法键，**在 gate 与回写之前**落定，因此 facts 与 Notes 同时受益。
         # 必须接在 ``L2_APPLY`` 之后：兜底写进 Notes 的中文原值在投影层还不存在。
-        # 关闭开关（ENUM_MAPPING_ENABLED，缺省 false）时在发起调用前即返回，零 token。
+        # 没有需要映射的取值时在发起调用前即返回，零 token。
         make_node(
             L2_ENUM_MAP,
             "枚举语义映射",

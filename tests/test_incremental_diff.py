@@ -145,6 +145,6 @@ class TestConsumedKeys:
 def expected_tier_of(delta: dict) -> str:
     """与 ``build_incremental_fixtures.expected_tier`` 同口径的最小复刻（不含录音分支）。"""
     touched = delta["added_records"] + delta["changed_records"]
-    if not touched and not delta["removed"]:
+    if not touched:
         return "T0"
     return "T1"

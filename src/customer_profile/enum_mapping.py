@@ -19,7 +19,7 @@
 - checker 判「这条规则有没有被违反」，动作白名单**不含**产生取值，带 ``value`` 的裁决
   一律丢弃；
 - 本模块的**唯一职责**就是产生取值（``原值 → 合法键``），因此不复用 checker 的动作集，
-  也不挂在它的开关下。共用的只是「code 节点落地、异常全吞、关闭即零 token」这套骨架。
+  也不挂在它的开关下。共用的只是「code 节点落地、异常全吞」这套骨架。
 
 ## 三道闸门，代码守住最后一道
 
@@ -34,11 +34,11 @@
    取值必须真的是送检过的那个。任何一条不过即按「无法映射」处理——模型输出只是**建议**，
    不把它当真值。
 
-## 失败与开关
+## 失败不阻断，没有开关
 
-``ENUM_MAPPING_ENABLED`` 缺省 false，关闭时在**发起调用之前**返回，产物与今天逐字节
-一致。调用异常、JSON 解析失败、返回为空，一律不抛：映射失败退回「保留原值 + 转确认」，
-即今天的行为，管线不因此中断。
+本通路**恒启用**（2026-11-17 起，原 ``ENUM_MAPPING_ENABLED`` 开关已移除：它缺省关闭，
+UAT 上因此一次都没跑过）。没有需要映射的取值时不发起调用。调用异常、JSON 解析失败、
+返回为空，一律不抛：映射失败退回「保留原值 + 转确认」，管线不因此中断。
 
 ## 位置
 
@@ -454,18 +454,6 @@ def remember(
             _CACHE[(attribute, legal, value)] = accepted.get((attribute, value))
 
 
-def enabled(explicit: bool | None = None) -> bool:
-    """``ENUM_MAPPING_ENABLED`` 的运行时取值。读配置失败按**关闭**处理。"""
-    if explicit is not None:
-        return bool(explicit)
-    try:
-        from .settings import get_settings
-
-        return bool(get_settings().enum_mapping_enabled)
-    except Exception:
-        return False
-
-
 def to_confirm_entries(groups: Iterable[Mapping[str, Any]], accepted: Mapping[tuple[str, str], str]) -> list[dict[str, Any]]:
     """给仍未映射的取值造 ``to_confirm`` 条目（对客可读，不含编号与内部键）。"""
     entries: list[dict[str, Any]] = []
@@ -495,7 +483,6 @@ __all__ = [
     "build_prompt",
     "load_cached",
     "remember",
-    "enabled",
     "reset_cache",
     "to_confirm_entries",
 ]

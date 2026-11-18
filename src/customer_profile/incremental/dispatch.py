@@ -129,8 +129,15 @@ def decide(
     """档位判定（纯函数）。返回节点出参字典。
 
     判定顺序自上而下、先命中先生效（``01`` §4）：无基线 → T3；兼容键不符 → T3；
-    键集合无差异 → T0；新增含试驾录音 → T3（阶段跃迁）；含其他录音 → T2；仅文本 → T1。
+    **无新增记录** → T0；新增含试驾录音 → T3（阶段跃迁）；含其他录音 → T2；仅文本 → T1。
     ``enabled_tiers`` 之外的档位落 T3 并写明理由。
+
+    **T0 只看有无新增，不看「基线里有、本轮没有」的键**（2026-11-17 改）。基线的已消费键
+    只增不减（见 ``nodes.baseline_commit``），基础渠道的记录一旦改版，旧键就永远留在基线里，
+    此后每一轮都会被算成「有记录消失」。旧判据要求两者皆空，于是 T0 实际命中不了：
+    UAT 11-16 批次 4 对无新增的重复运行里有 2 对因此漏掉，白跑一遍完整管线。
+    代价是上游**真的删除**一条记录而没有任何新增时，也按 T0 沿用上一版——已删记录带来的
+    结论会留到下一次有新数据时才重算。``removed_count`` 照常留痕，可据此追查。
     """
     from .diff import diff_by_keys
 
@@ -142,8 +149,8 @@ def decide(
         tier, reason = TIER_T3, "无基线：首次运行或基线缺失"
     elif not compat_ok:
         tier, reason = TIER_T3, "管线兼容键不符：契约/规则/板块已变更，旧结论不可沿用"
-    elif not delta["added"] and not delta["removed"]:
-        tier, reason = TIER_T0, "记录身份键集合无差异"
+    elif not delta["added"]:
+        tier, reason = TIER_T0, "无新增记录"
     else:
         channels = {
             str(row.get("channel") or "")

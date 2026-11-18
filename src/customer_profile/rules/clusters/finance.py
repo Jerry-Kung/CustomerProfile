@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Sequence
 
+from ... import readable as rdb
 from ..actions import Action
 from ..registry import Rule
 
@@ -391,9 +392,11 @@ def check_weak_signal(entries: Sequence[Any]) -> list[Action]:
         summary = str(detail.get("summary") or "").strip()
         if ANNOTATION not in summary:
             summary = f"{summary}；{ANNOTATION}" if summary else ANNOTATION
-        steps = [str(item) for item in (detail.get("steps") or []) if str(item).strip()]
-        if ANNOTATION not in "".join(steps):
-            steps.append(ANNOTATION)
+        # 加注落在「检查核对」段里，不往链尾挂一句无标签的话：前端按段前缀着色，
+        # 裸尾巴会被当成第五段（2026-11-17 UAT 核查里 3 条同类追加即此形态）。
+        steps = rdb.append_stage_note(
+            detail.get("steps"), rdb.STAGE_GUARD, ANNOTATION
+        )
         try:
             current = float(detail.get("confidence"))
         except (TypeError, ValueError):

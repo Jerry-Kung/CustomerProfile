@@ -54,7 +54,7 @@ def test_submit_json_maps_fields_and_production_target():
     assert len(seen) == 1
     assert str(seen[0].url) == "http://prod-runner:18000/runs"
     assert json.loads(seen[0].content) == {
-        "workflow_id": "customer_profile_pipeline", "inputs": {"phone_number": PHONE, "batch_id": BATCH},
+        "workflow_id": "customer_profile_incremental", "inputs": {"phone_number": PHONE, "batch_id": BATCH},
         "business_ref": f"cdp:{PHONE}:{BATCH}",
     }
 

@@ -8,7 +8,8 @@ Runner 与擎天使用同一 Worker 合约。当前默认 Compose 支持两种�
 
 ## 协议
 
-Runner 请求 POST /runs，workflow_id=customer_profile_pipeline，inputs 中携带 phone_number、
+Runner 请求 POST /runs，workflow_id=customer_profile_incremental（增量入口，无新数据时原样
+回传上一版，否则以 customer_profile_pipeline 为子运行重建），inputs 中携带 phone_number、
 batch_id，并用 business_ref 关联业务身份。GET /runs/{run_id} 查询并校验运行、手机号、
 batch、工作流版本及非回放标记。结果将 result1 中的 analysis_result 归一到后端 output。
 

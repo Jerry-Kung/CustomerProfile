@@ -20,16 +20,25 @@ L2 兜底裁决同一骨架。
 
 契约写明的硬约束（``id``/``sequence`` 唯一、节点数上限、各字段长度、``followed_at``
 格式）**错一条就是整次回写 400 回滚**——连带已算好的定级、Notes 与九个板块一起作废。
-这些判据全部可机器验证，因此一律留在代码里；模型只负责两件机器做不好的事：给节点起名、
-把销售手写的简写（「电话没接通。」「通话转入语音留言」）补成销售看得懂的陈述。
+这些判据全部可机器验证，因此一律留在代码里；模型负责所有要读懂人话才能做的事：
+给节点起名、把跟进过程写成小结、写清这次跟进的下一步。
 
 **模型不输出 ``extra_info``**：渠道、参与人、车型、跟进结果、意向级别、下一步全都能从
-记录字段确定性取到，交给模型只会引入「把码值抄错」这一种新失败模式。
+记录字段确定性取到，交给模型只会引入「把码值抄错」这一种新失败模式。（``next_step``
+是**叙述**而非字段值：它要把结论与约定时间讲成一句连贯的话，这是模型的事；取值仍以
+记录字段为准，提示词已就此立规矩。）
 
-## 两段式 ``contents``
+## ``contents``：跟进小结 + 后续安排，两段都由模型写
 
-首段是销售原始记录，逐字不动；次段是模型补的可读陈述。只留改写版会丢掉原文
-（销售自己写的话在交接时是凭据），只留原文则是十几字的简写堆叠。
+``_node`` 里的 ``contents`` 是 ``[summary, next_step]``，销售手写的原文不进 ``contents``。
+
+**为什么原文不是第一段**：原文是取证凭据，小结是交接读物，两者服务的人不同。卡片的使用者是
+接手的销售，而销售手写的原文大量是「电话没人接」「白天联系。。。。。。」这类碎片，与模型
+写的陈述并列时只是把同一件事说两遍。这一版取交接读物。原文只在模型对这一组什么都没写时
+兜底出现（见 :func:`_node`）——所以「原文一条不少」不再是本模块的约束，别按旧口径读装配。
+
+这项取舍的过程与数据见 ``docs/changelog.md`` 与
+``docs/history/feature-followup-record/跟进履历内容重复问题-定位与处置.md``。
 
 ## 无数据不出键
 
@@ -59,7 +68,7 @@ MAX_NODES = 100
 """契约 §3.3：单客户最多 100 个节点。"""
 
 MAX_CONTENTS = 20
-"""契约 §3.3：``contents`` 最多 20 条。两段式下单条记录通常只占 2 条。"""
+"""契约 §3.3：``contents`` 最多 20 条。当前两段（跟进小结 + 后续安排），远低于上限。"""
 
 MAX_CONTENT_CHARS = 1000
 MAX_NODE_NAME_CHARS = 100
@@ -161,6 +170,19 @@ def _literal(value: Any) -> str:
     """占位串与裸码统一折成空串——调用方按「没有这个信息」处理。"""
     text = _text(value)
     return text if _usable(text) else ""
+
+
+def _paragraph(value: Any) -> list[str]:
+    """模型给出的一个「段」（``summary`` / ``next_step``）折成非空字符串列表。
+
+    正常情况下模型给的是一个字符串；给成数组、或者多给几段，都接受并保留——
+    只要内容非空，装配侧照收，不因为形态不合预期就整段丢掉。
+    """
+    if isinstance(value, (list, tuple)):
+        items: Iterable[Any] = value
+    else:
+        items = [value]
+    return [text for text in (_text(item) for item in items) if text]
 
 
 # ---------------------------------------------------------------- 解析
@@ -303,6 +325,43 @@ def fallback_name(item: Mapping[str, str]) -> str:
     return "客户跟进"
 
 
+CHANNEL_KEYWORDS: Mapping[str, tuple[str, ...]] = {
+    "电话": ("电话", "致电", "通话", "外呼"),
+    "微信": ("微信",),
+    "上门": ("上门",),
+}
+"""沟通方式码 → 正文里指代该方式的词。
+
+**不含「到店」**：「邀约到店」是跟进目的，一次电话沟通同样可以邀约到店，
+把它当渠道词会把大量正常记录判成冲突。
+"""
+
+
+def channel_conflicts(method: str, texts: Iterable[Any]) -> bool:
+    """解码出的沟通方式与正文/小结说的是不是同一件事。
+
+    码值不可信是实测出来的：11-02 批次 110 条含「微信」的跟进原文里，99 条的
+    ``communicationmethods`` 是 ``90441``（解作「电话」），涉及 85 个客户。在拿到
+    ``prefix_id = 9044`` 的字典原文之前，只能以正文为准——**正文与码值打架时不给这个
+    标签**。宁可少一行标签，也不让卡片出现与节点名相反的小图标。
+
+    判据有意宽松：正文只要提到别的渠道、而没提到码值那个渠道，就算冲突。
+    正文同时提到两者（「电话联系后又加了微信」）不算冲突——那是同一件事的两个环节。
+    """
+    method = _text(method)
+    if not method:
+        return False
+    joined = "".join(_text(text) for text in texts)
+    if not joined:
+        return False
+    mentioned = {
+        name
+        for name, words in CHANNEL_KEYWORDS.items()
+        if any(word in joined for word in words)
+    }
+    return bool(mentioned) and method not in mentioned
+
+
 def fallback_extra(item: Mapping[str, str]) -> dict[str, Any]:
     """从记录字段确定性取 ``extra_info``。取不到的键不出现，不留空串。"""
     extra: dict[str, Any] = {}
@@ -340,8 +399,8 @@ def fallback_extra(item: Mapping[str, str]) -> dict[str, Any]:
 def _clean_contents(items: Iterable[Any]) -> list[str]:
     """``contents`` 清洗：去空、去重、限长、限条数。
 
-    **折叠空白只在模型给的可读陈述上做**（见 :func:`_clean_verbatim`）：销售原始记录
-    是交接时的凭据，改了空白就不再是原文。
+    模型写的两段都走这里——折叠空白是对的，模型偶发换行与多余空格。
+    销售原文只在兜底时才进 ``contents``，那条路径走 :func:`_clean_verbatim`。
     """
     out: list[str] = []
     for raw in items:
@@ -355,11 +414,11 @@ def _clean_contents(items: Iterable[Any]) -> list[str]:
 
 
 def _clean_verbatim(items: Iterable[Any]) -> list[str]:
-    """原始记录段的清洗：只去首尾空白，**不折叠内部空白**。
+    """销售原文的清洗：只去首尾空白，**不折叠内部空白**。
 
-    「两段式首段逐字保留销售原文」是方案的明文口径（``方案设计.md`` §7 第 3 条）。
-    实测有销售在内容里连打五个空格（``女士关注了x700   目前…``），把那段折叠成单空格
-    虽然更好看，但那已经不是他写下的话了。
+    原文已不进 ``contents``（见模块文档「跟进小结 + 后续安排」）。只剩两处用它：
+    兜底路径（模型没给出内容时退回原文）与 :func:`sanitize` 对成品的复核。
+    实测有销售在内容里连打五个空格（``女士关注了x700   目前…``），兜底展示时也不替他改。
     """
     out: list[str] = []
     for raw in items:
@@ -408,16 +467,12 @@ def model_groups(model_output: Any, total: int) -> list[dict[str, Any]]:
             indexes.append(position)
         if not indexes:
             continue
-        readable = entry.get("readable")
-        if isinstance(readable, str):
-            readable = [readable]
-        elif not isinstance(readable, (list, tuple)):
-            readable = []
         groups.append(
             {
                 "indexes": sorted(indexes),
                 "name": _text(entry.get("node_name")),
-                "readable": [item for item in readable if _text(item)],
+                "summary": _paragraph(entry.get("summary")),
+                "next_step": _paragraph(entry.get("next_step")),
             }
         )
     return groups
@@ -430,18 +485,24 @@ def _node(
     members: Sequence[Mapping[str, str]],
     *,
     name: str,
-    readable: Iterable[Any],
+    summary: Iterable[Any],
+    next_step: Iterable[Any],
     position: int,
 ) -> dict[str, Any]:
     """构造一个契约形状的节点。
 
-    组内**每条记录**的原文都进 ``contents``（两段式的首段），模型补的可读陈述跟在后面
-    ——这是「一句可读陈述把三条原文吃掉」那条最容易溜过去的退化路径的挡板。
+    ``contents`` 是模型写的两段：**跟进小结** 与 **后续安排**。销售原文不进 ``contents``
+    （原因见模块文档）。
+
+    唯一的原文返场：模型对这一组什么都没写时，把组内原文逐字放进来兜底。履历的价值首先
+    在于「这一段不能空」——宁可让读者看到一句粗糙的原文，也不要一片空白。
     """
-    raws = [_text(item.get("content")) for item in members]
-    # 首段（销售原文）走逐字清洗，次段（模型陈述）走折叠清洗：两者的口径不同，
-    # 混用一个函数会悄悄改掉原文的空白。
-    contents = _clean_verbatim([*raws, *_clean_contents(readable)])
+    written = _clean_contents([*summary, *next_step])
+    if written:
+        contents = written
+    else:
+        # 兜底走逐字清洗：这里展示的就是销售写下的话，内部空白也不替他改。
+        contents = _clean_verbatim(_text(item.get("content")) for item in members)
     if not contents:
         # 契约要求 ``contents`` 是数组；给一条说明，而不是让卡片上的节点空着。
         contents = ["销售留下了跟进记录，但没有填写具体内容"]
@@ -459,7 +520,29 @@ def _node(
         text = readable_time(followed_at)
         if text:
             node["followed_at_text"] = text
-    extra = fallback_extra(head)
+    # ``extra_info`` 取组内**最新**那条记录：一个节点合并了多次跟进时，卡片下方标签要反映
+    # 这组跟进的最终状态（结果、意向级别、下次跟进时间），否则读者会看到正文写「A 级、
+    # 11 月 3 日」而标签写「C 级、11 月 1 日」。时间轴位置仍用首条（``followed_at`` 不动）。
+    tail = members[-1]
+    extra = fallback_extra(tail)
+    # 渠道标签是**唯一**可能与正文打架的一项：其余键取自记录字段，与措辞无关。
+    # 码值不可信时（见 :func:`channel_conflicts`），宁可不出这个键，也不让卡片上的
+    # 小图标与节点名写反。
+    if "跟进渠道" in extra and channel_conflicts(
+        extra["跟进渠道"],
+        [node["node_name"], *contents, *(item.get("content") for item in members)],
+    ):
+        extra.pop("跟进渠道")
+    # 参与人是个例外：合并节点里每个顾问都参与过，只留最后一位会把前面的人抹掉。
+    consultants = list(
+        dict.fromkeys(
+            value
+            for value in (_literal(item.get("consultant")) for item in members)
+            if value
+        )
+    )
+    if len(consultants) > 1:
+        extra["参与人"] = [f"销售顾问{person}" for person in consultants] + ["客户本人"]
     if extra:
         node["extra_info"] = extra
     return node
@@ -480,7 +563,7 @@ def assemble(
     groups = model_groups(model_output, total)
     covered = {index for group in groups for index in group["indexes"]}
 
-    slots: list[tuple[str, int, list[Mapping[str, str]], str, list[str]]] = []
+    slots: list[tuple[str, int, list[Mapping[str, str]], str, list[str], list[str]]] = []
     for group in groups:
         indexes = group["indexes"]
         members = [records[index] for index in indexes]
@@ -490,7 +573,8 @@ def assemble(
                 indexes[0],
                 members,
                 group["name"],
-                group["readable"],
+                group["summary"],
+                group["next_step"],
             )
         )
 
@@ -499,16 +583,25 @@ def assemble(
         if index in covered:
             continue
         supplemented.append(index)
-        slots.append((_text(item.get("created_at")), index, [item], "", []))
+        # 代码补出来的节点没有模型措辞，``_node`` 会退回组内原文。
+        slots.append((_text(item.get("created_at")), index, [item], "", [], []))
 
     # 跨组补充的记录按「本条记录的创建时间」定位，与模型分组共用同一时间轴；
     # 同一时刻再比记录下标，保证顺序稳定。
     slots.sort(key=lambda slot: (slot[0], slot[1]))
 
     nodes: list[dict[str, Any]] = []
-    for position, (_, _, members, name, readable) in enumerate(slots[:MAX_NODES], start=1):
+    for position, (_, _, members, name, summary, next_step) in enumerate(
+        slots[:MAX_NODES], start=1
+    ):
         nodes.append(
-            _node(members, name=name, readable=readable, position=position)
+            _node(
+                members,
+                name=name,
+                summary=summary,
+                next_step=next_step,
+                position=position,
+            )
         )
     return nodes, supplemented
 

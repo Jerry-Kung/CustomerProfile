@@ -425,4 +425,11 @@
 | GET | `/api/v1/remote/data/batch/{batch_id}` | 获取本次触发的批次资料 |
 | GET | `/api/v1/remote/data/profile/{phone}` | 获取客户当前画像，供远程 AI 参考 |
 
-> 新版画像详情为**只读展示**：详情接口不返回 `icon` 与 `ai_feedback`，前端不提交反馈。
+> 新版画像详情为**只读展示**：详情接口不返回 `icon`；前端不提交反馈。
+>
+> **2026-11-17 修正**：本行此前写的是「详情接口不返回 `icon` 与 `ai_feedback`」。
+> 实测（2026-11-17 直连 mhero 取三个客户的画像详情）该端点**返回** `ai_feedback` 与
+> `is_locked`，每条 Notes / `ai_insight` 项 / `purchase_decisions.items` / `deal_battle.*` /
+> `decision_psychology` / `follow_up_history` 上都带，未反馈时为 `null`、未锁定为 `0`。
+> 同日的变更一度整体脱掉这两个键，业务方随后补回；`locked_by` 与 `reasoning_summary`
+> 未恢复（后者由 `reasoning_detail.summary` 取代）。

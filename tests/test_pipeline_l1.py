@@ -441,6 +441,41 @@ def test_l1_input_places_guide_before_records():
     assert built["output"].rstrip().endswith(body)
 
 
+# ---------------------------------------------------------------- 同源多记录的时间关系
+
+def test_timeline_note_added_only_when_a_source_repeats():
+    """UAT ``15903771774``：同一渠道四条跟进，正文里没有任何一句说「靠后的是更新」。
+
+    模型因此把「11-04 不着急」与「11-17 已下大定」当成并列事实，两条结论同时上了卡片。
+    """
+    two = pipe.build_l1_input(
+        records_json(
+            record("销售跟进记录", "顾客说，等车子稳定之后再看吧，不着急。", created_at="2026-11-04"),
+            record("销售跟进记录", "顾客已经下大定了，但是暂时车子还是没考虑好。", created_at="2026-11-17"),
+        )
+    )
+    assert "同一来源的多次记录要看时间先后" in two["output"]
+    assert "「销售跟进记录」" in two["output"]
+
+    # 每条来源都只有一条时不加——输出与接入前逐字节相同。
+    single = pipe.build_l1_input(records_json(record("销售跟进记录", "只有一条记录")))
+    assert pipe._timeline_block([record("销售跟进记录", "x")]) == ""
+    assert "同一来源的多次记录" not in single["output"]
+
+
+def test_timeline_note_stays_before_record_body():
+    """声明属约束，必须仍让记录原文是模型最后读到的内容。"""
+    body = "（客户）我上次说的那个价格……"
+    built = pipe.build_l1_input(
+        records_json(
+            record("外呼录音信息", "第一通", kind="transcript", created_at="2026-11-08"),
+            record("外呼录音信息", body, kind="transcript", created_at="2026-11-13"),
+        )
+    )
+    assert built["output"].index("同一来源的多次记录") < built["output"].index(body)
+    assert built["output"].rstrip().endswith(body)
+
+
 # ---------------------------------------------------------------- project_claims
 
 def test_project_claims_enforces_attribution():
@@ -1080,3 +1115,147 @@ def test_review_removes_english_placeholder_entries():
     kept = json.loads(result["notes_updates_json"])
     assert [entry["attribute_key"] for entry in kept] == ["occupation"]
     assert result["english_rule_hits"] == 1
+
+
+# ------------------------------------------- 2026-11-17 UAT 核查的六项修复
+
+def test_notes_updates_without_chain_leave_steps_empty():
+    """没有推导链时 ``steps`` 留空，不再吐「客户资料中已有信息归纳」这类假推导。
+
+    UAT 核查：交付里 2296 条旧写法来自出口兜底句。兜底句把「我没话可说」包装成
+    「结论已被论证」，比留空更误导——空 ``steps`` 由前端不渲染该区块。
+    """
+    result = pipe.project_claims(
+        claims_json(claim(attribute="occupation", value="教师", anchor="", basis="inferred_low"))
+    )
+    note = next(n for n in json.loads(result["notes_updates_json"]) if n["attribute_key"] == "occupation")
+    assert note["reasoning_detail"]["steps"] == []
+    assert note["reasoning_detail"]["evidence"] == []
+
+
+def test_export_fallback_sentences_are_gone():
+    """旧的五句兜底语不得再从出口产出（离线回放由 ``PIPELINE_VOCABULARY`` 兜）。"""
+    from customer_profile import projection as proj
+
+    banned = (
+        "客户资料中有明确记录，据此直接确定",
+        "客户本人有明确表述，据此直接确定",
+        "销售在沟通中提及，据此确定",
+        "综合上述几条线索归纳得出",
+        "根据客户资料中已有信息归纳",
+    )
+    sources = [
+        proj.Claim(attribute="a", value="x", channel="", quote="原文一句"),
+        proj.Claim(attribute="b", value="x", channel="", source_quote="原文二句"),
+        proj.Claim(attribute="c", value="x", channel="", basis_of_inference=("依据一条",)),
+    ]
+    steps = proj._readable_steps(sources)
+    assert steps == []
+    assert not any(s in banned for s in steps)
+
+
+def test_inference_summary_is_not_rendered_as_source_text():
+    """「据…归纳，推测…，供核对」只能作依据，不能顶替原文出现在证据位。
+
+    UAT 核查：16997 条证据里 968 条是这种推断总结，主要来自 L2 兜底理由。它把结论与
+    免责语一起摆进「信源原文」，销售读到的是一段自我论证。
+    """
+    result = pipe.project_claims(
+        claims_json(
+            claim(
+                attribute="hobbies",
+                value="越野",
+                record_channel="",
+                anchor="",
+                basis="inferred_high",
+                basis_of_inference=[
+                    "据用车场景为越野、性格偏好实用型归纳，推测爱好与户外越野相关，供核对"
+                ],
+            )
+        )
+    )
+    note = next(n for n in json.loads(result["notes_updates_json"]) if n["attribute_key"] == "hobbies")
+    joined = " ".join(note["reasoning_detail"]["evidence"])
+    assert "供核对" not in joined
+    assert "推测" not in joined
+    # 事实部分仍要留下，不能整条丢掉。
+    assert "用车场景为越野" in joined
+
+
+def test_l2_verdict_replaces_the_conclusion_stage_instead_of_appending():
+    """L2 兜底改判时**替换「结论推断」段**，不往四段后面挂一条无标签尾巴。
+
+    UAT 核查：``steps.append(lead)`` 造成 551 条「五段式」，前端按前缀着色时分不清
+    尾巴属于哪一段。
+    """
+    candidates = json.dumps(
+        {
+            "fields": [
+                {
+                    "attribute_key": "planned_purchase_time",
+                    "candidates": ["this_month"],
+                    "basis": "inferred_high",
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    verdict = json.dumps(
+        {
+            "verdicts": [
+                {"attribute_key": "planned_purchase_time", "value": "this_month",
+                 "reason": "跟进记录显示本月内到店谈价"}
+            ]
+        },
+        ensure_ascii=False,
+    )
+    notes = json.dumps(
+        [
+            {
+                "attribute_key": "planned_purchase_time",
+                "attribute_value": "within_3_months",
+                "reasoning_detail": {
+                    "summary": "客户提到近期想换车",
+                    "steps": [
+                        "信源整合：客户说近期想换车",
+                        "结论推断：据此按三个月内记",
+                        "检查核对：没有更近的时间线索",
+                    ],
+                    "evidence": [],
+                    "confidence": 0.6,
+                },
+            }
+        ],
+        ensure_ascii=False,
+    )
+    out = pipe.merge_l2_verdict(candidates, verdict, notes)
+    entry = json.loads(out["notes_updates_json"])[0]
+    steps = entry["reasoning_detail"]["steps"]
+    assert len(steps) == 3, steps
+    assert steps[0].startswith("信源整合")
+    assert steps[1] == "结论推断：跟进记录显示本月内到店谈价"
+    assert steps[2].startswith("检查核对")
+    assert all(s.startswith(("信源整合", "信息缺位", "结论推断", "检查核对")) for s in steps)
+
+
+def test_l2_verdict_on_untagged_chain_keeps_legacy_steps_and_tags_the_new_one():
+    """旧写法（无段标签）不做替换，只把新句带标签补在末尾——不删旧链，也不添裸尾巴。"""
+    candidates = json.dumps(
+        {"fields": [{"attribute_key": "age", "candidates": ["40-49岁"], "basis": "inferred_high"}]},
+        ensure_ascii=False,
+    )
+    verdict = json.dumps(
+        {"verdicts": [{"attribute_key": "age", "value": "40-49岁", "reason": "自述七九年出生"}]},
+        ensure_ascii=False,
+    )
+    notes = json.dumps(
+        [{"attribute_key": "age", "attribute_value": "40-49岁",
+          "reasoning_detail": {"summary": "旧", "steps": ["客户自述七九年出生"],
+                               "evidence": [], "confidence": 0.5}}],
+        ensure_ascii=False,
+    )
+    steps = json.loads(pipe.merge_l2_verdict(candidates, verdict, notes)["notes_updates_json"])[0][
+        "reasoning_detail"
+    ]["steps"]
+    assert steps[0] == "客户自述七九年出生"
+    assert steps[-1] == "结论推断：自述七九年出生"

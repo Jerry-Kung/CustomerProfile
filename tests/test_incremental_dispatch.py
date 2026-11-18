@@ -1,7 +1,7 @@
 """增量调度判定的表驱动测试。
 
 判定顺序自上而下、先命中先生效（``01`` §4）：无基线 → T3；兼容键不符 → T3；
-键集合无差异 → T0；新增含试驾录音 → T3；含其他录音 → T2；仅文本 → T1。
+无新增记录 → T0；新增含试驾录音 → T3；含其他录音 → T2；仅文本 → T1。
 P1 只放行 T0，其余一律落 T3，这个放行集合也要钉住——它是回滚与灰度的手段。
 """
 
@@ -67,16 +67,35 @@ def test_identity_key_set_unchanged_is_t0():
     assert result["added_count"] == 0
 
 
-def test_keep_baseline_consumed_keys_within_baseline_store(self=None):
-    """本轮接口少返回一条旧记录时，仍应判 T0——键集合有「消失」，但那是上游删了。"""
+def test_keys_only_in_baseline_do_not_block_t0():
+    """基线里有、本轮没有的键不挡 T0：判据只看有无新增。
+
+    基线的已消费键只增不减，基础渠道改版后旧键永远留着；按「键集合无差异」判，
+    这类客户此后每一轮都命中不了 T0（UAT 11-16 批次实测）。移除数照常留痕。
+    """
     kept = _row("OntologyOrder", "k1")
     gone = _row("OntologyLeadFollowRecord", "k2")
     from customer_profile.incremental.diff import record_key
 
     result = _decide([kept], _baseline((record_key(kept), record_key(gone))))
-    # P1 口径：键集合无差异才是 T0；有移除说明数据变了，落全量。
-    assert result["tier"] == TIER_T3
+    assert result["tier"] == TIER_T0
+    assert result["added_count"] == 0
     assert result["removed_count"] == 1
+    assert json.loads(result["callback_json"])["batch_id"] == "new-batch"
+
+
+def test_stale_key_plus_new_record_is_not_t0():
+    """反例：有旧键残留的同时确有新增，仍按新增定档，不被 T0 吞掉。"""
+    kept = _row("OntologyOrder", "k1")
+    gone = _row("OntologyLeadFollowRecord", "k2")
+    fresh = _row("OntologyLeadFollowRecord", "k3")
+    from customer_profile.incremental.diff import record_key
+
+    result = _decide(
+        [kept, fresh], _baseline((record_key(kept), record_key(gone))), tiers=("T0", "T1", "T2")
+    )
+    assert result["tier"] == "T1"
+    assert result["added_count"] == 1
 
 
 def test_compat_key_mismatch_is_full_rebuild():

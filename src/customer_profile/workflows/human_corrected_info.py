@@ -10,7 +10,10 @@
   任何定义文件中。
 - ``timeout`` / ``retry_interval`` 不照搬迁移前的定义的取值（``timeout: 0``、``retry_interval: 100``），
   改走 ``Settings`` 的显式配置。
-- ``code`` 节点逻辑与迁移前的定义逐字符一致。
+- ``code`` 节点逻辑与迁移前的定义逐字符一致——**2026-11-17 接口改版时打破**：读回体的
+  Notes 容器从字典 ``basic_notes`` 换成与回传体同形的列表 ``basic_notes_updates``，
+  旧正文读不到任何字段，整条渠道恒产出空壳。改造只换读取来源（走
+  :mod:`customer_profile.profile_readback`），输出形状与判据不变。
 - GET 幂等，按配置重试；这是读接口，不涉及回写副作用。
 """
 
@@ -21,6 +24,7 @@ from typing import Any
 
 from ..definitions import WorkflowDef, make_node
 from .. import text_utils as tut
+from ..profile_readback import is_locked, notes as notes_of, value_of
 
 WORKFLOW_ID = "human_corrected_info"
 DISPLAY_NAME = "人工确认信息提取"
@@ -68,6 +72,9 @@ def _parse_json_string(value):
 def _is_locked(value) -> bool:
     """
     兼容 is_locked 为 1 / '1' / True 的情况。
+
+    保留为孤立工具函数：节点正文已改走 :func:`customer_profile.profile_readback.is_locked`
+    （新旧两种读回体形状都在那里归一），这里只留给需要直接判裸取值的场合。
     """
     return value == 1 or value == "1" or value is True
 
@@ -75,25 +82,23 @@ def _is_locked(value) -> bool:
 def extract_locked_notes(input_json) -> dict:
     """挑出被锁定的人工确认 Notes，输出 JSON 字符串。
 
-    与迁移前的定义节点 ``1776650937435`` 的 ``main`` 函数体逐字符一致。
     ``locked_notes_json`` 必须是字符串而非对象——下游按字符串消费。
+
+    **2026-11-17 接口改版**：Notes 容器从字典 ``basic_notes`` 换成与回传体同形的列表
+    ``basic_notes_updates``（单条带 ``attribute_key`` / ``attribute_value`` /
+    ``reasoning_detail``）。读回体归一在 :func:`customer_profile.profile_readback.notes`，
+    新旧两种形状都能读到——旧归档批次的响应仍是旧形状。
+    ``is_locked`` 在改版当天一度整体消失，业务方随后补回，因此这一路重新读得出数据。
     """
     data = _parse_json_string(input_json)
 
-    basic_notes = data.get("basic_notes", {})
-    if not isinstance(basic_notes, dict):
-        basic_notes = {}
-
     locked_notes = []
 
-    for field_name, field_content in basic_notes.items():
-        if not isinstance(field_content, dict):
-            continue
-
-        if _is_locked(field_content.get("is_locked")):
+    for field_name, field_content in notes_of(data).items():
+        if is_locked(field_content):
             locked_notes.append({
                 field_name: {
-                    "value": field_content.get("value")
+                    "value": value_of(field_content)
                 }
             })
 

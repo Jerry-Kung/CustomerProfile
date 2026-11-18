@@ -8,6 +8,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .invitation_contract import validate_script
+from . import profile_readback as readback
 
 # 只选择购车与沟通有关的信息，不把收入、住址、年龄等人设信息交给对客话术。
 NOTE_FIELDS = {
@@ -140,23 +141,20 @@ def prepare_context(
             }
         )
 
-    notes = profile.get("basic_notes") or {}
-    if isinstance(notes, dict):
-        for key, label in NOTE_FIELDS.items():
-            note = notes.get(key)
-            if not isinstance(note, dict):
-                continue
-            detail = note.get("reasoning_detail") or {}
-            if not detail and note.get("reasoning_summary"):
-                detail = {"evidence": [note["reasoning_summary"]]}
-            add(
-                label,
-                note.get("value"),
-                f"basic_notes.{key}",
-                detail,
-                confirmed=note.get("is_locked") in (True, 1, "1"),
-                feedback=note.get("ai_feedback"),
-            )
+    notes = readback.notes(profile)
+    for key, label in NOTE_FIELDS.items():
+        note = notes.get(key)
+        if not isinstance(note, dict):
+            continue
+        detail = readback.detail(note)
+        add(
+            label,
+            readback.value_of(note),
+            f"basic_notes.{key}",
+            detail,
+            confirmed=readback.is_locked(note),
+            feedback=note.get("ai_feedback"),
+        )
 
     for section in ("purchase_decisions",):
         groups = profile.get(section) or []

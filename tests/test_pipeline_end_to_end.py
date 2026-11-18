@@ -120,6 +120,14 @@ async def test_submission_runs_real_pipeline_and_preserves_v2_callback(
             }
             nodes = await service.store.list_node_executions(run_id)
             assert not [node for node in nodes if node["status"] == "running"]
+            if via == "inbound":
+                # 入站任务恒走增量入口：首次运行无基线，落全量档，全量管线是它的子运行，
+                # 回传构造与回写节点在子运行里。
+                assert detail["workflow_id"] == "customer_profile_incremental"
+                children = await service.store.list_child_runs(run_id)
+                full = next(c for c in children if c["workflow_id"] == pipeline.WORKFLOW_ID)
+                nodes = await service.store.list_node_executions(full["run_id"])
+                assert not [node for node in nodes if node["status"] == "running"]
             builder = next(node for node in nodes if node["node_id"] == pipeline.CALLBACK_BUILD)
             assert json.loads(builder["outputs_json"]["callback_json"]) == payload
             writeback = next(node for node in nodes if node["node_id"] == pipeline.CALLBACK_WRITE)

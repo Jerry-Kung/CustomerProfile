@@ -171,7 +171,8 @@ def test_weak_signal_loan_is_downgraded_and_annotated():
     detail = state.notes[0]["reasoning_detail"]
     assert detail["confidence"] <= 0.6
     assert fin.ANNOTATION in detail["summary"]
-    assert fin.ANNOTATION in "".join(detail["steps"])
+    # 加注落在「检查核对」段里，不挂无标签尾巴（前端按前缀着色，裸尾巴算第五段）。
+    assert detail["steps"][-1] == f"检查核对：{fin.ANNOTATION}"
 
 
 def test_explicit_loan_is_left_alone():

@@ -18,7 +18,7 @@
 - 只收状态 ``succeeded`` 的运行；第一次落 ``<号码>/``，之后 ``<号码>__run2``……
 - 相邻运行**开始早于上一次结束**的（重叠对）剔除：两次取到的 history 可能互相穿插，
   不能当作「后一次看到前一次之后的数据」。
-- 档位判定顺序与 ``01`` §4 一致：无基线 → T3；记录键集合无差异 → T0；新增含试驾录音
+- 档位判定顺序与 ``01`` §4 一致：无基线 → T3；无新增记录 → T0；新增含试驾录音
   → T3（阶段跃迁）；新增含其他录音 → T2；仅文本 → T1。
 
 ## 变体（``--variant``）
@@ -47,6 +47,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from baseline_artifacts import dump_json  # noqa: E402
+from customer_profile import profile_readback as readback  # noqa: E402
 from customer_profile.execution.auc import build_submit_body  # noqa: E402
 from customer_profile.execution.transcript_cache import TranscriptCache  # noqa: E402
 from customer_profile.incremental.diff import (  # noqa: E402
@@ -282,7 +283,8 @@ def expected_tier(previous: list[dict] | None, current: list[dict], delta: dict)
     if previous is None:
         return "T3"
     touched = delta["added_records"] + delta["changed_records"]
-    if not touched and not delta["removed"]:
+    # 只看有无新增/改版，不看移除：与 ``dispatch.decide`` 同口径（2026-11-17 改）。
+    if not touched:
         return "T0"
     channels = {str(row.get("channel") or "") for row in touched}
     if RECORDING_PREFIX in channels:
@@ -459,23 +461,30 @@ def variant_pure_t0(target: Path, sequence: dict) -> dict:
 def variant_profile_edit(target: Path, sequence: dict, kind: str) -> dict:
     """补缺三情形：改最后一时点的 profile.json。
 
-    - ``missing_a``：删掉 3 个 ``basic_notes`` 键（A 缺失，用副本补）；
+    - ``missing_a``：删掉 3 个 Notes 键（A 缺失，用副本补）；
     - ``same_ab``：把若干字段值与上一时点 callback 对齐（沿用副本证据）；
     - ``diff_ab``：把若干字段值改成另一个值（以 A 为准）。
+
+    **写法跟着源文件走**：归档里的响应可能是旧字典 ``basic_notes``，也可能是
+    2026-11-17 起的列表 ``basic_notes_updates``。读取统一走 ``profile_readback``，
+    回写时按原来那个容器写回，变体与它所属的批次保持一致。
     """
     last = _shift(sequence)
     profile_path = target / f"t{last}" / "profile.json"
     if not profile_path.is_file():
         raise SystemExit(f"t{last} 没有 profile.json，换一个号码")
     profile = _load(profile_path)
-    notes = profile.get("basic_notes") or {}
+    notes = readback.notes(profile)
+    use_list = isinstance(profile.get("basic_notes_updates"), list)
     change: dict[str, Any] = {}
 
+    def _set_value(key: str, value: str) -> None:
+        notes[key]["value"] = value
+
     if kind == "missing_a":
-        removed = [key for key in notes if str(notes[key].get("value") or "").strip()][:3]
+        removed = [key for key, item in notes.items() if str(item.get("value") or "").strip()][:3]
         for key in removed:
             notes.pop(key, None)
-        profile["basic_notes"] = notes
         change = {"removed_keys": removed}
     elif kind == "same_ab":
         prev_callback = target / f"t{last - 1}" / "callback.json"
@@ -486,26 +495,44 @@ def variant_profile_edit(target: Path, sequence: dict, kind: str) -> dict:
             if item.get("attribute_key")
         }
         aligned = []
-        for key, item in notes.items():
-            if key in values and values[key] and isinstance(item, dict):
-                item["value"] = values[key]
+        for key in notes:
+            if key in values and values[key]:
+                _set_value(key, values[key])
                 aligned.append(key)
-        profile["basic_notes"] = notes
         change = {"aligned_keys": aligned[:5]}
     elif kind == "diff_ab":
         touched = []
-        for key, item in list(notes.items()):
-            if not isinstance(item, dict):
-                continue
+        for key, item in notes.items():
             value = str(item.get("value") or "").strip()
             if not value or len(touched) >= 2:
                 continue
-            item["value"] = value + "（人工修订）"
+            _set_value(key, value + "（人工修订）")
             touched.append(key)
-        profile["basic_notes"] = notes
         change = {"mutated_keys": touched}
     else:  # pragma: no cover - 参数由 argparse 限定
         raise SystemExit(f"未知变体 {kind}")
+
+    if use_list:
+        profile["basic_notes_updates"] = [
+            {
+                "attribute_key": key,
+                "attribute_value": item.get("value"),
+                "reasoning_detail": item.get("reasoning_detail") or None,
+                "is_locked": item.get("is_locked"),
+                "ai_feedback": item.get("ai_feedback"),
+            }
+            for key, item in notes.items()
+        ]
+    else:
+        profile["basic_notes"] = {
+            key: {
+                "value": item.get("value"),
+                "reasoning_summary": (item.get("reasoning_detail") or {}).get("summary", ""),
+                "is_locked": item.get("is_locked"),
+                "ai_feedback": item.get("ai_feedback"),
+            }
+            for key, item in notes.items()
+        }
 
     dump_json(profile_path, profile)
     # 这一时点的差分不受影响：改的是接口画像，不是客户数据。
@@ -541,7 +568,8 @@ def variant_removed(target: Path, sequence: dict, use_operation: bool) -> dict:
         kept = kept + [marker]
     dump_json(target / f"t{last}" / "history.json", kept)
     step = sequence["steps"][-1]
-    step["expected_tier"] = "T1"
+    # 纯移除、无新增：按 T0 沿用上一版（``dispatch.decide`` 只看有无新增）。
+    step["expected_tier"] = "T0"
     step["expected_change"] = {
         "removed_source_key": str(candidates[-1].get("source_key") or ""),
         "channel": str(candidates[-1].get("channel") or ""),

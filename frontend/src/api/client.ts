@@ -163,10 +163,8 @@ export interface SubmitResult {
 /** 当前运行态。**只有配置，没有凭据**——三个 API Key 一律不在此。 */
 export interface RuntimeInfo {
   replay_mode: 'off' | 'fixture' | string
-  /** 当前生效的主入口。增量开关打开时是 `customer_profile_incremental`。 */
+  /** 当前生效的主入口，恒为增量入口 `customer_profile_incremental`。 */
   entry_workflow_id?: string
-  /** 增量入口是否启用。提交页据此展示入口名，不再自己写一份常量。 */
-  incremental_enabled?: boolean
   /** 是否写回传体基线。关闭时不写，入口仍可跑（每轮全量）。 */
   baseline_enabled?: boolean
   /** 回写开关。false 时回写节点只产出「已跳过」的结果，运行仍可能 succeeded。 */

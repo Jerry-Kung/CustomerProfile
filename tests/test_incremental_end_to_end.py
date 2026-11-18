@@ -112,7 +112,6 @@ async def _service(
 ):
     settings = make_settings(
         tmp_path,
-        incremental_enabled=True,
         baseline_enabled=True,
         # 回写关闭：T0 分支的写回节点会因此只产出「已跳过」，不发出任何请求。
         writeback_enabled=False,

@@ -54,20 +54,28 @@ def _fresh_cache():
     em.reset_cache()
 
 
-# ---------------------------------------------------------------- 关闭即原样
+# ---------------------------------------------------------------- 恒启用，没有开关
 
-async def test_disabled_switch_passes_everything_through():
-    """反例：开关关闭时**不发起调用**，产物与输入逐字节一致。"""
+async def test_mapping_runs_without_any_switch():
+    """映射恒启用：不传任何开关、也不读配置，有可映射取值就发起调用。
+
+    2026-11-17 移除 ``ENUM_MAPPING_ENABLED``（缺省关闭导致 UAT 上一次都没跑过）。
+    本用例守住「不会再被一个缺省值悄悄关掉」。
+    """
+    import inspect
+
+    assert "enabled" not in inspect.signature(pipe.enum_map).parameters
+    assert not hasattr(em, "enabled")
+
     llm = FakeLLM(mapped("婚姻状况", "已婚有子女", "has_children"))
     out = await pipe.enum_map(
         facts_json=json.dumps({"family_structure": "已婚有子女"}, ensure_ascii=False),
         notes_updates_json=json.dumps([note("family_structure", "已婚有子女")], ensure_ascii=False),
         llm=llm,
-        enabled=False,
     )
-    assert out["enum_map_status"] == "disabled"
-    assert out["enum_map_calls"] == 0
-    assert llm.prompts == []
+    assert out["enum_map_status"] != "disabled"
+    assert out["enum_map_calls"] == 1
+    assert len(llm.prompts) == 1
     assert json.loads(out["facts_json"])["family_structure"] == "已婚有子女"
 
 
@@ -170,7 +178,6 @@ async def test_mapped_value_lands_in_facts_and_notes():
         ),
         llm=llm,
         templates=None,
-        enabled=True,
     )
     assert out["enum_map_status"] == "ok"
     assert json.loads(out["facts_json"])["family_structure"] == "has_children"
@@ -201,7 +208,6 @@ async def test_multi_value_field_maps_each_part():
         facts_json=json.dumps({"core_concerns": "safety||空间小"}, ensure_ascii=False),
         notes_updates_json="[]",
         llm=llm,
-        enabled=True,
         template_name="customer_profile_pipeline__pipeline_enum_map",
     )
     assert json.loads(out["facts_json"])["core_concerns"] == "safety||space"
@@ -214,7 +220,6 @@ async def test_llm_failure_keeps_original_value_and_confirms():
         facts_json=json.dumps({"family_structure": "已婚有子女"}, ensure_ascii=False),
         notes_updates_json=json.dumps([note("family_structure", "已婚有子女")], ensure_ascii=False),
         llm=FakeLLM(RuntimeError("boom")),
-        enabled=True,
     )
     assert out["enum_map_status"] == "failed"
     assert out["enum_map_error"]
@@ -237,7 +242,6 @@ async def test_contract_gap_value_goes_to_confirm_without_calling_out():
         facts_json=json.dumps({"frequent_social_media": "微信"}, ensure_ascii=False),
         notes_updates_json="[]",
         llm=llm,
-        enabled=True,
     )
     assert llm.prompts == []
     assert out["enum_map_status"] == "no_candidate"
@@ -265,7 +269,6 @@ async def test_second_case_reuses_cache():
         facts_json=json.dumps({"family_structure": "已婚有子女"}, ensure_ascii=False),
         notes_updates_json="[]",
         llm=first,
-        enabled=True,
     )
     await pipe.enum_map(**args)
     assert len(first.prompts) == 1

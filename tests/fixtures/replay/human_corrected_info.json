@@ -1,5 +1,5 @@
 {
-  "_note": "人工确认信息提取的固定响应。来自 mhero 客户画像接口的应答结构，字段为脱敏样例，不含真实客户数据。",
+  "_note": "人工确认信息提取的固定响应。来自 mhero 客户画像接口的应答结构，字段为脱敏样例，不含真实客户数据。13800000005 / 13800000006 是 2026-11-17 起的新结构（Notes 容器改为列表 basic_notes_updates）。",
   "llm": {},
   "http": {
     "GET /api/v1/remote/data/profile/13800000001": [
@@ -27,6 +27,20 @@
       {
         "status_code": 404,
         "text": "{\"code\": 404, \"message\": \"customer not found\"}",
+        "headers": {"content-type": "application/json"}
+      }
+    ],
+    "GET /api/v1/remote/data/profile/13800000005": [
+      {
+        "status_code": 200,
+        "text": "{\"profile_summary\": {\"name\": \"李\", \"gender\": \"女\"}, \"basic_notes_updates\": [{\"attribute_key\": \"customer_name\", \"attribute_value\": \"李四\", \"reasoning_detail\": {\"summary\": \"销售登记\", \"steps\": [], \"evidence\": [], \"confidence\": 0.9}, \"is_locked\": 1, \"ai_feedback\": null}, {\"attribute_key\": \"title\", \"attribute_value\": \"Ms\", \"reasoning_detail\": {\"summary\": \"原始数据：预约性别\", \"steps\": [], \"evidence\": [], \"confidence\": 0.85}, \"is_locked\": 0, \"ai_feedback\": 1}, {\"attribute_key\": \"hobbies\", \"attribute_value\": null, \"reasoning_detail\": null, \"is_locked\": 0, \"ai_feedback\": null}], \"ai_insight\": {\"purchase_intent_level\": {\"value\": \"B\", \"reasoning_detail\": {\"summary\": \"有意向\", \"steps\": [], \"evidence\": [], \"confidence\": 0.8}, \"is_locked\": 0, \"ai_feedback\": null}}}",
+        "headers": {"content-type": "application/json"}
+      }
+    ],
+    "GET /api/v1/remote/data/profile/13800000006": [
+      {
+        "status_code": 200,
+        "text": "{\"profile_summary\": {\"name\": \"王\", \"gender\": \"男\"}, \"basic_notes_updates\": []}",
         "headers": {"content-type": "application/json"}
       }
     ]

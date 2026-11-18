@@ -43,6 +43,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import internal_fields as inf
 from . import notes_contract as nc
+from . import readable as rdb
 from . import text_utils as tut
 from .income_band import INCOME_BAND_RANGES, normalize_income
 from .rules import RuleRegistry
@@ -370,7 +371,7 @@ class Claim:
     分流、两栏字面雷同（实测 234 字段中 122 个完全同集，占 52%）。
 
     L1 的事实层对 ``inferred_high`` 条目、分析投影层对**每条**结论给出本字段；离线回放
-    的旧产物没有它，届时由 :func:`_readable_steps` 退到一句非复述的说明。
+    的旧产物没有它，届时 ``steps`` 留空（:func:`_readable_steps` 不再编兜底句）。
     """
 
     confidence: float | None = None
@@ -1326,6 +1327,36 @@ def _strip_conclusion(text: str) -> str:
     return head
 
 
+_SPECULATION_CLAUSE = re.compile(r"推测|推断|供核对")
+_BASIS_WRAPPER = re.compile(r"^据(.+?)归纳(?:得出)?(?:$|[，,；;。])")
+
+
+def _evidence_basis(text: str) -> str:
+    """把一条推断依据收成能进**证据位**的事实部分；收不出事实就返回空串。
+
+    证据位在前端的标题是「信源原文」。2026-11-17 UAT 核查发现 968 条证据是
+    「据用车场景为越野、意向车型为…归纳，推测其职业与户外越野相关，供核对」这种
+    **推断总结**——主要来自 L2 兜底的理由。它把结论与「供核对」的免责语一起摆进了
+    原文位，销售读到的是一段自我论证。这里只留下它引用的事实（「用车场景为越野、
+    意向车型为…」），结论从句、「供核对」尾巴与「据…归纳」外壳一律去掉。
+
+    **不并入** :func:`_strip_conclusion`：那个函数同时是 HARD-03 / EXPR-02 的判据
+    （``_is_conclusion``），放宽它会改变降级与删除的范围；这里只管证据位怎么呈现。
+    """
+    cleaned = _strip_conclusion(text)
+    if not cleaned:
+        return ""
+    wrapped = _BASIS_WRAPPER.match(cleaned)
+    if wrapped:
+        return wrapped.group(1).strip("，,；;。、 ")
+    kept: list[str] = []
+    for clause in re.split(r"(?<=[，,；;。])", cleaned):
+        if _SPECULATION_CLAUSE.search(clause):
+            break
+        kept.append(clause)
+    return "".join(kept).strip("，,；;。、 ")
+
+
 def _speaker_prefix(role: str) -> str:
     """证据位的说话方前缀（用户口径，2026-10-20）。
 
@@ -1388,7 +1419,7 @@ def _readable_evidence(sources: Sequence[Claim]) -> list[str]:
                 evidence.append(text)
             continue
         for hint in claim.basis_of_inference:
-            text = _strip_conclusion(hint)
+            text = _evidence_basis(hint)
             if text and text not in evidence:
                 evidence.append(text)
         injected = _injected_evidence(claim)
@@ -1433,29 +1464,6 @@ def _prediction_tag_text(claim: Claim) -> str:
     return f"第三方画像标签“{tag}”给出“{value}”"
 
 
-def _quote_basis_step(sources: Sequence[Claim]) -> str:
-    """有原文切片、但没有模型给的推导链时，说清**这条切片是谁说的**。
-
-    取第一条带 ``quote`` 的断言作代表（与 ``_readable_evidence`` 同一取料顺序）。
-    三种归属各有说法，**不能合并成一句**：
-
-    - 录音里的客户方 → 客户本人说的；
-    - 录音里的销售方 → 销售说的，不是客户表态；
-    - 登记档 / 截图 / 第三方标签（``speaker_role`` 为空）→ 系统里记着的，无所谓「谁说的」。
-    """
-    for claim in sources:
-        if not claim.quote:
-            continue
-        if claim.speaker_role == SPEAKER_CUSTOMER:
-            return "客户本人有明确表述，据此直接确定"
-        if claim.speaker_role == SPEAKER_SALES:
-            return "销售在沟通中提及，据此确定"
-        if claim.tier == REGISTRY:
-            return "客户资料中有明确记录，据此直接确定"
-        return "客户资料中有明确原文，据此直接确定"
-    return "客户资料中有明确原文，据此直接确定"
-
-
 def _readable_steps(sources: Sequence[Claim]) -> list[str]:
     """推理步骤：由依据推到结论的**思维路径**（v3.1 改造一，1–4 条中文短句）。
 
@@ -1464,11 +1472,14 @@ def _readable_steps(sources: Sequence[Claim]) -> list[str]:
     原料分流渲染——``steps`` 有锚点时吐「原始依据：<锚点>」、无锚点时吐「推断依据：<依据>」，
     两栏字面雷同（实测 234 字段中 122 个完全同集，占 52%）。
 
-    取料顺序：L1 显式产出的 ``reasoning_steps`` > 一句**非复述**的来源说明。缺
-    ``reasoning_steps`` 时**不再抄锚点原文**——抄锚点正与 ``evidence`` 撞车。
+    **没有链就返回空列表，不再编一句兜底语**（2026-11-17 UAT 核查建议 4）。此前缺
+    ``reasoning_steps`` 时会退到「客户资料中有明确记录，据此直接确定」「根据客户资料中
+    已有信息归纳」这类固定句——它们不是推导，只是把「我没话可说」包装成了一句推导，
+    销售读到的却是结论已被论证过。交付里 2296 条旧写法正是这么来的。空 ``steps`` 由前端
+    不渲染该区块：没话就不说，比说一句假话诚实。
 
-    不得出现投影规则名（归属过滤 / 来源分级 / 枚举归一）与来源档代号——那些是
-    内部审计串，销售看不懂（设计稿 §1）。
+    诊断口：「为什么这个字段没有推导链」要去查 L1 有没有产出 ``reasoning_chain``
+    （见 ``_readable_steps`` 的取料方 ``project_claims``），不要指望出口补话。
     """
     for claim in sources:
         if not claim.reasoning_steps:
@@ -1479,24 +1490,8 @@ def _readable_steps(sources: Sequence[Claim]) -> list[str]:
             if text and text not in lines:
                 lines.append(text)
         if lines:
-            return lines[:4]
-
-    # —— 退路：一句**不复述材料**的说明。旧的「原始依据：<锚点>」正是雷同的来源。
-    # 措辞一律用销售听得懂的说法：不写「据现有记录归纳」「未作二次推断」这类
-    # 管线口径（2026-10-29 出口可读性整改，见 ``PIPELINE_VOCABULARY`` 同批）。
-    #
-    # **必须按来源分说**（2026-10-29 A/B 复核发现）：``quote`` 来自哪个渠道不决定
-    # 「谁说的」——登记档的 ``quote`` 是系统里的字段值，录音的 ``quote`` 可能是销售
-    # 说的话。一律写「客户本人有明确表述」会把「系统里记着客户开一辆现代」说成
-    # 「客户自己讲了这句话」。实测 382 条里 187 条并非客户原话（登记 136 / 销售 51）。
-    if any(claim.quote for claim in sources):
-        return [_quote_basis_step(sources)]
-    if any(claim.source_quote for claim in sources):
-        return ["客户原话经口误与品牌名核对后确定"]
-    if any(claim.basis_of_inference for claim in sources):
-        return ["综合上述几条线索归纳得出"]
-    # **不再输出「来自{渠道}」**（2026-10-19 可读性整改）：它只复述了出处，没给出推导。
-    return ["根据客户资料中已有信息归纳"]
+            return lines[: rdb.STEPS_LIMIT]
+    return []
 
 
 def _readable_summary(sources: Sequence[Claim]) -> str:
@@ -1504,7 +1499,9 @@ def _readable_summary(sources: Sequence[Claim]) -> str:
     quote = next((c.quote for c in sources if c.quote), "")
     if quote:
         return f"有原文依据：{quote}"
-    hint = next((_strip_conclusion(h) for c in sources for h in c.basis_of_inference if _strip_conclusion(h)), "")
+    # 依据位与证据位同一口径（:func:`_evidence_basis`）：推断总结里的结论从句与
+    # 「供核对」不进 summary，否则说明位又变成一段自我论证。
+    hint = next((_evidence_basis(h) for c in sources for h in c.basis_of_inference if _evidence_basis(h)), "")
     if hint:
         return f"由多条线索推断：{hint}"
     return "根据客户资料中已有信息归纳得出"

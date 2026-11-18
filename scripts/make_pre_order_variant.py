@@ -74,7 +74,10 @@ def main(argv=None) -> int:
                     profile = json.loads(text)
                 except ValueError:
                     continue
-                if isinstance(profile, dict) and "basic_notes" in profile:
+                # 新旧两种响应形状都裁（2026-11-17 起容器是 ``basic_notes_updates``）。
+                if isinstance(profile, dict) and (
+                    "basic_notes" in profile or "basic_notes_updates" in profile
+                ):
                     attempt["response_text"] = json.dumps(
                         mk.sanitize_profile(profile), ensure_ascii=False
                     )

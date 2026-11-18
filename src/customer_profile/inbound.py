@@ -27,8 +27,8 @@
    「不校验」，这个端口就是任何人可写的入口，一条外部请求会变成一次真实算力消耗与一次
    生产回写。
 
-节点契约：请求体两键 ``phone_number`` / ``batch_id``；业务流入口写死为业务测试臂
-（``ENTRY_WORKFLOW_ID``），与运行台提交页、入参校验同指一个 ID。
+节点契约：请求体两键 ``phone_number`` / ``batch_id``；业务流入口取
+:func:`customer_profile.api.entry_workflow_id`（恒为增量入口），与运行台提交页同指一个 ID。
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from fastapi import FastAPI, Header, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from .api import ENTRY_WORKFLOW_ID, PHONE_PATTERN, entry_workflow_id
+from .api import PHONE_PATTERN, entry_workflow_id
 from .logging_config import configure_logging
 from .runner import QueueFull, RunSlotUnavailable, Service, build_service
 from .settings import Settings, get_settings
