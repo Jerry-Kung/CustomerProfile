@@ -204,6 +204,8 @@ def _payload_for_cli(settings: Settings) -> dict[str, Any] | None:
         return read(settings)
     import asyncio
 
+    from .persistence.store import Store
+
     async def fetch() -> dict[str, Any] | None:
         store = Store(settings.build_backend())
         try:

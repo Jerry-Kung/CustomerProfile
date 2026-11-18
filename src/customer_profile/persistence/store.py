@@ -377,6 +377,7 @@ class Store:
             # 版本」这一项配置，代码就是唯一事实。结构对不上时拒绝启动——带着旧表结构
             # 跑起来的问题要到第一个新列才暴露，而那时现场显示的是「服务 Up、任务全失败」。
             mysql_schema.assert_expected_version(connection)
+            connection.rollback()
 
         self._thread = _ConnectionThread(self._backend, setup)
         # 启动期错误必须在这里抛出，而不是留给「第一次提交」。
@@ -428,15 +429,20 @@ class Store:
         future = self._require_thread().submit(work)
         return await asyncio.wrap_future(future)
 
-    @staticmethod
     def _execute(
-        sql: str, params: Sequence[Any] = ()
+        self, sql: str, params: Sequence[Any] = ()
     ) -> Callable[[Any], list[dict[str, Any]]]:
         def work(connection: Any) -> list[dict[str, Any]]:
-            cursor = connection.execute(sql, params)
-            rows = cursor.fetchall()
-            cursor.close()
-            return rows
+            try:
+                cursor = connection.execute(sql, params)
+                try:
+                    return cursor.fetchall()
+                finally:
+                    cursor.close()
+            finally:
+                # 结束 MySQL 只读事务，让长连接的下一次查询看到新提交的数据。
+                if self.backend_name == "mysql":
+                    connection.rollback()
 
         return work
 
