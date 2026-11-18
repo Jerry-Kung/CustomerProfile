@@ -30,7 +30,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -53,13 +52,6 @@ def _mask(url: Any) -> str:
     return f"{scheme}://{head.split(':', 1)[0]}:***@{tail}"
 
 
-def _host_and_schema(url: str) -> tuple[str, str]:
-    rest = url.partition("://")[2]
-    host = rest.rpartition("@")[2].split("/", 1)[0]
-    schema = rest.rsplit("/", 1)[-1].split("?", 1)[0]
-    return host, schema
-
-
 def fetch_sql(database: str) -> list[str]:
     """拼出可交给 DBA 的脚本。"""
     from . import mysql_schema
@@ -77,7 +69,7 @@ def fetch_sql(database: str) -> list[str]:
         f"USE `{database}`;",
         "",
     ]
-    statements.extend(mysql_schema.ddl_statements())
+    statements.extend(ddl for _, ddl in mysql_schema.MYSQL_DDL)
     for version, note in mysql_schema.MIGRATION_NOTES:
         statements.append(
             "INSERT INTO schema_migrations (version, applied_at_ms, note) VALUES "
@@ -87,7 +79,7 @@ def fetch_sql(database: str) -> list[str]:
     statements.extend(
         [
             "",
-            "-- 核对：应看到 6 张表",
+            f"-- 核对：应看到 {len(mysql_schema.MYSQL_DDL)} 张表",
             "SHOW TABLES;",
             "SELECT version, FROM_UNIXTIME(applied_at_ms / 1000) AS applied_at "
             "FROM schema_migrations ORDER BY applied_at_ms;",
@@ -228,7 +220,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="初始化 / 自检运行时 MySQL 库（幂等；只补缺失项）"
     )
-    parser.add_argument("--url", default="", help="DATABASE_URL；缺省读环境变量")
+    parser.add_argument(
+        "--url",
+        default="",
+        help="显式指定 MySQL 地址（一次性排查用）；缺省按 MYSQL_* 连接",
+    )
     parser.add_argument(
         "--check", action="store_true", help="只自检不改库；结构不满足时退出码 3"
     )
@@ -242,21 +238,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--allow-sqlite",
         action="store_true",
-        help="DATABASE_URL 是 SQLite 时视为成功跳过（退出码 0）。部署脚本用这个，"
+        help="DB_BACKEND=sqlite 时视为成功跳过（退出码 0）。部署脚本用这个，"
         "这样同一个 compose 文件在本地 SQLite 环境也能 up 起来",
     )
     args = parser.parse_args(argv)
 
-    url = (args.url or os.environ.get("DATABASE_URL", "")).strip()
-    if not url:
-        print("缺少 DATABASE_URL：用 --url 传入，或在 .env / 环境变量里配置", file=sys.stderr)
-        return EXIT_BAD_INPUT
+    if args.url.strip():
+        backend = build_backend(args.url.strip())
+        source = f"--url {_mask(args.url.strip())}"
+    else:
+        from ..settings import get_settings
 
-    backend = build_backend(url)
+        backend = get_settings().build_backend()
+        source = "MYSQL_* 配置"
+
     if not isinstance(backend, MySqlBackend):
         if not args.allow_sqlite:
             print(
-                f"DATABASE_URL={_mask(url)} 不是 MySQL 后端；本入口只用于 MySQL"
+                f"当前后端不是 MySQL（{source}）；本入口只用于 MySQL"
                 "（SQLite 请加 --allow-sqlite）",
                 file=sys.stderr,
             )
@@ -264,8 +263,7 @@ def main(argv: list[str] | None = None) -> int:
         # 部署链对两种后端做同一件事：服务启动前把结构准备好。
         return _init_sqlite(backend, check_only=args.check)
 
-    host, schema = _host_and_schema(url)
-    print(f"目标实例：{host}  库：{schema}", flush=True)
+    print(f"目标实例：{backend.host}  库：{backend.database}", flush=True)
 
     if args.emit_sql:
         target = Path(args.emit_sql)

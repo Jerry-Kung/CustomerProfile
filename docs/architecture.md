@@ -134,9 +134,22 @@ TPM 用「出网前按 prompt 长度预扣 + 拿到 usage 后校正」（差异 
 `node_executions` / `request_attempts` 的载荷列与 `workflow_runs.outputs_json` **不长期留在库里**：
 根运行收尾时按整棵树打成 `DATA_DIR/trace-archives/YYYY-MM-DD/<run_id>.json.gz`，写盘成功后
 才清空这些列，并在 `workflow_runs.payload_state` 上记 `packed`（另有 `in_db` 未搬运、
-`purged` 存量已清理）。读路径（详情、图、尝试、导出）在服务端按包回填，**接口形状不变**。
+`purged` 存量已清理、`skeleton` 按 `none` 档从未写入）。读路径（详情、图、尝试、导出）在
+服务端按包回填，**接口形状不变**。
 
-当前只实现 `high` / `low` 两档（`TRACE_PERSIST_MODE`）；`none` 会被配置层拒绝启动。
+`TRACE_PERSIST_MODE` 三档：
+
+| 档位 | 包 | 库内载荷 | 本地文件 |
+|---|---|---|---|
+| `high`（缺省） | 全量节点输入输出与完整请求体 | 打包后清空 | 包 + 存活信号 |
+| `low` | 响应原文、根输出、取数原样输入、诊断切片 | 打包后清空 | 包 + 存活信号 |
+| `none` | **不写包** | **不写**（只留骨架 + 根运行最终输出） | **无** |
+
+`none` 要求 `DB_BACKEND=mysql`——该档声称「不使用任何本地存储」，而 SQLite 库文件
+就是本地文件，配置层直接拒绝这个组合。该档下存活信号改落 `worker_heartbeats` 表
+（每 scope 一行覆盖写），健康检查照常可用。骨架**三档一致永久保留**，不做定期清理
+（见设计稿 §4.3）；`none` 档的节点行按 §4.4 的留存规则在收尾时裁剪，整档约
+14 KB/主任务、年增约 5.5 GB。
 包目录**必须落在持久卷内**——清空后的那份数据没有第二个副本。筛选依据与体积见
 `design/存储瘦身方案.md`，实施口径见 `feature-storage-opt/`。
 

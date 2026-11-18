@@ -277,7 +277,18 @@ def create_app(service_factory: Any = None) -> FastAPI:
             if service.store is not None else None
         )
         quota = service.quota.snapshot() if service.quota is not None else {}
-        worker_consuming, worker_liveness_detail = liveness.check(settings)
+        heartbeat = None
+        if liveness.uses_db(settings) and service.store is not None:
+            # ``none`` 档的存活信号在库里（不写本地文件），这里替检查逻辑取好再判定。
+            try:
+                heartbeat = await service.store.read_heartbeat(
+                    workflow_scope=settings.workflow_scope
+                )
+            except Exception:  # 观测手段不该让 /runtime 整个失败
+                heartbeat = None
+        worker_consuming, worker_liveness_detail = liveness.check(
+            settings, payload=heartbeat
+        )
         return {
             "replay_mode": settings.replay_mode,
             # 入口原样报：前端据此决定提交页写哪个 workflow_id。
@@ -306,6 +317,12 @@ def create_app(service_factory: Any = None) -> FastAPI:
             # 容器与 /health 都正常，只有这里能看出来。缺信号时如实报 false。
             "worker_consuming": worker_consuming,
             "worker_liveness_detail": worker_liveness_detail,
+            # 存储去向。**只报后端类型，不报 DSN**：DSN 里有密码。
+            # 运维排查「以为切了 MySQL 其实还在写本地库」时，答案就在这两项——
+            # 启动日志只有一行，进程重启后很难回头找。
+            "trace_persist_mode": settings.trace_persist_mode,
+            "db_backend": service.store.backend_name if service.store is not None else None,
+            "local_storage_enabled": settings.local_storage_enabled,
             "serve_ui": settings.serve_ui,
         }
 

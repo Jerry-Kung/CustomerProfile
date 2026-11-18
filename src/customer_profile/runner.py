@@ -110,7 +110,7 @@ class Service:
         的提交不会在库里留下一个永远不跑的运行。
         """
         if self.store is None:
-            raise RuntimeError("入队需要留痕存储；请确认 DATABASE_URL 可用")
+            raise RuntimeError("入队需要留痕存储；请确认 MYSQL_* 配置可用")
         self._require_root_scope(workflow_id)
         workflow = self.require_workflow(workflow_id)
 
@@ -647,7 +647,7 @@ def _database_path(settings: Settings) -> Path:
     path = settings.sqlite_path
     if path is None:
         raise ValueError(
-            f"当前 DATABASE_URL={settings.database_url!r} 不是 sqlite:/// 形式，没有库文件路径"
+            f"当前 DB_BACKEND={settings.db_backend!r} 不是 sqlite，没有库文件路径"
         )
     return path
 

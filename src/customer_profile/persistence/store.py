@@ -38,6 +38,8 @@ from .schema import (
     RunRecordRow,
     definition_hash,
     json_dumps,
+    json_dumps_packed,
+    json_loads,
 )
 
 _SHUTDOWN = object()
@@ -56,7 +58,13 @@ PAYLOAD_PACKED = "packed"
 PAYLOAD_PURGED = "purged"
 """存量清理：载荷已丢弃且没有包，只剩骨架与根输出。"""
 
-PAYLOAD_STATES = (PAYLOAD_IN_DB, PAYLOAD_PACKED, PAYLOAD_PURGED)
+PAYLOAD_SKELETON = "skeleton"
+"""``none`` 档：载荷**从未写入**，只剩骨架与根输出。
+
+与 ``purged`` 的区别是「本来就没打算留」而不是「留过又清了」——两者在界面上都
+表现为「节点没有输出」，但前者是设计选择，后者是需要解释的清理动作。"""
+
+PAYLOAD_STATES = (PAYLOAD_IN_DB, PAYLOAD_PACKED, PAYLOAD_PURGED, PAYLOAD_SKELETON)
 """合法取值。读写两侧共用，避免各写一份字面量。"""
 
 
@@ -549,16 +557,38 @@ class Store:
         outputs: Mapping[str, Any] | None = None,
         error: str | None = None,
         duration_ms: int | None = None,
+        payload_state: str | None = None,
     ) -> None:
+        """收尾一次运行。
+
+        ``payload_state`` 给定时一并落库，缺省不改动那一列。``none`` 档在收尾时写
+        ``skeleton``：那一档的载荷从来没写过，若让该列停在 ``NULL``（读侧解释为
+        ``in_db``），界面会把「本来就不留」说成「载荷还在库里」。
+
+        ``skeleton`` 同时也是「这一份最终输出要压缩存」的信号：它是 ``none`` 档唯一
+        留下的载荷，原样 JSON 实测 24.2 KB/主任务，占该档体积近一半；压缩后 5.2 KB。
+        读侧由 :func:`schema.json_loads` 按前缀识别，不需要知道是谁写的。
+        """
+        packed = payload_state == PAYLOAD_SKELETON
         await self._write(
             "UPDATE workflow_runs SET status = ?, outputs_json = ?, error = ?, "
-            "finished_at_ms = ?, duration_ms = ? WHERE run_id = ?",
+            "finished_at_ms = ?, duration_ms = ?, "
+            "payload_state = COALESCE(?, payload_state) WHERE run_id = ?",
             (
                 status,
-                json_dumps(dict(outputs or {})),
+                # ``None`` = 不写载荷（``none`` 档的子运行）。写成 ``dict(outputs or {})``
+                # 会把它变成 '{}'，于是「不留载荷」在库上并不成立。
+                None
+                if outputs is None
+                else (
+                    json_dumps_packed(dict(outputs))
+                    if packed
+                    else json_dumps(dict(outputs))
+                ),
                 error,
                 _now_ms(),
                 duration_ms,
+                payload_state,
                 run_id,
             ),
         )
@@ -987,7 +1017,9 @@ class Store:
         kinds: set[str] = set()
         for row in rows:
             state = row["payload_state"]
-            if state == PAYLOAD_PURGED:
+            if state in (PAYLOAD_PURGED, PAYLOAD_SKELETON):
+                # 两者对读的人都意味着「这次导出不含运行时数据」：一个是被清理掉了，
+                # 一个是本来就没留。导出头只回答「这份数据能当什么用」。
                 kinds.add("skeleton")
             elif state == PAYLOAD_PACKED and (row["payload_mode"] or "").lower() == "low":
                 kinds.add("sliced")
@@ -1434,6 +1466,55 @@ class Store:
             "interrupted": counts.get(RunStatus.INTERRUPTED, 0),
         }
 
+    # ------------------------------------------------------------ 存活信号（none 档）
+
+    async def write_heartbeat(self, payload: Mapping[str, Any]) -> None:
+        """把存活信号写进库，替代本地 JSON 文件。
+
+        **为什么 ``none`` 档必须留这一条**：健康检查靠「信号多久没刷新」判断消费是否
+        停滞，而 worker 崩溃时进程仍可能显示 Up。信号只能落在一个 API 与 worker 都能
+        读到的地方：本地卷（``none`` 档禁用）或库。它不是留痕数据，是一个单行的
+        当前状态——一个 scope 一行，覆盖写，不增长。
+        """
+        db = payload.get("db") or {}
+        await self._write(
+            self.dialect.upsert_heartbeat_sql(),
+            (
+                str(payload.get("workflow_scope") or "all"),
+                payload.get("worker_id"),
+                int(payload.get("active_runs") or 0),
+                payload.get("last_claim_at_ms"),
+                int(payload.get("updated_at_ms") or _now_ms()),
+                None if not db else (1 if db.get("db_alive") else 0),
+                db.get("db_error"),
+                db.get("db_last_ok_at_ms"),
+            ),
+        )
+
+    async def read_heartbeat(self, *, workflow_scope: str = "all") -> dict[str, Any] | None:
+        """读回存活信号。没有这一行时返回 ``None``（调用方据此判停滞）。"""
+        rows = await self._read(
+            "SELECT * FROM worker_heartbeats WHERE scope = ?", (str(workflow_scope or "all"),)
+        )
+        if not rows:
+            return None
+        row = dict(rows[0])
+        payload: dict[str, Any] = {
+            "worker_id": row.get("worker_id"),
+            "workflow_scope": row.get("scope"),
+            "active_runs": row.get("active_runs"),
+            "last_claim_at_ms": row.get("last_claim_at_ms"),
+            "updated_at_ms": row.get("updated_at_ms"),
+        }
+        # 只有写得进来的时候才有 db 段；无值时不要伪造一个空的健康结论。
+        if row.get("db_alive") is not None or row.get("db_error"):
+            payload["db"] = {
+                "db_alive": bool(row.get("db_alive")),
+                "db_error": row.get("db_error"),
+                "db_last_ok_at_ms": row.get("db_last_ok_at_ms"),
+            }
+        return payload
+
     # ------------------------------------------------------------ 节点执行
 
     async def upsert_node_execution(
@@ -1470,8 +1551,12 @@ class Store:
                 call_path,
                 status,
                 branch,
-                json_dumps(dict(inputs or {})) or None,
-                json_dumps(dict(outputs or {})) or None,
+                # ``None`` 表示「不写」而不是「写空」：``none`` 档靠它把载荷列留成
+                # NULL。写成 ``json_dumps(dict(inputs or {}))`` 会把 None 变成 '{}'，
+                # 于是那一档照样往库里塞了每一行的空对象——省不下空间，
+                # 还让「这一档不写载荷」这句承诺在库上不成立。
+                None if inputs is None else (json_dumps(dict(inputs)) or None),
+                None if outputs is None else (json_dumps(dict(outputs)) or None),
                 error,
                 queued_at_ms,
                 started_at_ms,
@@ -1488,6 +1573,19 @@ class Store:
             "UPDATE node_executions SET attempt_count = attempt_count + ? "
             "WHERE run_id = ? AND node_id = ? AND call_path = ?",
             (count, run_id, node_id, call_path),
+        )
+
+    async def delete_node_execution(
+        self, *, run_id: str, node_id: str, call_path: str
+    ) -> None:
+        """删掉一条节点执行记录。只给 ``none`` 档的收尾裁行用。
+
+        **为什么是删而不是「不写」**：``node_started`` 已经把行写进去了（在飞状态要能
+        被运行台看到）。收尾时才知道这一行有没有排障价值，因此只能删。
+        """
+        await self._write(
+            "DELETE FROM node_executions WHERE run_id = ? AND node_id = ? AND call_path = ?",
+            (run_id, node_id, call_path),
         )
 
     async def list_node_executions(self, run_id: str) -> list[dict[str, Any]]:
@@ -1729,6 +1827,9 @@ def _row_to_dict(row: Any, json_fields: Iterable[str] = ()) -> dict[str, Any]:
     """把一行转成字典，顺便把 JSON 文本字段解析回对象。
 
     行来自 ``dbapi``，统一是 ``dict``（MySQL 的 ``DictCursor`` 与 SQLite 适配层一致）。
+
+    解码统一走 :func:`schema.json_loads`：它能同时认明文 JSON 与 ``none`` 档写入的
+    压缩文本（``gzip:`` 前缀）。读路径因此不必知道这一行是哪一档写的。
     """
     data = dict(row)
     for field_name in json_fields:
@@ -1736,7 +1837,7 @@ def _row_to_dict(row: Any, json_fields: Iterable[str] = ()) -> dict[str, Any]:
             parsed = data[field_name]
             if isinstance(parsed, str):
                 try:
-                    data[field_name] = json.loads(parsed)
+                    data[field_name] = json_loads(parsed)
                 except ValueError:
                     data[field_name] = None
             if field_name == "definition_json" and data.get(field_name) is not None:

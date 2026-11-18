@@ -73,6 +73,40 @@ class SqliteDialect:
             " queued_at_ms = COALESCE(excluded.queued_at_ms, node_executions.queued_at_ms)"
         )
 
+    def upsert_baseline_sql(self) -> str:
+        """回传体基线按手机号一行覆盖写。"""
+        return (
+            "INSERT INTO profile_baselines (phone, compat_key, source_run_id, "
+            " updated_at_ms, stage, deal_level, deal_level_detail, "
+            " consumed_keys_json, callback_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (phone) DO UPDATE SET "
+            " compat_key = excluded.compat_key, "
+            " source_run_id = excluded.source_run_id, "
+            " updated_at_ms = excluded.updated_at_ms, "
+            " stage = excluded.stage, "
+            " deal_level = excluded.deal_level, "
+            " deal_level_detail = excluded.deal_level_detail, "
+            " consumed_keys_json = excluded.consumed_keys_json, "
+            " callback_json = excluded.callback_json"
+        )
+
+    def upsert_heartbeat_sql(self) -> str:
+        """存活信号按 scope 一行覆盖写。"""
+        return (
+            "INSERT INTO worker_heartbeats (scope, worker_id, active_runs, "
+            " last_claim_at_ms, updated_at_ms, db_alive, db_error, db_last_ok_at_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (scope) DO UPDATE SET "
+            " worker_id = excluded.worker_id, "
+            " active_runs = excluded.active_runs, "
+            " last_claim_at_ms = excluded.last_claim_at_ms, "
+            " updated_at_ms = excluded.updated_at_ms, "
+            " db_alive = excluded.db_alive, "
+            " db_error = excluded.db_error, "
+            " db_last_ok_at_ms = excluded.db_last_ok_at_ms"
+        )
+
     # ------------------------------------------------------------ 文本拼接
 
     def append_error_sql(self, column: str = "error") -> str:
@@ -163,6 +197,45 @@ class MySqlDialect:
             " attempt_count = COALESCE(new.attempt_count, node_executions.attempt_count), "
             " started_at_ms = COALESCE(new.started_at_ms, node_executions.started_at_ms), "
             " queued_at_ms = COALESCE(new.queued_at_ms, node_executions.queued_at_ms)"
+        )
+
+    def upsert_baseline_sql(self) -> str:
+        """回传体基线按手机号一行覆盖写。
+
+        **不能用 SQLite 的 ``ON CONFLICT``**：MySQL 只认 ``ON DUPLICATE KEY UPDATE``。
+        基线写入此前直接写在 ``profile_baselines.py`` 里，UAT 切 MySQL 后每次写基线都
+        会撞语法错误——而 fail-soft 让这条错误只表现为「基线没存上、下次又跑全量」。
+        """
+        return (
+            "INSERT INTO profile_baselines (phone, compat_key, source_run_id, "
+            " updated_at_ms, stage, deal_level, deal_level_detail, "
+            " consumed_keys_json, callback_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) AS new "
+            "ON DUPLICATE KEY UPDATE "
+            " compat_key = new.compat_key, "
+            " source_run_id = new.source_run_id, "
+            " updated_at_ms = new.updated_at_ms, "
+            " stage = new.stage, "
+            " deal_level = new.deal_level, "
+            " deal_level_detail = new.deal_level_detail, "
+            " consumed_keys_json = new.consumed_keys_json, "
+            " callback_json = new.callback_json"
+        )
+
+    def upsert_heartbeat_sql(self) -> str:
+        """存活信号按 scope 一行覆盖写。理由同 :meth:`upsert_baseline_sql`。"""
+        return (
+            "INSERT INTO worker_heartbeats (scope, worker_id, active_runs, "
+            " last_claim_at_ms, updated_at_ms, db_alive, db_error, db_last_ok_at_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) AS new "
+            "ON DUPLICATE KEY UPDATE "
+            " worker_id = new.worker_id, "
+            " active_runs = new.active_runs, "
+            " last_claim_at_ms = new.last_claim_at_ms, "
+            " updated_at_ms = new.updated_at_ms, "
+            " db_alive = new.db_alive, "
+            " db_error = new.db_error, "
+            " db_last_ok_at_ms = new.db_last_ok_at_ms"
         )
 
     # ------------------------------------------------------------ 文本拼接

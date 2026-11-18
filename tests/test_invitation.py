@@ -230,7 +230,8 @@ async def run_offline(
 ):
     settings = Settings(
         _env_file=None,
-        database_url=f"sqlite:///{tmp_path / 'invitation.db'}",
+        db_backend="sqlite",
+        sqlite_db_path=tmp_path / "invitation.db",
         data_dir=tmp_path,
         llm_base_url="https://llm.invalid/v1",
         llm_model=model,

@@ -150,7 +150,7 @@ async def _client_for(tmp_path):
 
     async def factory():
         # 与 store fixture 用同一个文件路径：断言读的是库里的最终状态。
-        settings = make_settings(tmp_path, database_url=f"sqlite:///{tmp_path / 'interrupt.db'}")
+        settings = make_settings(tmp_path, sqlite_db_path=tmp_path / "interrupt.db")
         return await build_service(settings)
 
     app = create_app(service_factory=factory)

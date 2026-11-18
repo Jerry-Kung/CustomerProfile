@@ -126,7 +126,7 @@ def ensure_state_column(connection: Any, *, mysql: bool) -> bool:
         # 运行时 MySQL 由 mysql_schema 建表，一定带这两列；走到这里说明连错了库。
         raise SystemExit(
             "目标库的 workflow_runs 缺少 payload_state 列，与运行时 schema 不符；"
-            "请确认 DATABASE_URL 指向的是运行时库"
+            "请确认 MYSQL_* 指向的是运行时库"
         )
     for name, column_type in (
         ("payload_state", "TEXT"),

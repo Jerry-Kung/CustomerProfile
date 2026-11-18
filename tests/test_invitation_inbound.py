@@ -30,7 +30,8 @@ PAYLOAD = {
 async def inbound_client(tmp_path):
     settings = Settings(
         _env_file=None,
-        database_url=f"sqlite:///{tmp_path / 'inbound.db'}",
+        db_backend="sqlite",
+        sqlite_db_path=tmp_path / "inbound.db",
         data_dir=tmp_path,
         inbound_api_key=KEY,
         inline_worker=False,
