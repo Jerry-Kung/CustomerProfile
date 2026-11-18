@@ -7,9 +7,11 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from customer_profile import liveness
 from customer_profile import worker as worker_module
 from customer_profile.replay import ReplaySource
 from customer_profile.runner import build_service
@@ -63,6 +65,33 @@ async def test_standalone_worker_does_not_create_an_inline_consumer(
     assert len(consumers) == 1
     assert settings.inline_worker is True
     assert not consumers[0].service.store.connected
+
+
+def test_worker_health_check_reads_mysql_heartbeat(tmp_path, monkeypatch):
+    settings = make_settings(
+        tmp_path,
+        _env_file=None,
+        db_backend="mysql",
+        mysql_host="127.0.0.1",
+        mysql_user="runtime",
+        mysql_database="runtime_test",
+        trace_persist_mode="none",
+        workflow_scope="profile",
+    )
+    heartbeat = liveness.build_payload(
+        settings, worker_id="profile-worker", active_runs=0, last_claim_at_ms=None
+    )
+    store = Mock()
+    store.read_heartbeat = AsyncMock(return_value=heartbeat)
+    open_store = Mock(return_value=store)
+    monkeypatch.setattr("customer_profile.settings.get_settings", lambda: settings)
+    monkeypatch.setattr("customer_profile.persistence.store.Store", open_store)
+
+    assert liveness.main(["--check"]) == 0
+    assert open_store.call_args.args[0].name == "mysql"
+    store.connect.assert_called_once()
+    store.read_heartbeat.assert_awaited_once_with(workflow_scope="profile")
+    store.close.assert_called_once()
 
 
 @pytest.mark.parametrize("obsolete_concurrency", [1, 20])
@@ -129,7 +158,9 @@ def test_compose_follows_backend_dispatch_with_one_image(
         assert settings.per_process_tpm_limit == 1000
         assert not settings.inline_worker
         assert settings.interrupt_on_start
-        assert "depends_on" not in services[name]
+        dependencies = services[name]["depends_on"]
+        assert set(dependencies) == {"runtime-migrate"}
+        assert dependencies["runtime-migrate"]["condition"] == "service_completed_successfully"
         assert "ports" not in services[name]
     assert {service["image"] for service in services.values()} == {runtime["CP_IMAGE"]}
     result = subprocess.run(

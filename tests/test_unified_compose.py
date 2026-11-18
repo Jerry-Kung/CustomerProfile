@@ -35,7 +35,8 @@ def test_one_image_with_separate_credentials_ports_and_existing_history_volume(t
     ], env=env, capture_output=True, text=True, check=True)
     configuration = json.loads(result.stdout)
     services = configuration["services"]
-    assert len(services) == 10
+    assert len(services) == 11
+    assert "runtime-migrate" in services
     for name, service in services.items():
         assert name.startswith(("backend-", "runtime-"))
         assert service["container_name"] == f"{name}-customer-profile"

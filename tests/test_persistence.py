@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from loguru import logger
@@ -46,6 +48,47 @@ async def test_schema_applies_idempotently(store):
     await store.insert_run(RunRecordRow(run_id="probe", workflow_id="wf"))
     assert (await store.get_run("probe")) is not None
     assert await store.count_runs() == 1
+
+
+async def test_mysql_queue_reads_release_the_transaction_snapshot(monkeypatch):
+    committed_status = RunStatus.QUEUED
+    snapshot = None
+
+    def start_read():
+        nonlocal snapshot
+        if snapshot is None:
+            snapshot = committed_status
+        return snapshot
+
+    def read_queue(sql, params):
+        cursor = Mock()
+        cursor.fetchall.return_value = [{"status": start_read(), "n": 1}]
+        return cursor
+
+    def end_transaction():
+        nonlocal snapshot
+        snapshot = None
+
+    connection = Mock()
+    connection.execute.side_effect = read_queue
+    connection.rollback.side_effect = end_transaction
+    backend = SimpleNamespace(name="mysql", connect=lambda: connection)
+    monkeypatch.setattr(
+        "customer_profile.persistence.mysql_schema.assert_expected_version",
+        lambda connection: start_read(),
+    )
+
+    reader = Store(backend)
+    reader.connect()
+    try:
+        committed_status = RunStatus.RUNNING
+        assert (await reader.queue_snapshot(workflow_scope="profile"))["running"] == 1
+        committed_status = RunStatus.SUCCEEDED
+        queue = await reader.queue_snapshot(workflow_scope="profile")
+        assert queue == {"queued": 0, "running": 0, "interrupted": 0}
+        assert snapshot is None
+    finally:
+        reader.close()
 
 
 async def test_business_upgrade_preserves_legacy_history_and_adds_attempt_columns(tmp_path):
