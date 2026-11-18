@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+import base64
+import gzip
 import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -145,6 +147,18 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         callback_json     TEXT NOT NULL DEFAULT '{}'
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS worker_heartbeats (
+        scope             TEXT PRIMARY KEY,
+        worker_id         TEXT,
+        active_runs       INTEGER NOT NULL DEFAULT 0,
+        last_claim_at_ms  INTEGER,
+        updated_at_ms     INTEGER NOT NULL,
+        db_alive          INTEGER,
+        db_error          TEXT,
+        db_last_ok_at_ms  INTEGER
+    )
+    """,
 )
 
 
@@ -255,9 +269,45 @@ def json_dumps(value: Any) -> str | None:
         )
 
 
+PACKED_PREFIX = "gzip:"
+"""压缩载荷列的前缀标记。
+
+**为什么要有标记，而不是「打开时试两种解码」。** 同一列里会同时存在明文 JSON（历史行、
+其它档位）与压缩文本（``none`` 档的根输出）。试错解码会把「恰好能解出来的乱码」当成
+数据，而这类静默错误最难查。前缀让读侧只做一次字符串比较，语义是确定的。
+"""
+
+
+def json_dumps_packed(value: Any) -> str | None:
+    """把值序列化成压缩后的文本（``gzip:`` + base64）。
+
+    用途单一：``none`` 档的根运行最终画像直存骨架列，原样 JSON 实测 24.2 KB/主任务，
+    压缩后 5.2 KB（21%），这一项占了该档体积的近一半。压缩/解压都在库线程里做，
+    不额外占用事件循环。
+    """
+    if value is None:
+        return None
+    text = json_dumps(value)
+    if text is None:
+        return None
+    blob = gzip.compress(text.encode("utf-8"), compresslevel=6)
+    return PACKED_PREFIX + base64.b64encode(blob).decode("ascii")
+
+
 def json_loads(text: str | None) -> Any:
+    """解码 JSON 列。带 ``PACKED_PREFIX`` 的按压缩文本解，其余按明文 JSON 解。
+
+    两种形态共用这一个入口，读路径因此不需要知道某一行是谁写的、按哪一档存的。
+    """
     if not text:
         return None
+    if isinstance(text, str) and text.startswith(PACKED_PREFIX):
+        try:
+            raw = gzip.decompress(base64.b64decode(text[len(PACKED_PREFIX) :]))
+            return json.loads(raw.decode("utf-8"))
+        except (ValueError, OSError, UnicodeDecodeError) as exc:
+            # 压缩块损坏是「数据坏了」，不是「没有数据」；如实标出，不冒充当空。
+            return {"_unparsable": f"{type(exc).__name__}: {exc}"}
     try:
         return json.loads(text)
     except ValueError:

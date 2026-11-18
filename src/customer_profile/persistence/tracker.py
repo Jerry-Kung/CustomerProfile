@@ -71,7 +71,18 @@ class RunTracker:
         """留痕留存档位；``None`` 表示不打包（单测与不需要归档的调用方）。
 
         **缺省 None 是刻意的**：打包会清空库内载荷并写文件，不适合作为任何调用方的
-        隐性行为。只有正式装配路径（``runner.build_service``）才按配置打开。"""
+        隐性行为。只有正式装配路径（``runner.build_service``）才按配置打开。
+
+        ``none`` 档不走「先写库再打包清空」这条路——它**一开始就不写载荷列**，
+        因此下面三个写入方法各自按档位裁掉载荷字段，而不是靠事后的清空补上。
+        """
+        self._drop_payloads = persist_mode == "none"
+        """``none`` 档：不写节点输入输出、不写请求体与响应原文。
+
+        留在行上的只有骨架——状态、时间、耗时、错误、尝试的目标与状态码。这些是
+        「哪一步失败、第几次调用、什么错误」的全部依据，体积可忽略（设计稿 §3.1 实测
+        每主任务 33 KB），删掉之后连「这次运行存在过」都无从查起。
+        """
         self.archive_dir = archive_dir
         self.compress_level = compress_level
         self._media_index: dict[str, str] = {}
@@ -134,18 +145,28 @@ class RunTracker:
             _error_summary(outcome.error),
         )
         try:
+            # ``none`` 档只留根运行的最终输出。
+            #
+            # 子运行的 ``outputs_json`` 是中间结果，可由重跑重建；根运行的那一份是
+            # 「当时我们回写了什么」，profile 接口返回的却是被人工确认覆盖后的当前
+            # 值——这是整个 ``none`` 档唯一的载荷例外（设计稿 §4.2，实测 5.07 KB/主任务）。
+            is_root = getattr(run, "parent_run_id", None) is None
             await self.store.update_run_finished(
                 run.run_id,
                 status=outcome.status,
-                outputs=outcome.outputs,
+                outputs=None if (self._drop_payloads and not is_root) else outcome.outputs,
                 error=outcome.error,
                 duration_ms=outcome.duration_ms,
+                # 子运行的载荷本来就没写，标 skeleton 让读侧说「按档位不留」而不是
+                # 「载荷还在库里」；根运行也一样，它只留最终输出这一项。
+                payload_state="skeleton" if self._drop_payloads else None,
             )
         except Exception as exc:
             self._report("run_finished", run.run_id, exc, run_id=run.run_id)
             return
         # 只有根运行收尾才搬整棵树——子运行结束只是树的一枝，此时子树还没跑完。
-        if self.persist_mode and getattr(run, "parent_run_id", None) is None:
+        # ``none`` 档不写包：它连载荷都不写，没有可搬的东西。
+        if self.persist_mode and self.persist_mode != "none" and getattr(run, "parent_run_id", None) is None:
             await self.archive_tree(run.run_id)
 
     # ------------------------------------------------------------ 节点层
@@ -171,7 +192,7 @@ class RunTracker:
                 node_type=node.node_type,
                 call_path=effective_call_path,
                 status="running",
-                inputs=self._collect_inputs(run, node),
+                inputs=None if self._drop_payloads else self._collect_inputs(run, node),
                 queued_at_ms=run.node_started_at.get(node.node_id),
             )
         except Exception as exc:
@@ -215,6 +236,15 @@ class RunTracker:
             )
             attempt_count = None
         try:
+            if self._drop_payloads and self._is_evidence_free(run, execution, attempt_count or 0):
+                # ``node_started`` 已经写过一行（在飞状态要看得见）；这里收尾时判定它
+                # 没有排障价值，直接删掉而不是再写一遍空载荷——后者只是把行留下。
+                await self.store.delete_node_execution(
+                    run_id=run.run_id,
+                    node_id=execution.node_id,
+                    call_path=call_path,
+                )
+                return
             await self.store.upsert_node_execution(
                 run_id=run.run_id,
                 node_id=execution.node_id,
@@ -223,7 +253,7 @@ class RunTracker:
                 call_path=call_path,
                 status=execution.status,
                 branch=execution.branch,
-                outputs=execution.outputs,
+                outputs=None if self._drop_payloads else execution.outputs,
                 error=execution.error,
                 queued_at_ms=execution.queued_at_ms,
                 started_at_ms=execution.started_at_ms,
@@ -236,6 +266,50 @@ class RunTracker:
                 "node_finished", execution.node_id, exc,
                 run_id=run.run_id, node_id=execution.node_id,
             )
+
+    def _is_evidence_free(
+        self, run: Any, execution: NodeExecution, attempt_count: int
+    ) -> bool:
+        """这一行节点记录在 ``none`` 档里有没有排障价值。没有就整行不留。
+
+        **为什么能删行而不只是删列。** ``none`` 档不存载荷，一行节点记录剩下的信息量
+        只有「这个节点跑过、成功/跳过、多久、有没有外部调用」。实测 UAT 18 小时
+        （792 主任务、169,866 行）：子运行里的节点占 79%，其中绝大多数是「成功且无
+        任何外部调用」——它们只说明图的结构，而图本身在 ``definition_versions`` 里，
+        可由定义快照完整重建。按本规则裁剪后节点行剩 30%，整档从 41 KB/主任务
+        降到 14 KB。
+
+        四条**保留**理由，每条都对应一类真实问题：
+
+        1. **有外部调用**（``attempt_count > 0``）——排障主证据在 ``request_attempts``
+           里，节点行是把它挂到图上的钩子。删了行，尝试就成了孤儿记录。
+        2. **失败/阻塞**——原因只在节点行上，必须留。
+        3. **有 ``branch``**——``if-else`` 走了哪条分支的唯一记录。实测 9,177 行带
+           ``true``/``false``，「这个分支为什么没走」只能由它回答。这类行必须留下，
+           不能因为「没有外部调用」就一并删。
+        4. **``sub_run_id`` 非空**——父子运行链接。子运行自己那行也要能被找到。
+
+        ``skipped`` 行**不留**：实测 54,250 行，每行内容只有一句「前置 xxx 未具备分支
+        条件，节点未执行」——分支是否走到由第 3 条的 ``branch`` 行回答，这一行不提供
+        额外信息。代价是图上看到缺行时无法区分「跳过」与「按档位不留」，因此运行台
+        必须如实标注档位（见设计稿 §4.4）。
+
+        另外：**根运行的节点行一律保留**。根图是排障时第一眼要看的东西，而它只占
+        全部节点行的 21%（实测 35,496 / 169,866），删它的收益远小于让根图变残缺。
+        """
+        if getattr(run, "parent_run_id", None) is None:
+            return False
+        if attempt_count > 0:
+            return False
+        if getattr(execution, "branch", None):
+            return False
+        if getattr(execution, "sub_run_id", None):
+            return False
+        # 成功与跳过都不留行；失败、阻塞、在飞一律留。
+        return getattr(execution, "status", None) in (
+            NodeStatus.SUCCEEDED,
+            NodeStatus.SKIPPED,
+        )
 
     def _collect_inputs(self, run: Any, node: Any) -> dict[str, Any]:
         """把节点的实际入参快照下来：来源节点与字段名，以及已解析出的值。
@@ -291,7 +365,7 @@ class RunTracker:
             # usage）。统一用 getattr 读取，避免因字段差异让整条记录写不进去——
             # 那正是「看起来记了、其实没记」的成因。
             usage = None
-            if kind == "llm":
+            if kind == "llm" and not self._drop_payloads:
                 usage_obj = getattr(attempt, "usage", None)
                 usage = usage_obj.asdict() if usage_obj is not None else None
 
@@ -304,14 +378,18 @@ class RunTracker:
                 attempt_no=attempt.attempt_no,
                 kind=kind,
                 target=target,
-                request=attempt.asdict().get("request") or attempt.asdict(),
-                response_text=attempt.response_text,
+                request=None
+                if self._drop_payloads
+                else (attempt.asdict().get("request") or attempt.asdict()),
+                response_text=None if self._drop_payloads else attempt.response_text,
                 status_code=getattr(attempt, "status_code", None),
                 duration_ms=attempt.duration_ms,
                 error=attempt.error,
                 error_code=attempt.error_code,
                 usage=usage,
-                provider_request_id=getattr(attempt, "provider_request_id", None),
+                provider_request_id=None
+                if self._drop_payloads
+                else getattr(attempt, "provider_request_id", None),
                 replayed=attempt.replayed,
                 anomaly=getattr(attempt, "anomaly", None),
                 finish_reason=getattr(attempt, "finish_reason", None),
@@ -369,7 +447,7 @@ class RunTracker:
         留痕是观测手段，不能因为归档写不出来就让业务运行失败。失败时状态停在
         ``in_db``，由补收尾扫描（worker 定时任务）重试。
         """
-        if not self.persist_mode or self.archive_dir is None:
+        if not self.persist_mode or self.persist_mode == "none" or self.archive_dir is None:
             return
         try:
             written = await self.store.finalize_tree(

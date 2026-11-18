@@ -51,6 +51,8 @@ class Worker:
         """最近一次成功领取的时刻。写进存活信号，用来区分「空闲无任务」与「领不到任务」。"""
 
         self._liveness_task: asyncio.Task[None] | None = None
+        self._background: set[asyncio.Task[None]] = set()
+        """不阻塞主循环的短任务（``none`` 档的存活信号写库）。持有引用避免被回收。"""
 
     # ------------------------------------------------------------ 生命周期
 
@@ -66,7 +68,7 @@ class Worker:
         """主循环。收到停机请求后等所有在飞运行结束再返回。"""
         settings = self.settings
         if self.service.store is None:
-            raise RuntimeError("worker 需要留痕存储；请确认 DATABASE_URL 可用")
+            raise RuntimeError("worker 需要留痕存储；请确认 MYSQL_* 配置可用")
 
         # 启动恢复：把上次崩溃遗留的 running 标为 interrupted 交人工处理。
         #
@@ -188,6 +190,36 @@ class Worker:
             )
         except Exception:  # 观测手段不该成为新的故障源
             pass
+        if liveness.uses_db(self.settings):
+            self._write_liveness_db(now_ms, db)
+
+    def _write_liveness_db(self, now_ms: int, db: dict[str, Any] | None) -> None:
+        """``none`` 档的存活信号：落库而不是落文件。
+
+        写入要**脱离事件循环**：这是每 10 s 一次的额外一次库写，直接 await 会让
+        主循环多一个可能与业务竞争连接的点；建一个任务、失败只记日志即可——
+        信号本身是观测手段，写不进去的后果是「健康检查判停滞」，那正是它该做的事。
+        """
+        store = self.service.store
+        if store is None:
+            return
+        payload = liveness.build_payload(
+            self.settings,
+            worker_id=self.worker_id,
+            active_runs=len(self._executions),
+            last_claim_at_ms=self._last_claim_ms,
+            db=db,
+            now_ms=now_ms,
+        )
+        task = asyncio.create_task(self._persist_heartbeat(store, payload))
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def _persist_heartbeat(self, store: Any, payload: dict[str, Any]) -> None:
+        try:
+            await store.write_heartbeat(payload)
+        except Exception as exc:
+            logger.debug("存活信号写库失败：{}: {}", type(exc).__name__, exc)
 
     async def _liveness_loop(self) -> None:
         """周期性刷新存活信号。**与消费循环分开**，这样消费卡住时信号也会停更。"""

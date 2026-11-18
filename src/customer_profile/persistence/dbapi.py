@@ -380,7 +380,10 @@ def build_backend(
     sqlite_busy_timeout_ms: int = 5000,
     connect_timeout_s: float = 10.0,
 ) -> Any:
-    """按 ``DATABASE_URL`` 的 scheme 选后端。
+    """按 URL 的 scheme 构造后端。
+
+    **只给一次性的排查脚本与 ``--url`` 用**：服务运行时的后端由
+    ``Settings.build_backend`` 按 ``DB_BACKEND`` + ``MYSQL_*`` 构造，不经过这里。
 
     支持两种写法：
 
@@ -408,7 +411,7 @@ def build_backend(
         parts = _split_mysql_url(raw)
         if not parts.hostname or not parts.path.lstrip("/"):
             raise ValueError(
-                f"DATABASE_URL 缺少主机或库名：{_mask(raw)!r}。"
+                f"MySQL 地址缺少主机或库名：{_mask(raw)!r}。"
                 "形如 mysql://user:password@host:3306/schema"
             )
         query = dict(
@@ -425,7 +428,7 @@ def build_backend(
         )
 
     raise ValueError(
-        f"不支持的 DATABASE_URL：{_mask(raw)!r}；"
+        f"不支持的数据库地址：{_mask(raw)!r}；"
         "只接受 sqlite:/// 或 mysql:// 前缀"
     )
 

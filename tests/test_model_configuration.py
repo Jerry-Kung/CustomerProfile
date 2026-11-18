@@ -286,18 +286,50 @@ def test_trace_persist_mode_defaults_to_high():
 
 
 def test_trace_persist_mode_accepts_case_and_whitespace():
+    # 用 MySQL 构造 none：none 档要求非 SQLite 后端（见下面那条专门的测试）。
     for raw in ("LOW", " low ", "High"):
         settings = Settings(_env_file=None, trace_persist_mode=raw)
         assert settings.trace_persist_mode == raw.strip().lower()
+    none = Settings(_env_file=None, trace_persist_mode=" NONE ")
+    assert none.trace_persist_mode == "none"
 
 
-@pytest.mark.parametrize("mode", ["none", "NONE", "medium", "off"])
+@pytest.mark.parametrize("mode", ["medium", "off", "false", "0"])
 def test_trace_persist_mode_rejects_unknown_values(mode):
     """不静默回落：写错档位却照常启动，是最难查的一类配置问题。"""
     with pytest.raises(ValidationError) as excinfo:
         Settings(_env_file=None, trace_persist_mode=mode)
     message = str(excinfo.value)
-    assert "high" in message and "low" in message
+    assert "high" in message and "low" in message and "none" in message
+
+
+def test_none_mode_requires_non_sqlite_backend():
+    """``none`` 声称「不使用任何本地存储」，SQLite 库文件就在本地——两者不能并存。"""
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None, trace_persist_mode="none", db_backend="sqlite")
+    assert "DB_BACKEND=mysql" in str(excinfo.value)
+
+
+def test_none_mode_disables_local_files(tmp_path):
+    target = tmp_path / "data"
+    settings = Settings(
+        _env_file=None,
+        trace_persist_mode="none",
+        db_backend="mysql",
+        data_dir=target,
+    )
+    assert settings.local_storage_enabled is False
+    settings.ensure_dirs()
+    # 不建目录：建了就等于宣称这里会写文件。
+    assert not target.exists()
+
+
+def test_non_none_modes_keep_local_files(tmp_path):
+    for mode in ("high", "low"):
+        settings = Settings(
+            _env_file=None, trace_persist_mode=mode, db_backend="sqlite", data_dir=tmp_path
+        )
+        assert settings.local_storage_enabled is True
 
 
 def test_legacy_boolean_flag_maps_to_new_modes():

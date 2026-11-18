@@ -200,14 +200,15 @@ def knowledge_snapshot(settings: Settings) -> dict[str, Any]:
 def build_settings(batch_db: Path, *, read_timeout: float) -> Settings:
     """构造基线专用配置。三处硬编码见模块 docstring。
 
-    ``database_url`` 用**绝对路径**：``Settings.sqlite_path`` 对相对路径是按仓库根解析的
+    ``sqlite_db_path`` 用**绝对路径**：``Settings.sqlite_path`` 对相对路径是按仓库根解析的
     （不是按脚本工作目录），``--out-dir`` 一旦指向仓库外就会静默写错位置。
     """
     settings = Settings(
         writeback_enabled=False,
         replay_mode="off",
         interrupt_on_start=False,
-        database_url=f"sqlite:///{batch_db.resolve()}",
+        db_backend="sqlite",
+        sqlite_db_path=batch_db.resolve(),
         http_read_timeout=read_timeout,
         max_concurrent_requests=GATE_FOR_CONCURRENCY,
     )

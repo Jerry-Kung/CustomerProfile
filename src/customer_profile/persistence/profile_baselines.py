@@ -107,22 +107,13 @@ class BaselineRepository:
         return baseline
 
     async def save(self, baseline: ProfileBaseline) -> None:
-        """单行覆盖写。不保留历史——这是刻意的（``01`` §2.1）。"""
-        await self.store._write(
-            "INSERT INTO profile_baselines (phone, compat_key, source_run_id, updated_at_ms, "
-            " stage, deal_level, deal_level_detail, consumed_keys_json, callback_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT (phone) DO UPDATE SET "
-            " compat_key = excluded.compat_key, "
-            " source_run_id = excluded.source_run_id, "
-            " updated_at_ms = excluded.updated_at_ms, "
-            " stage = excluded.stage, "
-            " deal_level = excluded.deal_level, "
-            " deal_level_detail = excluded.deal_level_detail, "
-            " consumed_keys_json = excluded.consumed_keys_json, "
-            " callback_json = excluded.callback_json",
-            baseline.as_row(),
-        )
+        """单行覆盖写。不保留历史——这是刻意的（``01`` §2.1）。
+
+        语句形状由方言层给出：``ON CONFLICT`` 只在 SQLite 合法，MySQL 要用
+        ``ON DUPLICATE KEY UPDATE``。写死在这里会让 UAT（MySQL）每次写基线都失败，
+        而 fail-soft 把症状降级成「基线没存上、下次又跑全量」——很难顺着查。
+        """
+        await self.store._write(self.store.dialect.upsert_baseline_sql(), baseline.as_row())
 
     async def delete(self, phone: str) -> None:
         await self.store._write(

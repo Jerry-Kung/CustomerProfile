@@ -2,6 +2,76 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-11-18 — 存储链路全量验证：修正 `none` 档漏存 `usage_json`
+
+按三档各跑真实 UAT case（`uat-traces-20261116-20261117`）核对落库与体积，发现一处
+实现与方案不符并修正。
+
+- **`none` 档不再写 `usage_json` / `provider_request_id`**。方案 §4/§7 写明这两个字段
+  只有 `high` / `low` 才留，但实现只判了 `request_json` / `response_text`——载荷都丢了，
+  这两个照写，每行白背约 70 B，档位语义也与文档对不上。现统一按 `_drop_payloads` 判。
+- 实测每主任务增量（17 次调用、226 节点行）：`high` 509 KB（库内 8.4 KB + 包 500.5 KB）、
+  `low` 约 250 KB（库内 + 包 237 KB）、`none` 12.4 KB（纯库内，无包）。与方案
+  §6 的预估同量级。
+- `none` 档下 `DATA_DIR` **确实未被创建**：存活信号改落 `worker_heartbeats` 表，
+  连目录都不存在，不是「建了目录但没写文件」。
+
+## 2026-11-18 — 撤销 `DATABASE_URL`：运行时与任务后端共用 `MYSQL_*` 与同一个库
+
+配置项从「一条独立 DSN」收敛为「一套 MySQL 连接参数」，并去掉静默默认 SQLite。
+
+- **`DATABASE_URL` 已撤销，配置里仍留着会直接拒绝启动**，报错里给出替代写法。
+  不能静默忽略：配置模型是 `extra="ignore"`，忽略后进程照常起来连到 `MYSQL_*` 指向
+  的库，而运维以为连的是那条 URL 指向的库——正是本项目反复要消灭的静默错位。
+- **新增 `DB_BACKEND`（缺省 `mysql`）**。缺 `MYSQL_HOST` / `MYSQL_USER` /
+  `MYSQL_DATABASE` 时拒绝启动，不回落本地文件。UAT 曾因「没配数据库」而静默写到
+  `DATA_DIR/customer_profile.db`，两边都有数据却看不出异常。
+- **`sqlite` 只用于本地调试/批次/快照**，库文件由 `SQLITE_DB_PATH` 指定，缺省
+  `<仓库根>/data/customer_profile.db`。`TRACE_PERSIST_MODE=none` 要求
+  `DB_BACKEND=mysql`（该档声称不写任何本地存储）。
+- 运行时库与任务后端**共用同一组 `MYSQL_*`、同一个库**（用户 2026-11-18 决定）。
+  原先的独立 schema 方案（`docs/history/feature-db-mysql/`）不再生效。
+- 连接参数缺失的校验放在 `Settings.build_backend()` 而非配置构造期：纯配置类测试不必
+  造造假凭据，而真要连库的进程在启动第一刻就失败。
+- `init_db` / `migrate_sqlite_to_mysql` 的 `--url` 保留为一次性排查入口，缺省改读
+  `MYSQL_*`；`scripts/run_baseline.py` 等批次脚本改用 `db_backend=sqlite` +
+  绝对路径 `sqlite_db_path`。
+
+## 2026-11-18 — `none` 档再瘦身：节点行裁剪 + 根输出压缩；骨架不做定期清理
+
+- **节点行裁剪**（实测 169,866 → 50,985，剩 30%）：`none` 档收尾时，子运行里
+  「成功/跳过、无外部调用、无分支、无子运行」的行整行删除；根运行行、有 `attempt_count`
+  的行、失败/阻塞行、带 `branch` 的行、带 `sub_run_id` 的行一律保留。
+- **根输出压缩入库**：该档唯一的载荷例外从原样 JSON（24.2 KB/主任务）改为
+  `gzip:` + base64（5.2 KB）。读侧由 `schema.json_loads` 按前缀识别，事件循环不参与。
+- 整档体积 41.1 KB → 13.9 KB/主任务；30 天 1.30 GB → 0.44 GB，年增 16.2 GB → 5.5 GB。
+- **骨架不做定期清理**，三档一致永久保留。原设计稿「`none` 下节点骨架 30 天清理」的
+  结论作废：体积已不需要，且定期批量 DELETE 跑在运行时库上是额外的误伤风险。
+- 已知代价：`none` 档图上有缺行时，分不清是「跳过」还是「按档位不留」——运行台须如实
+  标注档位（`payload_state=skeleton`）。
+
+## 2026-11-18 — `TRACE_PERSIST_MODE=none` 落地：零本地存储；基线与心跳改走方言层
+
+存储最紧的部署形态：只用 MySQL，不落任何本地数据。
+
+- **`none` 档不再只是「不写包」**：节点输入输出、请求体、响应原文从一开始就不写进库，
+  只留骨架（状态、时间、耗时、错误、尝试目标与状态码）与根运行的最终画像输出。
+  子运行的 `outputs_json` 也不留——那是可重跑的中间结果。`payload_state` 记 `skeleton`，
+  与 `purged` 区分：「本来就没打算留」vs「留过又清了」。
+- **`none` 要求 MySQL 后端**：该档声称「不使用任何本地存储」，而 SQLite 库文件就在本地，
+  两者不能并存。配 `sqlite:///` 在构造配置时直接拒绝启动。
+- **存活信号有了数据库通道**：`none` 下连 `worker-liveness.*.json` 也不写，改落新表
+  `worker_heartbeats`（每 scope 一行覆盖写）。这是该档唯一必须留的库内附加数据——
+  没有它，「进程 Up 但不再消费」就无从发现。判定逻辑仍只有一套，只是取信号的位置不同。
+- **修一处真缺陷：基线写入用了 SQLite 专属语法**。`BaselineRepository.save` 原先直写
+  `ON CONFLICT (phone)`，MySQL 只认 `ON DUPLICATE KEY UPDATE`，因此在 UAT 上每次写基线都
+  报语法错误；fail-soft 把它降级成「基线没存上」，表现是增量入口每轮都读不到基线、
+  全部落 T3 全量重建，**不报错**。语句形状已移入 `dialect`。
+- **修一处静默语义错误**：`upsert_node_execution` / `update_run_finished` 把 `None` 序列化成
+  `'{}'`，「不写载荷」在库上并不成立。现在 `None` 表示不写、留 NULL。
+- `GET /runtime` 直接返回 `db_backend` / `trace_persist_mode` / `local_storage_enabled`，
+  排查「以为切了 MySQL 其实还在写本地库」不必再翻启动日志。
+
 ## 2026-11-17 — 适配取画像接口新返回结构；增量底座改以 A 自带推导为准
 
 `GET /api/v1/remote/data/profile/{phone}` 的返回改为与回传体同形：容器从字典

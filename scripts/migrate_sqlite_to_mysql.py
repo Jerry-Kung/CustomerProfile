@@ -29,7 +29,7 @@ python scripts/migrate_sqlite_to_mysql.py --sqlite data/customer_profile.db
 python scripts/migrate_sqlite_to_mysql.py --sqlite data/customer_profile.db --since 2026-11-01
 ```
 
-目标库由 ``DATABASE_URL``（或 ``--url``）给出，与 ``init_runtime_db.py`` 同源。
+目标库由 ``MYSQL_*`` 配置（或 ``--url`` 显式指定），与 ``init_runtime_db.py`` 同源。
 """
 
 from __future__ import annotations
@@ -270,7 +270,7 @@ def reconcile(
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="SQLite 骨架库 → MySQL 运行时库")
     parser.add_argument("--sqlite", default=str(REPO_ROOT / "data" / "customer_profile.db"))
-    parser.add_argument("--url", default="", help="目标 DATABASE_URL；缺省从环境/..env")
+    parser.add_argument("--url", default="", help="显式指定目标 MySQL；缺省按 MYSQL_* 配置")
     parser.add_argument("--since", default="", help="只搬该日期之后的根运行（连同整棵树）")
     parser.add_argument("--dry-run", action="store_true", help="只统计，不写目标库")
     parser.add_argument(
@@ -280,18 +280,18 @@ def main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    url = args.url.strip()
-    if not url:
-        import os
+    if args.url.strip():
+        backend = build_backend(args.url.strip())
+    else:
+        import sys as _sys
+        from pathlib import Path as _Path
 
-        url = os.environ.get("DATABASE_URL", "").strip()
-    if not url:
-        print("缺少目标库：用 --url 传入，或设置 DATABASE_URL", file=sys.stderr)
-        return 2
+        _sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "src"))
+        from customer_profile.settings import get_settings
 
-    backend = build_backend(url)
+        backend = get_settings().build_backend()
     if not isinstance(backend, MySqlBackend):
-        print("目标必须是 mysql:// 形式的运行时库", file=sys.stderr)
+        print("目标必须是 MySQL 后端：请配置 MYSQL_*（或用 --url 显式指定）", file=sys.stderr)
         return 2
 
     source = open_source(Path(args.sqlite))

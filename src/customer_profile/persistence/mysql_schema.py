@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
-SCHEMA_VERSION = "2026-11-12.1"
+SCHEMA_VERSION = "2026-11-18.1"
 """期望的 schema 版本。服务启动时与 ``schema_migrations`` 的最新记录比对。"""
 
 
@@ -168,6 +168,23 @@ MYSQL_DDL: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
+        "worker_heartbeats",
+        """
+        CREATE TABLE IF NOT EXISTS worker_heartbeats (
+            scope            VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+            worker_id        VARCHAR(255) NULL,
+            active_runs      INT NOT NULL DEFAULT 0,
+            last_claim_at_ms BIGINT NULL,
+            updated_at_ms    BIGINT NOT NULL,
+            db_alive         TINYINT(1) NULL,
+            db_error         TEXT NULL,
+            db_last_ok_at_ms BIGINT NULL,
+            PRIMARY KEY (scope)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs
+          COMMENT='执行进程存活信号（none 档不写本地文件时用它，健康检查照常可用）'
+        """,
+    ),
+    (
         "schema_migrations",
         """
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -190,7 +207,8 @@ MYSQL_DDL: tuple[tuple[str, str], ...] = (
 
 
 MIGRATION_NOTES = (
-    (SCHEMA_VERSION, "初始化运行时库：四层留痕四表 + 增量基线 + 迁移记录"),
+    ("2026-11-12.1", "初始化运行时库：四层留痕四表 + 增量基线 + 迁移记录"),
+    ("2026-11-18.1", "新增 worker_heartbeats：none 档不写本地文件时的存活信号"),
 )
 
 _NON_COLUMN_PREFIXES = (

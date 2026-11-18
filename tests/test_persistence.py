@@ -15,7 +15,7 @@ import sys
 import pytest
 from loguru import logger
 
-from customer_profile.definitions import RunStatus
+from customer_profile.definitions import NodeStatus, RunStatus
 from customer_profile.persistence import RunTracker, Store
 from customer_profile.persistence.schema import SCHEMA_STATEMENTS, RunRecordRow, json_dumps, json_loads
 from customer_profile.replay import ReplaySource
@@ -417,6 +417,341 @@ async def test_tracker_fails_loud_when_asked(store):
 
     with pytest.raises(RuntimeError, match="留痕"):
         await tracker.run_started(DummyRun())
+
+
+# ---------------------------------------------------------------- none 档
+
+
+class _StubRun:
+    """tracker 需要的最小运行对象。字段与调度层的 ``Run`` 同名。"""
+
+    def __init__(self, *, run_id: str = "r1", parent_run_id: str | None = None) -> None:
+        self.run_id = run_id
+        self.workflow = hci.WORKFLOW
+        self.workflow_id = hci.WORKFLOW_ID
+        self.workflow_display_name = hci.WORKFLOW.display_name
+        self.parent_run_id = parent_run_id
+        self.parent_node_id = None
+        self.call_path = "/"
+        self.business_ref = None
+        self.inputs = {}
+        self.started_at_ms = 0
+        self.executions: list = []
+        self.node_started_at: dict = {}
+
+
+async def _none_tracker(store) -> RunTracker:
+    """``none`` 档的 tracker：不写载荷、不写包。"""
+    store.connect()
+    return RunTracker(store, persist_mode="none", fail_soft=False)
+
+
+async def test_none_mode_does_not_write_run_payloads(store):
+    """``none`` 档连子运行的 ``outputs_json`` 都不写——那是可重跑的中间结果。"""
+    tracker = await _none_tracker(store)
+    from customer_profile.execution.scheduler import RunOutcome
+
+    outcomes = {
+        "root": _StubRun(run_id="root"),
+        "child": _StubRun(run_id="child", parent_run_id="root"),
+    }
+    for run in outcomes.values():
+        await tracker.run_started(run)
+    for run_id, run in outcomes.items():
+        await tracker.run_finished(
+            run,
+            RunOutcome(
+                run_id=run_id,
+                workflow_id=run.workflow_id,
+                status=RunStatus.SUCCEEDED,
+                outputs={"result1": "{}"},
+                duration_ms=1,
+            ),
+        )
+
+    rows = await store._read("SELECT run_id, outputs_json, payload_state FROM workflow_runs")
+    by_run = {row["run_id"]: row for row in rows}
+    # 根运行的最终影像是这一档唯一的载荷例外：profile 接口给不了「当时写回了什么」。
+    assert json_loads(by_run["root"]["outputs_json"]) == {"result1": "{}"}
+    # 子运行只有骨架。
+    assert by_run["child"]["outputs_json"] is None
+    # 载荷状态如实标 skeleton，读侧据此说「按档位不留」而不是「还在库里」。
+    assert {row["payload_state"] for row in rows} == {"skeleton"}
+
+
+async def test_none_mode_drops_node_and_attempt_payloads(store):
+    tracker = await _none_tracker(store)
+    await tracker.run_started(_StubRun())
+
+    class _Node:
+        node_id = "n1"
+        title = "节点"
+        node_type = "llm"
+        bindings: list = []
+
+    class _Execution:
+        node_id = "n1"
+        title = "节点"
+        node_type = "llm"
+        status = RunStatus.SUCCEEDED
+        outputs = {"facts_json": {"a": 1}}
+        error = None
+        queued_at_ms = 0
+        started_at_ms = 0
+        duration_ms = 5
+        branch = None
+        sub_run_id = None
+        call_path = ""
+
+    await tracker.node_started(_StubRun(), _Node())
+    await tracker.node_finished(_StubRun(), _Execution())
+
+    nodes = await store._read("SELECT status, inputs_json, outputs_json FROM node_executions")
+    assert len(nodes) == 1
+    # 骨架照留：状态与耗时是「哪一步失败」的唯一依据。
+    assert nodes[0]["status"] == RunStatus.SUCCEEDED
+    assert nodes[0]["inputs_json"] is None
+    assert nodes[0]["outputs_json"] is None
+
+
+async def test_none_mode_never_writes_package(store, tmp_path):
+    """``none`` 档不写包——它连载荷都不写，没有可搬的东西。"""
+    tracker = RunTracker(
+        store,
+        persist_mode="none",
+        archive_dir=tmp_path / "archives",
+        fail_soft=False,
+    )
+    store.connect()
+    run = _StubRun(run_id="root")
+    await tracker.run_started(run)
+    from customer_profile.execution.scheduler import RunOutcome
+
+    await tracker.run_finished(
+        run,
+        RunOutcome(
+            run_id="root",
+            workflow_id=run.workflow_id,
+            status=RunStatus.SUCCEEDED,
+            outputs={"result1": "{}"},
+            duration_ms=1,
+        ),
+    )
+    assert not list((tmp_path / "archives").rglob("*.json.gz"))
+
+
+async def test_none_mode_skeleton_exports_as_skeleton(store):
+    """导出头要如实说「这批不含运行时数据」，与 purged 同一档。"""
+    tracker = await _none_tracker(store)
+    run = _StubRun(run_id="root")
+    await tracker.run_started(run)
+    from customer_profile.execution.scheduler import RunOutcome
+
+    await tracker.run_finished(
+        run,
+        RunOutcome(
+            run_id="root",
+            workflow_id=run.workflow_id,
+            status=RunStatus.SUCCEEDED,
+            outputs={"result1": "{}"},
+            duration_ms=1,
+        ),
+    )
+    assert await store.payload_kinds(["root"]) == {"skeleton"}
+
+
+class _StubNode:
+    def __init__(self, node_id: str = "n1", node_type: str = "code") -> None:
+        self.node_id = node_id
+        self.title = "节点"
+        self.node_type = node_type
+        self.bindings: list = []
+
+
+def _exec(**kw):
+    """一个节点执行结果。缺省是「子运行里成功、无调用、无分支」。"""
+    from customer_profile.execution.scheduler import NodeExecution
+
+    base = dict(
+        node_id="n1",
+        title="节点",
+        node_type="code",
+        status=NodeStatus.SUCCEEDED,
+        outputs={"x": 1},
+        queued_at_ms=0,
+        started_at_ms=0,
+        duration_ms=5,
+        branch=None,
+        sub_run_id=None,
+        call_path="",
+    )
+    base.update(kw)
+    return NodeExecution(**base)
+
+
+async def _nodes(store, run_id: str) -> list[dict]:
+    return await store._read(
+        "SELECT node_id, status, branch FROM node_executions WHERE run_id = ?", (run_id,)
+    )
+
+
+async def _seed_tree(tracker, store) -> None:
+    """先建根运行再建子运行：子行有外键约束，父行必须先存在。"""
+    await tracker.run_started(_StubRun(run_id="root"))
+    await tracker.run_started(_StubRun(run_id="child", parent_run_id="root"))
+
+
+async def test_none_mode_drops_evidence_free_child_rows(store):
+    """子运行里「成功、无调用、无分支、无子运行」的行整行不留。"""
+    tracker = await _none_tracker(store)
+    await _seed_tree(tracker, store)
+    child = _StubRun(run_id="child", parent_run_id="root")
+
+    await tracker.node_started(child, _StubNode())
+    await tracker.node_finished(child, _exec())
+
+    assert await _nodes(store, "child") == []
+
+
+async def test_none_mode_keeps_root_rows_regardless(store):
+    """根运行的节点行一律保留——根图是排障第一眼要看的东西。"""
+    tracker = await _none_tracker(store)
+    root = _StubRun(run_id="root")
+    await tracker.run_started(root)
+
+    await tracker.node_started(root, _StubNode())
+    await tracker.node_finished(root, _exec())
+
+    rows = await _nodes(store, "root")
+    assert len(rows) == 1 and rows[0]["status"] == NodeStatus.SUCCEEDED
+
+
+async def test_none_mode_keeps_branch_rows(store):
+    """带 ``branch`` 的行必须留：它是「这个分支为什么没走」的唯一答案。"""
+    tracker = await _none_tracker(store)
+    await _seed_tree(tracker, store)
+    child = _StubRun(run_id="child", parent_run_id="root")
+
+    await tracker.node_started(child, _StubNode(node_type="if-else"))
+    await tracker.node_finished(child, _exec(node_type="if-else", branch="false"))
+
+    rows = await _nodes(store, "child")
+    assert len(rows) == 1 and rows[0]["branch"] == "false"
+
+
+async def test_none_mode_keeps_failed_and_subrun_rows(store):
+    """失败行与父子链接行都要留。"""
+    tracker = await _none_tracker(store)
+    await _seed_tree(tracker, store)
+    child = _StubRun(run_id="child", parent_run_id="root")
+
+    await tracker.node_started(child, _StubNode("bad"))
+    await tracker.node_finished(child, _exec(node_id="bad", status=NodeStatus.FAILED))
+    await tracker.node_started(child, _StubNode("spawn"))
+    await tracker.node_finished(child, _exec(node_id="spawn", sub_run_id="grand"))
+
+    assert {r["node_id"] for r in await _nodes(store, "child")} == {"bad", "spawn"}
+
+
+async def test_none_mode_drops_skipped_rows(store):
+    """``skipped`` 行不留：分支是否走到由 ``branch`` 行回答，它不提供额外信息。"""
+    tracker = await _none_tracker(store)
+    await _seed_tree(tracker, store)
+    child = _StubRun(run_id="child", parent_run_id="root")
+
+    await tracker.node_started(child, _StubNode())
+    await tracker.node_finished(
+        child,
+        _exec(status=NodeStatus.SKIPPED, error="前置 n0 未具备分支条件，节点未执行"),
+    )
+
+    assert await _nodes(store, "child") == []
+
+
+async def test_none_mode_root_output_is_compressed(store):
+    """根输出是该档唯一保留的载荷，入库前压缩；读侧透明解出。"""
+    tracker = await _none_tracker(store)
+    root = _StubRun(run_id="root")
+    await tracker.run_started(root)
+    big = {"result1": "回写内容" * 500}
+    from customer_profile.execution.scheduler import RunOutcome
+
+    await tracker.run_finished(
+        root,
+        RunOutcome(
+            run_id="root",
+            workflow_id=root.workflow_id,
+            status=RunStatus.SUCCEEDED,
+            outputs=big,
+            duration_ms=1,
+        ),
+    )
+
+    raw = await store._read("SELECT outputs_json FROM workflow_runs WHERE run_id = ?", ("root",))
+    stored = raw[0]["outputs_json"]
+    assert stored.startswith("gzip:"), "根输出应压缩存储"
+    assert len(stored) * 3 < len(json.dumps(big, ensure_ascii=False))
+
+    run = await store.get_run("root")
+    assert run["outputs_json"] == big
+
+
+async def test_plain_and_packed_outputs_coexist(store):
+    """同一列里明文与压缩两种形态都必须读得出——历史行不是这一档写的。"""
+    await store.insert_run(RunRecordRow(run_id="old", workflow_id="wf"))
+    await store.update_run_finished(
+        "old", status=RunStatus.SUCCEEDED, outputs={"legacy": True}, duration_ms=1
+    )
+    run = await store.get_run("old")
+    assert run["outputs_json"] == {"legacy": True}
+
+
+async def test_none_mode_drops_usage_and_provider_request_id(store):
+    """``none`` 档不留 ``usage_json`` / ``provider_request_id``（方案 §4 / §7）。
+
+    这两个字段在方案里是 ``high`` / ``low`` 才留的：``none`` 连包都不写，没有
+    「用用量对账」的场景，留着只是白占列宽。实现上曾漏判——载荷都丢了，这两个
+    却照写，于是该档每行白背约 70 B；档位语义也对不上文档。
+    """
+    tracker = await _none_tracker(store)
+    root = _StubRun(run_id="root")
+    await tracker.run_started(root)
+
+    class _Ref:
+        run_id = "root"
+        node_id = "n1"
+        call_path = ""
+
+    class _LlmAttempt:
+        attempt_no = 1
+        model = "m"
+        request = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        response_text = "回答"
+        duration_ms = 12
+        error = None
+        error_code = None
+        provider_request_id = "req-abc"
+        anomaly = None
+        finish_reason = "stop"
+        replayed = False
+        usage = type(
+            "U", (), {"asdict": lambda self: {"prompt_tokens": 10, "completion_tokens": 5}}
+        )()
+
+        def asdict(self):
+            return {"attempt_no": 1, "request": self.request, "response_text": "回答"}
+
+    await tracker.attempt_recorded(_Ref(), _LlmAttempt())
+
+    rows = await store._read(
+        "SELECT request_json, response_text, usage_json, provider_request_id "
+        "FROM request_attempts WHERE run_id = 'root'"
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["request_json"] is None and row["response_text"] is None
+    assert row["usage_json"] is None, "none 档不应写 usage_json"
+    assert row["provider_request_id"] is None, "none 档不应写 provider_request_id"
 
 
 # ---------------------------------------------------------------- 线程生命周期回归

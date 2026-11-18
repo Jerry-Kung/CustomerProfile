@@ -248,7 +248,8 @@ def test_inbound_process_does_not_consume_the_queue_or_interrupt_runs(tmp_path):
     assert resolved.interrupt_on_start is False
     # 其余配置原样透传
     assert resolved.inbound_api_key == KEY
-    assert resolved.database_url == base.database_url
+    assert resolved.db_backend == base.db_backend
+    assert resolved.sqlite_db_path == base.sqlite_db_path
 
 
 async def test_inbound_service_does_not_start_an_inline_worker(tmp_path):

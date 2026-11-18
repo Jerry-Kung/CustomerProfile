@@ -19,6 +19,11 @@ from .workflow_scope import WorkflowScope
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 """仓库根目录（`src/customer_profile/settings.py` 上溯三层）。"""
 
+DEFAULT_SQLITE_PATH = Path("data/customer_profile.db")
+"""``DB_BACKEND=sqlite`` 未指定路径时的库文件（相对仓库根）。
+
+只服务本地调试、批次实验与快照复现。运行时一律走 MySQL，见 ``Settings.db_backend``。
+"""
 DEFAULT_API_PORT = 18173
 """运行台 / API 的缺省端口。
 
@@ -253,7 +258,38 @@ class Settings(BaseSettings):
     http_retry_interval_ms: int = 500
 
     # ------------------------------------------------------------ 执行器
-    database_url: str = "sqlite:///./data/customer_profile.db"
+    db_backend: Literal["mysql", "sqlite"] = "mysql"
+    """持久化后端（``DB_BACKEND``）。缺省 **mysql**。
+
+    **只接受 mysql / sqlite，配错直接拒绝启动。** 缺省值是 mysql 而不是 sqlite 是
+    刻意的：UAT 曾经因为「没配数据库」而静默写到本地 SQLite 文件，两边都有数据却
+    看不出异常。现在不配 MySQL 就根本起不来。
+
+    ``sqlite`` 只用于本地调试、批次实验与快照复现，落位见 :attr:`sqlite_path`。
+    """
+
+    sqlite_db_path: Path | None = None
+    """``sqlite`` 后端的库文件路径。留空用 ``<仓库根>/data/customer_profile.db``。
+
+    之所以给本地调试留一个「什么都不用配」的缺省路径：这一档的全部用途就是「给个
+    路径就能跑」，要求它再配一遍 DSN 只是重复。
+    """
+
+    mysql_host: str = ""
+    mysql_port: int = 3306
+    mysql_user: str = ""
+    mysql_password: str = ""
+    mysql_database: str = ""
+    """运行时库的连接参数（``MYSQL_*``）。
+
+    **与任务后端共用同一组变量、同一个库**（2026-11-18 用户决定）。此前运行时单用一条
+    ``DATABASE_URL`` 指向独立 schema，运维要维护两套地址；现在只有一套。
+
+    连接参数**在构造配置时不做校验**（空值合法），校验发生在 :meth:`build_backend`：
+    那样纯配置类的测试不需要造一堆假凭据，而真正要连库的进程（API / worker /
+    runtime-migrate）在启动第一刻就会因缺配置而失败，不会带着空配置跑起来。
+    """
+
     workflow_scope: WorkflowScope = "all"
     """本进程接收、领取和恢复的主任务范围；all 仅用于兼容本地单进程运行。"""
 
@@ -450,15 +486,20 @@ class Settings(BaseSettings):
     """
 
     # ------------------------------------------------------------ 留痕存储瘦身
-    trace_persist_mode: Literal["high", "low"] = "high"
+    trace_persist_mode: Literal["high", "low", "none"] = "high"
     """留痕运行时数据的留存档位（``TRACE_PERSIST_MODE``）。
 
     - ``high``：包内保留节点输入输出与完整请求体；
-    - ``low``：只留外部响应原文、根输出、``pipeline_l0_records`` 的原样输入与诊断切片。
+    - ``low``：只留外部响应原文、根输出、``pipeline_l0_records`` 的原样输入与诊断切片；
+    - ``none``：**不写任何归档包，库内也不写载荷列**。只留运行骨架（运行身份、状态、
+      时间戳、耗时、错误、节点状态与尝试的目标/状态码/耗时）与根运行的最终画像输出。
+      定义快照照留（体积可忽略，且是历史运行重建的唯一依据）。
 
-    **只接受这两个值。** ``none`` 与任何拼写错误都直接拒绝启动，不回落缺省——
+    **只接受这三个值**，任何拼写错误都直接拒绝启动，不回落缺省——
     「以为开了 low 其实还在存全量」和「以为存了其实什么都没有」都是最难查的一类问题。
-    方案稿里的 ``none`` 档本轮未实现，配置层明确拒绝而不是静默当成别的东西。
+
+    ``none`` 的含义是「不使用任何本地存储」，因此**要求后端是 MySQL**：SQLite 库文件
+    本身就是本地文件，两者同时成立等于自相矛盾。这条在构造配置时硬校验，不靠部署约定。
     """
 
     trace_archive_dir: Path | None = None
@@ -480,14 +521,10 @@ class Settings(BaseSettings):
         if value is None or (isinstance(value, str) and not value.strip()):
             return "high"
         text = str(value).strip().lower()
-        if text in ("high", "low"):
+        if text in ("high", "low", "none"):
             return text
-        if text == "none":
-            raise ValueError(
-                "TRACE_PERSIST_MODE=none 本轮未实现；请使用 high 或 low"
-            )
         raise ValueError(
-            f"未知的 TRACE_PERSIST_MODE={value!r}；只接受 high / low"
+            f"未知的 TRACE_PERSIST_MODE={value!r}；只接受 high / low / none"
             "（不静默回落，避免「以为换了档位其实没换」）"
         )
 
@@ -516,6 +553,29 @@ class Settings(BaseSettings):
             merged["trace_persist_mode"] = "low"
             return merged
         return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_database_url(cls, data: Any) -> Any:
+        """``DATABASE_URL`` 已撤销，出现即拒绝启动。
+
+        **不能静默忽略。** 配置模型是 ``extra="ignore"``，留着旧变量会照常启动并连到
+        ``MYSQL_*`` 指向的库——而运维以为自己连的是那条 URL 指向的库。这正是本项目
+        反复要消灭的那类静默错位（「以为切了 MySQL 其实还在写本地库」）。
+        报错时把替代写法直接写出来，不让升级的人去翻文档。
+        """
+        if not isinstance(data, Mapping):
+            return data
+        legacy = data.get("database_url")
+        if legacy is None or not str(legacy).strip():
+            return data
+        raise ValueError(
+            f"DATABASE_URL 已撤销（当前值 {str(legacy)!r}）。"
+            "运行时库改由 DB_BACKEND + MYSQL_* 指定，且与任务后端共用同一个库："
+            "删除 DATABASE_URL，配置 MYSQL_HOST / MYSQL_USER / MYSQL_DATABASE"
+            "（必要时 MYSQL_PORT / MYSQL_PASSWORD）；"
+            "本地调试若要 SQLite，改配 DB_BACKEND=sqlite"
+        )
 
     @property
     def trace_archive_path(self) -> Path:
@@ -566,6 +626,22 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
+    def _none_mode_requires_mysql(self) -> "Settings":
+        """``none`` 档要求 MySQL 后端。
+
+        ``none`` 的语义是「不使用任何本地存储」，而 SQLite 库文件就在本地卷上——
+        两者同时成立等于自相矛盾。这条在**构造配置时**硬校验，不留到运行期：等到
+        第一个运行的载荷被写进本地库才发现，说明已经白跑过业务。
+        """
+        if self.trace_persist_mode == "none" and self.db_backend != "mysql":
+            raise ValueError(
+                f"TRACE_PERSIST_MODE=none 要求 DB_BACKEND=mysql，当前是 {self.db_backend!r}："
+                "none 档不写任何本地存储，而 SQLite 库文件本身就是本地存储；"
+                "请改用 MySQL，或把档位调回 low"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _limits_split_evenly_across_workers(self) -> "Settings":
         """限额必须能被 worker 数整除。
 
@@ -605,24 +681,49 @@ class Settings(BaseSettings):
 
     @property
     def sqlite_path(self) -> Path | None:
-        """``sqlite:///`` 形式的数据库文件路径；非 SQLite 时返回 ``None``。"""
-        prefix = "sqlite:///"
-        if not self.database_url.startswith(prefix):
+        """SQLite 后端的库文件路径；后端不是 SQLite 时返回 ``None``。
+
+        相对路径按**仓库根**解析，不按进程工作目录——批次脚本与快照复现会从任意目录
+        调用，按 cwd 解析会让同一个配置指向不同文件。
+        """
+        if self.db_backend != "sqlite":
             return None
-        raw = self.database_url[len(prefix) :]
+        raw = self.sqlite_db_path or DEFAULT_SQLITE_PATH
         path = Path(raw)
         return path if path.is_absolute() else (PROJECT_ROOT / path)
 
     def build_backend(self) -> Any:
-        """按 ``DATABASE_URL`` 构造持久化后端。
+        """按后端类型构造持久化后端。
 
-        支持的写法与取舍见 ``persistence.dbapi.build_backend``；这里只补配置项。
+        ``sqlite`` 直接给文件路径；``mysql`` 用 ``MYSQL_*`` 五个键。**缺连接参数时在
+        这里报错**，而不是构造配置时：纯配置类测试不需要造假凭据，而真要连库的进程
+        会在启动第一刻失败，不会带着空凭据跑起来。
         """
-        from .persistence.dbapi import build_backend
+        from .persistence.dbapi import MySqlBackend, SqliteBackend
 
-        return build_backend(
-            self.database_url,
-            sqlite_busy_timeout_ms=self.sqlite_busy_timeout_ms,
+        if self.db_backend == "sqlite":
+            return SqliteBackend(
+                self.sqlite_path, busy_timeout_ms=self.sqlite_busy_timeout_ms
+            )
+
+        missing = [
+            name
+            for name in ("mysql_host", "mysql_user", "mysql_database")
+            if not str(getattr(self, name) or "").strip()
+        ]
+        if missing:
+            raise ValueError(
+                "DB_BACKEND=mysql 但缺少数据库配置："
+                + "、".join(f"MYSQL_{name[6:].upper()}" for name in missing)
+                + "（必要时还有 MYSQL_PORT / MYSQL_PASSWORD）。"
+                "本地调试请改用 DB_BACKEND=sqlite"
+            )
+        return MySqlBackend(
+            host=self.mysql_host,
+            port=self.mysql_port,
+            user=self.mysql_user,
+            password=self.mysql_password,
+            database=self.mysql_database,
         )
 
     @property
@@ -685,7 +786,22 @@ class Settings(BaseSettings):
             return None
         return self.llm_tpm_limit // max(1, self.worker_replicas)
 
+    @property
+    def local_storage_enabled(self) -> bool:
+        """是否允许写**本地文件**（归档包、存活信号）。
+
+        ``none`` 档的唯一含义是「不使用任何本地存储」，因此它同时是这两处文件的
+        总开关，而不是另一个独立的配置项——两个开关迟早会写出互相矛盾的组合
+        （例如「包不写了但存活信号还在写」）。
+
+        注意它**不是**「留痕开关」：骨架与根输出仍在库里，``none`` 只是不落本地。
+        """
+        return self.trace_persist_mode != "none"
+
     def ensure_dirs(self) -> None:
+        """按档位建目录。``none`` 档不建——建了就等于宣称这里会写文件。"""
+        if not self.local_storage_enabled:
+            return
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.trace_archive_path.mkdir(parents=True, exist_ok=True)
 
