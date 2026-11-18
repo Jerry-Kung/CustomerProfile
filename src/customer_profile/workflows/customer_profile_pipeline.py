@@ -3048,6 +3048,11 @@ def merge_l2_verdict(candidates_json, verdict_json, notes_updates_json) -> dict:
         reason = item.get("reason") or ""
         # v3.3：移除 reason 中的工程术语措辞（问题2修复）。
         # L2 提示词已规范，但为防止模型偶发漏出，代码再清洗一遍。
+        # 2026-11-18：清洗必须覆盖「事实表」这类**流程内部对输入的称呼**。模型会把
+        # 提示词里对输入的称呼（「只根据下面的已核实客户信息」）当成自己的措辞抄进理由，
+        # 销售读到的就是「事实表明确记录家庭结构为已婚无孩」。这条路径此前直接绕过
+        # ``proj._plain_text``，提示词改了也拦不住历史措辞，故在此统一过一遍。
+        reason = proj._plain_text(reason)
         if soft:
             # 不带「推断：」前缀：这一段进链时会由 ``merge_stage`` 统一加「结论推断：」，
             # 自带一个前缀就成了「结论推断：根据已有信息推断：…」。
