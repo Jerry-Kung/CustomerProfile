@@ -431,6 +431,55 @@ def test_loss_conditions_include_competitors_and_credit():
     assert any("逾期" in label for label in labels)
 
 
+def test_competitors_collapse_into_one_loss_condition():
+    """多款竞品在「战败风险」里**只出一条**，车型名并列写在同一条里。
+
+    UAT 13871262572 实测：客户同时比较坦克300/豹5/豹8/坦克500，卡片上连出 6 条
+    「存在竞品对比：X」，每条措辞相似、只有车名不同——销售要的是「他在比价」这个
+    结论，不是逐台复述。按台拆条只是在同一行里重复一遍自己。
+    """
+    loss = _build(
+        facts=_facts(competing_model="坦克300||方程豹豹5||坦克500")
+    )["analysis_result"]["deal_battle"]["loss_conditions"]
+    competitor_labels = [i["label"] for i in loss if i["label"].startswith("存在竞品对比")]
+    assert len(competitor_labels) == 1
+    assert competitor_labels[0] == "存在竞品对比：坦克300、方程豹豹5、坦克500"
+
+
+def test_competitor_brand_is_subsumed_by_its_own_model():
+    """品牌已被某条车型包含时不再单列；未被包含的品牌照常保留。
+
+    契约允许品牌与车型同时给值（分不清时两个都写）。合并成一条之后，
+    「坦克」跟在「坦克300、坦克500」后面读起来像重复枚举；而「方程豹」若没有对应
+    车型条目，它本身就是客户比价的线索，不能丢。
+    """
+    label = _build(
+        facts=_facts(
+            competing_model="坦克300||坦克500",
+            competing_brand="坦克||方程豹",
+        )
+    )["analysis_result"]["deal_battle"]["loss_conditions"][0]["label"]
+    assert label == "存在竞品对比：坦克300、坦克500、方程豹"
+
+
+def test_competitors_keep_their_own_detail_and_do_not_merge_other_loss_items():
+    """合并只发生在竞品之间：品牌顾虑、征信仍是独立的条目，且竞品条的排序不被打乱。"""
+    loss = _build(
+        facts=_facts(
+            competing_model="坦克300||坦克500",
+            brand_concerns="保值率",
+            credit_status="有逾期记录",
+        )
+    )["analysis_result"]["deal_battle"]["loss_conditions"]
+    labels = [i["label"] for i in loss]
+    assert labels == [
+        "对保值率存在担忧",
+        "存在竞品对比：坦克300、坦克500",
+        "征信情况：有逾期记录",
+    ]
+    assert [i["rank_order"] for i in loss] == [1, 2, 3]
+
+
 def test_battle_arrays_have_the_same_element_shape():
     """两个数组元素结构相同：``id`` / ``label`` / ``reasoning_detail`` / ``rank_order``。"""
     battle = _build(facts=_facts(core_concerns="油耗", brand_concerns="保值率"))[

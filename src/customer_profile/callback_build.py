@@ -1199,6 +1199,27 @@ def _knowledge_name(attribute: str) -> str:
     return names.get(attribute, inf.name_of(attribute))
 
 
+def _competitor_values(view: _FactView) -> list[str]:
+    """竞品位要写进「战败风险」的取值清单，已按品牌/车型的包含关系收口。
+
+    **为什么需要这层收口**：``competing_brand`` 与 ``competing_model`` 允许同时给值
+    （契约口径：分不清时两个字段都写），于是「某品牌」与「该品牌下的两款车」会一起
+    出现，合并成一行后读起来像重复枚举。这里只做一件事：**某个竞品名已被另一条更具体
+    的取值包含时不再单列**。这不是去重（精确重复由 ``view.items`` 处理），也不做语义
+    归并——拿不准归属的品牌照样保留，因为一个只说了品牌没说车型的客户，那一条就是
+    他比价的全部线索。
+    """
+    models = view.items("competing_model")
+    brands = view.items("competing_brand")
+    out: list[str] = list(models)
+    for brand in brands:
+        if any(brand in model for model in models):
+            continue
+        if brand not in out:
+            out.append(brand)
+    return out
+
+
 def _loss_conditions(
     view: _FactView, express: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
@@ -1232,12 +1253,17 @@ def _loss_conditions(
                   len(items) + 1, extra_digest=name)
         )
 
-    for attribute in ("competing_model", "competing_brand"):
-        for text in view.items(attribute):
-            items.append(
-                _item("loss", attribute, f"存在竞品对比：{text}",
-                      view.detail(attribute), len(items) + 1, extra_digest=text)
-            )
+    # —— 竞品：多款对比车型合并成**一条**风险描述。
+    # 客户同时比较几台车是同一个风险信号，逐台各出一行会让「成交攻防」被一串措辞
+    # 相同的条目占满（UAT 13871262572 实测连出 6 条），销售读到的是噪音不是结论。
+    competitors = _competitor_values(view)
+    if competitors:
+        joined = "、".join(competitors)
+        items.append(
+            _item("loss", "competing_model", f"存在竞品对比：{joined}",
+                  view.detail("competing_model", "competing_brand"), len(items) + 1,
+                  extra_digest=joined)
+        )
 
     credit = view.text("credit_status")
     if credit:
