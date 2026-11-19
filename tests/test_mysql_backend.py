@@ -385,6 +385,53 @@ async def test_ensure_schema_restores_dropped_column(store):
     assert await store.count_runs() == 1, "补列不能动已有行"
 
 
+async def test_ensure_schema_widens_legacy_invitation_run_id_columns(store):
+    from mysql.connector import DataError
+
+    from customer_profile.invitation_inbound import InvitationTaskRequest, invitation_run_id
+    from customer_profile.persistence import mysql_schema
+
+    run_id_columns = {
+        "workflow_runs": ("run_id", "parent_run_id"),
+        "node_executions": ("run_id", "sub_run_id"),
+        "request_attempts": ("run_id",),
+        "profile_baselines": ("source_run_id",),
+    }
+    definitions = mysql_schema.expected_columns()
+    for table, columns in run_id_columns.items():
+        legacy_definitions = [
+            definitions[table][column].replace(f"VARCHAR({mysql_schema.RUN_ID_LENGTH})", "VARCHAR(48)", 1)
+            for column in columns
+        ]
+        changes = ", ".join(f"MODIFY COLUMN {definition}" for definition in legacy_definitions)
+        await store._write(f"ALTER TABLE `{table}` {changes}")
+
+    historical = _run_row("a" * 32, status=RunStatus.SUCCEEDED)
+    await store.insert_run(historical)
+    payload = InvitationTaskRequest(
+        phone_number="13800000000", batch_id="test-batch", execution_id="test-execution", work_env="test"
+    )
+    invitation = RunRecordRow(
+        run_id=invitation_run_id(payload),
+        workflow_id="invitation_strategy",
+        status=RunStatus.QUEUED,
+        inputs=payload.model_dump(),
+    )
+    with pytest.raises(DataError, match="Data too long for column 'run_id'"):
+        await store.enqueue_run_once(invitation)
+
+    healed = await _heal(store)
+    assert healed.satisfied
+    assert healed.columns_widened == [
+        f"{table}.{column}" for table, columns in reversed(run_id_columns.items()) for column in columns
+    ]
+    assert (await store.get_run(historical.run_id))["status"] == RunStatus.SUCCEEDED
+    assert await store.enqueue_run_once(invitation)
+    assert not await store.enqueue_run_once(invitation)
+    assert (await store.get_run(invitation.run_id))["inputs_json"] == payload.model_dump()
+    assert (await _heal(store)).columns_widened == []
+
+
 async def test_ensure_schema_restores_dropped_table(store):
     """整表被误删：只重建缺的那张，其它表不动。"""
     await store._write("DROP TABLE request_attempts")

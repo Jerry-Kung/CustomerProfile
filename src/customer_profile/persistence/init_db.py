@@ -17,11 +17,12 @@
 
 ## 幂等与自愈
 
-每次执行都会比对**实际结构**与 ``mysql_schema.MYSQL_DDL``，只补缺失的表和列：
+每次执行都会比对**实际结构**与 ``mysql_schema.MYSQL_DDL``，补齐缺失项并升级运行 ID 列宽：
 
 - 首次部署：建库、建全部表、登记迁移版本；
 - 再次部署：什么都不改，打印「结构完整」；
 - 升级带来新列：只 ``ADD COLUMN`` 缺的列，已有数据不动；
+- 运行 ID 列宽不足：使用 ``MODIFY COLUMN`` 扩宽相关列；
 - 表被误删：只重建缺的那张。
 
 因此运维不需要记住「这个环境初始化过没有」，也不需要判断升级后该补什么。
@@ -116,7 +117,7 @@ def ensure_database(connection: Any, database: str) -> str:
 
 
 def apply(connection: Any, database: str, *, create_database: bool = True) -> dict[str, Any]:
-    """自检并只补缺失项，返回概况。"""
+    """按实际结构执行迁移，返回概况。"""
     from . import mysql_schema
 
     database_state = "skipped"
@@ -134,6 +135,7 @@ def apply(connection: Any, database: str, *, create_database: bool = True) -> di
         "database": connection.execute("SELECT DATABASE() AS d").fetchone()["d"],
         "created": report.tables_created,
         "columns_added": report.columns_added,
+        "columns_widened": report.columns_widened,
         "relaxed_columns": report.relaxed_columns,
         "versions": [dict(row) for row in versions],
         "satisfied": report.satisfied,
@@ -200,6 +202,8 @@ def _print_report(info: dict[str, Any]) -> None:
         print(f"已建表：{', '.join(info['created'])}")
     if info.get("columns_added"):
         print(f"已补列：{', '.join(info['columns_added'])}")
+    if info.get("columns_widened"):
+        print(f"已扩宽列：{', '.join(info['columns_widened'])}")
     if info.get("relaxed_columns"):
         print(
             "注意：以下列要求 NOT NULL 且无默认值，已先建成可空——"
@@ -218,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     from .dbapi import MySqlBackend, build_backend
 
     parser = argparse.ArgumentParser(
-        description="初始化 / 自检运行时 MySQL 库（幂等；只补缺失项）"
+        description="初始化 / 升级 / 自检运行时 MySQL 库（幂等）"
     )
     parser.add_argument(
         "--url",
@@ -228,8 +232,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check", action="store_true", help="只自检不改库；结构不满足时退出码 3"
     )
-    parser.add_argument("--dry-run", action="store_true", help="只打印将要执行的语句")
-    parser.add_argument("--emit-sql", default="", help="把等价 SQL 写到指定文件后退出")
+    parser.add_argument("--dry-run", action="store_true", help="只打印空库初始化 SQL")
+    parser.add_argument("--emit-sql", default="", help="把空库初始化 SQL 写到指定文件后退出")
     parser.add_argument(
         "--skip-create-database",
         action="store_true",

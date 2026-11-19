@@ -23,8 +23,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
-SCHEMA_VERSION = "2026-11-18.1"
+SCHEMA_VERSION = "2026-11-19.1"
 """期望的 schema 版本。服务启动时与 ``schema_migrations`` 的最新记录比对。"""
+
+RUN_ID_LENGTH = 128
+"""与任务后端的 workflow_run_id 一致，容纳 68 字符的原生邀约运行 ID。"""
+
+_RUN_ID_COLUMNS = {"run_id", "parent_run_id", "sub_run_id", "source_run_id"}
 
 
 TABLE_OPTIONS = "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs"
@@ -40,12 +45,12 @@ SQLite 的 TEXT 比较是二进制语义；``ai_ci`` 会让 ``'Running' = 'runni
 MYSQL_DDL: tuple[tuple[str, str], ...] = (
     (
         "workflow_runs",
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS workflow_runs (
-            run_id                VARCHAR(48) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+            run_id                VARCHAR({RUN_ID_LENGTH}) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
             workflow_id           VARCHAR(128) NOT NULL,
             workflow_display_name VARCHAR(255) NULL,
-            parent_run_id         VARCHAR(48) CHARACTER SET ascii COLLATE ascii_bin NULL,
+            parent_run_id         VARCHAR({RUN_ID_LENGTH}) CHARACTER SET ascii COLLATE ascii_bin NULL,
             parent_node_id        VARCHAR(96) NULL,
             call_path             VARCHAR(512) NOT NULL DEFAULT '',
             business_ref          VARCHAR(128) NULL,
@@ -95,10 +100,10 @@ MYSQL_DDL: tuple[tuple[str, str], ...] = (
     ),
     (
         "node_executions",
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS node_executions (
             execution_id   BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-            run_id         VARCHAR(48) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+            run_id         VARCHAR({RUN_ID_LENGTH}) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
             node_id        VARCHAR(96) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
             node_title     VARCHAR(255) NULL,
             node_type      VARCHAR(64) NOT NULL,
@@ -111,7 +116,7 @@ MYSQL_DDL: tuple[tuple[str, str], ...] = (
             queued_at_ms   BIGINT NULL,
             started_at_ms  BIGINT NULL,
             duration_ms    BIGINT NULL,
-            sub_run_id     VARCHAR(48) CHARACTER SET ascii COLLATE ascii_bin NULL,
+            sub_run_id     VARCHAR({RUN_ID_LENGTH}) CHARACTER SET ascii COLLATE ascii_bin NULL,
             attempt_count  INT NOT NULL DEFAULT 0,
             PRIMARY KEY (execution_id),
             UNIQUE KEY uk_node_executions_scope (run_id, node_id, call_path),
@@ -122,10 +127,10 @@ MYSQL_DDL: tuple[tuple[str, str], ...] = (
     ),
     (
         "request_attempts",
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS request_attempts (
             attempt_id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-            run_id              VARCHAR(48) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+            run_id              VARCHAR({RUN_ID_LENGTH}) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
             node_id             VARCHAR(96) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
             call_path           VARCHAR(512) NOT NULL DEFAULT '',
             attempt_no          INT NOT NULL,
@@ -151,11 +156,11 @@ MYSQL_DDL: tuple[tuple[str, str], ...] = (
     ),
     (
         "profile_baselines",
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS profile_baselines (
             phone              VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
             compat_key         VARCHAR(255) NOT NULL DEFAULT '',
-            source_run_id      VARCHAR(48) NULL,
+            source_run_id      VARCHAR({RUN_ID_LENGTH}) NULL,
             updated_at_ms      BIGINT NOT NULL,
             stage              VARCHAR(64) NOT NULL DEFAULT '',
             deal_level         VARCHAR(64) NOT NULL DEFAULT '',
@@ -209,6 +214,7 @@ MYSQL_DDL: tuple[tuple[str, str], ...] = (
 MIGRATION_NOTES = (
     ("2026-11-12.1", "初始化运行时库：四层留痕四表 + 增量基线 + 迁移记录"),
     ("2026-11-18.1", "新增 worker_heartbeats：none 档不写本地文件时的存活信号"),
+    (SCHEMA_VERSION, "扩宽运行 ID 和引用列，支持原生邀约入队与留痕"),
 )
 
 _NON_COLUMN_PREFIXES = (
@@ -267,6 +273,12 @@ class SchemaReport:
     relaxed_columns: list[str] = field(default_factory=list)
     """``NOT NULL`` 且无默认值的列只能先建成可空——需要人工回填后再收紧。"""
     versions: list[str] = field(default_factory=list)
+    undersized_run_id_columns: dict[str, dict[str, int]] = field(default_factory=dict)
+    columns_widened: list[str] = field(default_factory=list)
+
+    @property
+    def structure_satisfied(self) -> bool:
+        return not (self.missing_tables or self.missing_columns or self.undersized_run_id_columns)
 
     @property
     def satisfies_version(self) -> bool:
@@ -274,7 +286,7 @@ class SchemaReport:
 
     @property
     def satisfied(self) -> bool:
-        return not self.missing_tables and not self.missing_columns and self.satisfies_version
+        return self.structure_satisfied and self.satisfies_version
 
     def describe(self) -> str:
         """一句话说清现状，供部署日志与报错共用。"""
@@ -290,6 +302,15 @@ class SchemaReport:
                     for column in columns
                 )
             )
+        if self.undersized_run_id_columns:
+            problems.append(
+                "运行 ID 列宽不足 "
+                + "、".join(
+                    f"{table}.{column}（{width} < {RUN_ID_LENGTH}）"
+                    for table, columns in self.undersized_run_id_columns.items()
+                    for column, width in columns.items()
+                )
+            )
         if not self.satisfies_version:
             problems.append(f"缺迁移版本 {SCHEMA_VERSION}")
         return "结构完整" if not problems else "；".join(problems)
@@ -302,13 +323,14 @@ def inspect(connection: Any) -> SchemaReport:
     权限要求相同（``information_schema`` 只看得见当前账号有权访问的对象）。
     """
     rows = connection.execute(
-        "SELECT table_name AS table_name, column_name AS column_name "
+        "SELECT table_name AS table_name, column_name AS column_name, "
+        "character_maximum_length AS max_length "
         "FROM information_schema.columns WHERE table_schema = DATABASE()"
     ).fetchall()
-    actual: dict[str, set[str]] = {}
+    actual: dict[str, dict[str, int | None]] = {}
     for row in rows:
         data = dict(row)
-        actual.setdefault(str(data["table_name"]), set()).add(str(data["column_name"]))
+        actual.setdefault(str(data["table_name"]), {})[str(data["column_name"])] = data["max_length"]
 
     report = SchemaReport()
     for table, columns in expected_columns().items():
@@ -318,6 +340,13 @@ def inspect(connection: Any) -> SchemaReport:
         absent = [column for column in columns if column not in actual[table]]
         if absent:
             report.missing_columns[table] = absent
+        undersized = {}
+        for column in columns:
+            width = actual[table].get(column)
+            if column in _RUN_ID_COLUMNS and width is not None and width < RUN_ID_LENGTH:
+                undersized[column] = width
+        if undersized:
+            report.undersized_run_id_columns[table] = undersized
     try:
         report.versions = current_versions(connection)
     except Exception:
@@ -391,16 +420,17 @@ def _release_lock(connection: Any) -> None:
 def ensure_schema(
     connection: Any, *, now_ms: int | None = None, lock_timeout_s: int = 60
 ) -> SchemaReport:
-    """**自检 + 只补缺的**。返回本次实际做了什么。
+    """自检并补齐结构，返回本次实际执行的迁移动作。
 
     这是自动部署的核心：运维不需要判断「这个库是不是已经初始化过」，也不需要记得
-    升级后要补哪一列。四种状态都能收敛到「结构完整」：
+    升级后要补哪一列。已有表按实际结构升级。
 
     - 空库：建全部表并登记版本；
     - 已初始化的库：什么都不改（幂等）；
     - 缺表（被误删、或新版本引入了新表）：只建缺的那张；
     - 缺列（升级带来的新列）：只 ``ADD COLUMN`` 缺的那几列。
       已有的数据不动，列的内容为 ``NULL``，由后续业务流程自然回填。
+    - 运行 ID 的列宽不足：同一张表的列合并到一次 ``ALTER TABLE`` 扩宽。
 
     整个过程在 ``GET_LOCK`` 下进行，多个进程同时启动时串行执行；**拿到锁之后才
     inspect**——排队等待期间别的进程可能已经把表建好了，先查后会对着过期的结论
@@ -427,6 +457,13 @@ def ensure_schema(
                     connection.execute(f"ALTER TABLE `{table}` ADD COLUMN {_relaxed(definition)}")
                     report.relaxed_columns.append(f"{table}.{column}")
                 report.columns_added.append(f"{table}.{column}")
+        # MYSQL_DDL 把 workflow_runs 排在引用表前。反向扩宽，避免长 ID 已经能入队、
+        # 节点或请求留痕的列却还没升级。
+        for table, columns in reversed(report.undersized_run_id_columns.items()):
+            definitions = expected_columns()[table]
+            changes = ", ".join(f"MODIFY COLUMN {definitions[column]}" for column in columns)
+            connection.execute(f"ALTER TABLE `{table}` {changes}")
+            report.columns_widened.extend(f"{table}.{column}" for column in columns)
         connection.commit()
 
         # 补完之后再登记版本：版本行**声称**结构已就绪，先登记后补表会让一次失败的
@@ -444,6 +481,7 @@ def ensure_schema(
     # 把「做了什么」带回去，同时保留最终状态（用于打印「已完整」这类情形）。
     final.tables_created = report.tables_created
     final.columns_added = report.columns_added
+    final.columns_widened = report.columns_widened
     final.relaxed_columns = report.relaxed_columns
     return final
 
@@ -473,7 +511,7 @@ def assert_expected_version(connection: Any, *, required: Sequence[str] = (SCHEM
     report = inspect(connection)
     present = set(report.versions)
     missing = [version for version in required if version not in present]
-    if missing or report.missing_tables or report.missing_columns:
+    if missing or not report.structure_satisfied:
         detail = report.describe()
         if missing:
             detail = f"缺少迁移版本 {'、'.join(missing)}（现有：{sorted(present) or '无'}）；" + detail

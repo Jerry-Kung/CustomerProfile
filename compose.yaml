@@ -171,12 +171,12 @@ services:
     command: ["/opt/task-venv/bin/customer-profile-migrate"]
     restart: "no"
 
-  # ---- 运行时库初始化（每次部署自动执行，幂等，只补缺失项） --------------------
+  # ---- 运行时库初始化与升级（每次部署自动执行，幂等） --------------------
   #
   # **不是 maintenance profile**：它挂在每次 `up` 的启动链上，由
   # `depends_on: service_completed_successfully` 让四个运行服务等它成功。
   # 运维因此不需要记住「这个库初始化过没有」，也不需要判断升级后该补哪一列：
-  # 容器自己比对 information_schema 与代码里的 DDL，缺表建表、缺列加列。
+  # 容器自己比对 information_schema 与代码里的 DDL，补齐缺失结构并检查运行 ID 列宽。
   #
   #   docker compose up -d --no-build          # 自动带上它
   #   docker compose run --rm runtime-migrate --check   # 只自检不改库
