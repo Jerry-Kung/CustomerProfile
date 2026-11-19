@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 import pytest
 
 from customer_profile.persistence import mysql_schema
@@ -86,6 +88,37 @@ def test_report_satisfied_requires_version():
     report.versions = [mysql_schema.SCHEMA_VERSION]
     assert report.satisfied
     assert report.describe() == "结构完整"
+
+
+def test_inspect_checks_run_id_width_even_with_current_version():
+    widths = {
+        ("workflow_runs", "run_id"): 48,
+        ("workflow_runs", "parent_run_id"): 128,
+        ("node_executions", "run_id"): 192,
+        ("node_executions", "sub_run_id"): 48,
+        ("request_attempts", "run_id"): 128,
+        ("profile_baselines", "source_run_id"): 48,
+    }
+    columns = Mock()
+    columns.fetchall.return_value = [
+        {"table_name": table, "column_name": column, "max_length": widths.get((table, column))}
+        for table, definitions in mysql_schema.expected_columns().items()
+        for column in definitions
+    ]
+    versions = Mock()
+    versions.fetchall.return_value = [{"version": mysql_schema.SCHEMA_VERSION}]
+    connection = Mock()
+    connection.execute.side_effect = [columns, versions, columns, versions]
+
+    report = mysql_schema.inspect(connection)
+    assert report.undersized_run_id_columns == {
+        "workflow_runs": {"run_id": 48},
+        "node_executions": {"sub_run_id": 48},
+        "profile_baselines": {"source_run_id": 48},
+    }
+    assert not report.satisfied
+    with pytest.raises(RuntimeError, match=r"workflow_runs\.run_id"):
+        mysql_schema.assert_expected_version(connection)
 
 
 def test_strict_not_null_detection():
