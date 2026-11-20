@@ -133,13 +133,16 @@ SECTION_KEYS: tuple[str, ...] = (
     "inferred_tags",
     "usage_scenarios",
     "communication_strategies",
-    "customer_overview",
     "purchase_motivations",
     "product_preferences",
     "resistances",
     "emotion_state",
 )
-"""卡片的 9 个 section（基线 ``analysis_result`` 的键，顺序即展示顺序）。
+"""卡片的 8 个 section（``analysis_result`` 的键，顺序即展示顺序）。
+
+``customer_overview`` **已下线**（2026-11-20）：商机等级由定级环节写进
+``ai_insight.purchase_intent_level``，成交概率由定级环节计算后直接进回传体，
+本层不再产出这一节，避免同一结论在两处各写一份。
 
 **这是对外产物契约，不是本模块的私有约定**——形状逐节对齐基线（见
 ``docs/business_opt01_v2/端到端方案设计.md`` §7.4 与 R1b 批次产物）。
@@ -450,9 +453,10 @@ def assemble_l3(
                 analysis_result[key] = sections[key]
 
     # ---- 上提归位：把被嵌进别的 section 里的节搬回顶层。
-    # 模型会偶发地把「第 6/7/8 节」理解为第 5 节（对象型）的子键，写进
-    # ``customer_overview`` 内部。此前这种输出会被下面的补空静默抹平——内容还在，
-    # 位置错了，卡片上就成了空白（v3.1 八案里有五案如此）。
+    # 模型会偶发地把数组型节理解为前一个对象型节的子键（历史上是写进
+    # ``customer_overview`` 内部，那一节已于 2026-11-20 下线；现在可能写进
+    # ``profile_summary`` / ``emotion_state``）。这种输出若不管，会被下面的补空
+    # 静默抹平——内容还在、位置错了，卡片上就成了空白（v3.1 八案里有五案如此）。
     # 顶层的值优先（``setdefault`` 不覆盖），所以正常输出不受影响。
     hoisted: list[str] = []
     for outer in SECTION_KEYS:
@@ -470,7 +474,7 @@ def assemble_l3(
             analysis_result[inner] = value.pop(inner)
             hoisted.append(inner)
 
-    # ---- 实到节数在**补空之前**统计。补空之后每个键都在，恒等于 9，
+    # ---- 实到节数在**补空之前**统计。补空之后每个键都在，恒等于节数，
     # 那样统计等于没统计——缺节必须是可见事件，而不是被补齐掩盖。
     arrived = [key for key in SECTION_KEYS if analysis_result.get(key)]
     missing = [key for key in SECTION_KEYS if not analysis_result.get(key)]
@@ -478,23 +482,6 @@ def assemble_l3(
     # 表达层漏掉的节补空形态，**不编造**：缺就是缺，卡片渲染时自行留白。
     for key in SECTION_KEYS:
         analysis_result.setdefault(key, [] if key in LIST_SECTIONS else {})
-
-    # ---- 商机等级由定级环节给定，表达层不得自行推断（v3.6）
-    # 等级的推理链是一次独立、足量的调用产出的；若让表达层按同一份 facts 再推一遍，
-    # 卡片上的等级与依据就会与 ``ai_insight`` 分叉——正是 production 时代的老毛病。
-    # 这里以定级结果**覆盖**表达层的 ``business_opp_level``。
-    from .. import projection as proj
-
-    level = proj.normalize_level(facts.get("deal_level"))
-    if level:
-        overview = analysis_result.get("customer_overview")
-        if not isinstance(overview, dict):
-            overview = {}
-        overview["business_opp_level"] = {
-            "value": level,
-            "reasoning_detail": _level_reasoning_detail(facts),
-        }
-        analysis_result["customer_overview"] = overview
 
     # ---- resistances **不写进 Notes**（2026-10-22）
     # 它在回传契约里已下线（``notes_contract`` 不含该键），回传体由 ``callback_build``
@@ -524,34 +511,7 @@ LIST_SECTIONS: frozenset[str] = frozenset(
     {"inferred_tags", "usage_scenarios", "communication_strategies",
      "purchase_motivations", "product_preferences", "resistances"}
 )
-"""数组形态的 section。其余是对象形态（``profile_summary`` / ``customer_overview`` /
-``emotion_state``）——形状逐节对齐基线。"""
-
-
-def _level_reasoning_detail(facts: dict) -> dict[str, Any]:
-    """商机等级的 ``reasoning_detail``：定级环节给了就用它的，否则给保守兜底。"""
-    raw = facts.get("deal_level_detail")
-    if isinstance(raw, dict):
-        steps = [str(s) for s in (raw.get("steps") or []) if str(s).strip()]
-        evidence = [str(s) for s in (raw.get("evidence") or []) if str(s).strip()]
-        confidence = raw.get("confidence")
-        if not isinstance(confidence, (int, float)):
-            confidence = 0.6
-        return {
-            "summary": str(raw.get("summary") or "").strip(),
-            "steps": steps,
-            "evidence": evidence,
-            "confidence": max(0.0, min(1.0, float(confidence))),
-        }
-    from .. import projection as proj
-
-    level = proj.normalize_level(facts.get("deal_level")) or ""
-    return {
-        "summary": f"综合客户数据判定商机等级为{level}",
-        "steps": ["综合客户的沟通记录与已知信息判定"],
-        "evidence": [],
-        "confidence": 0.6,
-    }
+"""数组形态的 section。其余是对象形态（``profile_summary`` / ``emotion_state``）。"""
 
 
 def build_invite_strategy() -> dict:

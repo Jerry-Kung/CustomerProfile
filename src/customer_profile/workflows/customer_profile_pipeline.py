@@ -47,7 +47,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from typing import Any
+
+from loguru import logger
 
 from .. import internal_fields as inf
 from .. import enum_mapping
@@ -3519,6 +3522,53 @@ LEVEL_EVIDENCE_MIN_CHARS = 12
 """证据最短长度。短于此的视为「半句对白」碎片剔除（证据已改为可读化陈述，见模板第五节）。"""
 
 
+CLOSING_PROBABILITY_RANGE: dict[str, tuple[int, int]] = {
+    "H": (60, 100),
+    "A": (40, 80),
+    "B": (20, 40),
+    "C": (5, 20),
+    "待识别": (5, 20),
+}
+"""成交概率的档位区间（含端点，百分点）。**等级定死之后概率不得越档**。
+
+取值口径沿用历史定级提示词（`customer_profile_production__1777373071079`）第 3 步，
+只补了 H 档——v3.6 之后新增了 H，历史表里没有它。
+"""
+
+
+def normalize_closing_probability(value, level: str) -> str:
+    """把模型给的成交概率收成 ``NN%``，并夹到该等级区间内。
+
+    模型输出形态不稳定（``65%`` / ``65`` / ``0.65`` / ``约65%``），这里统一兜底：
+
+    - 能读出数字就按百分点取整（``0.65`` 视作 65%，``65`` 视作 65%），
+      再对齐到 5 的倍数（区间外沿取整后的最近档）；
+    - **兜不出数字就不给**（返回空串），由调用方按「该字段不下发」处理——
+      宁可留空，也不编一个看起来合理的数字；
+    - 夹紧到 ``CLOSING_PROBABILITY_RANGE[level]``：越档的模型输出直接拉回边界，
+      因为等级是定级环节的结论，概率不能反过来改等级。
+
+    返回空串表示「本次不提供概率」，调用方不得把它当成 0%。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    digits = re.sub(r"[^\d.]", "", text)
+    if not digits:
+        return ""
+    try:
+        number = float(digits)
+    except ValueError:
+        return ""
+    if "%" not in text and 0 < number < 1:
+        # `0.65` 这类小数比例：乘 100 才是百分点
+        number *= 100
+    percent = int(round(number))
+    percent = int(round(percent / 5.0) * 5)
+    low, high = CLOSING_PROBABILITY_RANGE.get(level, (0, 100))
+    return f"{max(low, min(high, percent))}%"
+
+
 def _level_evidence_readable(evidence: str) -> bool:
     """证据是否像一条可独立阅读的陈述——只挡碎片，不再核对逐字原文。
 
@@ -3537,6 +3587,174 @@ def _as_list(value) -> list:
     if isinstance(value, str) and value.strip():
         return [value]
     return []
+
+
+PROBABILITY_DETAIL_KEYS: tuple[str, ...] = ("summary", "steps", "evidence", "confidence")
+"""``reasoning_detail`` 的契约四键。多一个少一个都算结构不符。"""
+
+
+def _validate_probability_detail(detail) -> tuple[dict, list[str]]:
+    """校验模型给的 ``reasoning_detail`` 结构，返回（可用的四键对象, 问题清单）。
+
+    **为什么不直接丢弃重算**：模型写的档内滑动理由比代码复述更贴近实际判断，
+    只要结构可用就该保留；只有**结构性错误**（不是对象、键名自造、数组给成字符串）
+    才记问题并退回兜底。问题清单一并返回，由 :func:`apply_level` 带去节点输出，
+    运行台上能直接看到「这次模型的输出不合格」，不必翻日志。
+    """
+    issues: list[str] = []
+    if detail is None:
+        return {}, ["缺少 closing_probability_reasoning"]
+    if not isinstance(detail, Mapping):
+        return {}, [f"closing_probability_reasoning 应为对象，实为 {type(detail).__name__}"]
+
+    unknown = set(detail) - set(PROBABILITY_DETAIL_KEYS)
+    if unknown:
+        issues.append(f"closing_probability_reasoning 出现多余键: {sorted(unknown)}")
+
+    result: dict = {}
+    summary = detail.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        result["summary"] = summary.strip()
+    elif summary is not None:
+        issues.append("summary 应为非空字符串")
+
+    for key in ("steps", "evidence"):
+        value = detail.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            issues.append(f"{key} 应为数组，实为字符串")
+            continue
+        if not isinstance(value, (list, tuple)):
+            issues.append(f"{key} 应为数组，实为 {type(value).__name__}")
+            continue
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        if cleaned:
+            result[key] = cleaned
+
+    confidence = detail.get("confidence")
+    if isinstance(confidence, bool):
+        issues.append("confidence 应为 0~1 的数字")
+    elif isinstance(confidence, (int, float)):
+        result["confidence"] = max(0.0, min(1.0, float(confidence)))
+    elif confidence is not None:
+        issues.append(f"confidence 应为 0~1 的数字，实为 {type(confidence).__name__}")
+
+    return result, issues
+
+
+_PROBABILITY_STEP_LIMIT = 3
+"""概率推理链上限。概览卡片只有一行位置，写多了也看不完。"""
+
+_PROBABILITY_EVIDENCE_LIMIT = 3
+"""概率依据上限：只留最能说明档内位置的那几条。"""
+
+
+def _probability_detail(
+    *,
+    probability: str,
+    level: str,
+    raw_value,
+    model_detail: dict,
+    dim_evidence: dict[str, list[str]],
+    homework: list[str],
+    level_confidence: float,
+    stage_code: str,
+    clamped: str,
+) -> dict:
+    """成交概率的 ``reasoning_detail``（四键），**从定级证据派生**而不另调模型。
+
+    设计取舍（2026-11-20）：概率与等级是同一次调用、同一批证据得出的结论，
+    让模型再写一段推理等于把同一件事说两遍，还会与等级推理链打架。因此这里只做
+    **结构化复述**：把定级已经给出的三类维度证据与推进动作，改写成「为什么落在
+    这个数值」的两三条因果链。
+
+    四个键的口径：
+
+    - ``steps``：为什么是这个数值，最多 3 条。必须含「档位区间」这一步——销售看数值
+      时会问「为什么不是更高」，答案就是档位锁死了上限；
+    - ``evidence``：支撑档内位置的**具体依据**，优先取实际推进动作（``homework``），
+      再取三维度证据。**只放可独立阅读的陈述**，不塞字段名；
+    - ``confidence``：比等级置信度略低一档。概率是在等级之上再细分，属于二次判断，
+      确定性不可能高于等级本身；模型给不出数值时进一步压低（它的判断本身不成立）；
+    - ``summary``：一句话结论，含等级→区间→数值。
+
+    概率缺失（空串）时返回全零结构，调用方据 ``probability`` 决定是否下发。
+    """
+    if not probability:
+        return {"summary": "", "steps": [], "evidence": [], "confidence": 0.0}
+
+    low, high = CLOSING_PROBABILITY_RANGE.get(level, (0, 100))
+
+    # 模型在新版提示词里直接给出了四键依据（档内滑动的理由）。它比代码复述更贴近
+    # 实际判断，因此**优先采用**；只有模型没给或给得不像样时，才退回下面的派生逻辑。
+    model_summary = str((model_detail or {}).get("summary") or "").strip()
+    model_steps = [str(x).strip() for x in (model_detail or {}).get("steps") or [] if str(x).strip()]
+    model_evidence = [str(x).strip() for x in (model_detail or {}).get("evidence") or [] if str(x).strip()]
+    model_confidence = (model_detail or {}).get("confidence")
+    if model_summary and model_steps and model_evidence:
+        try:
+            model_conf = float(model_confidence)
+        except (TypeError, ValueError):
+            model_conf = level_confidence * 0.9
+        # 概率是等级之上的二次判断，置信度不得高于等级本身
+        model_conf = max(0.0, min(1.0, min(model_conf, level_confidence)))
+        return {
+            "summary": model_summary,
+            "steps": model_steps[:_PROBABILITY_STEP_LIMIT],
+            "evidence": model_evidence[:_PROBABILITY_EVIDENCE_LIMIT],
+            "confidence": round(model_conf, 2),
+        }
+    steps: list[str] = [
+        f"等级已定为{level}，成交概率只能落在 {low}%~{high}% 区间内",
+    ]
+
+    # 第二、三条：说明档内为什么偏上/偏下，取「推进动作」与「时间窗口」两个最能解释
+    # 位置的维度——前者决定有没有实际动作，后者决定窗口远不远。
+    positive = [str(item).strip() for item in homework if str(item).strip()]
+    negative = [str(item).strip() for item in (dim_evidence.get("when_to_buy") or []) if str(item).strip()]
+    if positive:
+        steps.append("已有实质推进动作，档内位置取区间中上部")
+    elif negative:
+        steps.append("尚无实质推进动作，档内位置取区间中下部")
+
+    # 模型给了越档值、被夹紧回来的，要留痕——否则销售会以为模型本意就是这个数
+    normalized_raw = normalize_closing_probability(raw_value, level)
+    raw_percent = str(raw_value or "").strip()
+    if raw_percent and raw_percent not in (probability, normalized_raw):
+        steps.append(f"模型原值 {raw_percent} 超出本档区间，已按区间边界收口")
+    elif clamped in ("lead_stage_caps_at_A", "insufficient_multidimensional_evidence"):
+        steps.append("等级经规则收口后下调，概率同步下移到新档区间")
+
+    evidence: list[str] = []
+    for item in positive:
+        if item not in evidence:
+            evidence.append(item)
+        if len(evidence) >= _PROBABILITY_EVIDENCE_LIMIT:
+            break
+    if len(evidence) < _PROBABILITY_EVIDENCE_LIMIT:
+        for key in ("when_to_buy", "want_to_buy", "can_to_buy"):
+            for item in dim_evidence.get(key) or []:
+                if item not in evidence:
+                    evidence.append(item)
+                if len(evidence) >= _PROBABILITY_EVIDENCE_LIMIT:
+                    break
+            if len(evidence) >= _PROBABILITY_EVIDENCE_LIMIT:
+                break
+
+    # 概率是对等级之上的二次细分，置信度不可能高于等级本身
+    confidence = round(max(0.0, min(1.0, level_confidence)) * 0.9, 2)
+
+    summary = (
+        f"{LEVEL_STAGE_LABEL.get(stage_code, '')}客户，等级{level}对应 "
+        f"{low}%~{high}%，综合推进动作与时间窗口，判定成交概率 {probability}。"
+    )
+    return {
+        "summary": summary,
+        "steps": steps[:_PROBABILITY_STEP_LIMIT],
+        "evidence": evidence,
+        "confidence": confidence,
+    }
 
 
 def apply_level(
@@ -3691,10 +3909,59 @@ def apply_level(
     facts["deal_level_detail"] = detail
     facts["business_opp_stage"] = LEVEL_STAGE_LABEL[stage_code]
 
+    # ---- 5 成交概率：等级定死之后才收口，越档一律拉回区间
+    # 放在等级的所有收口（阶段上限 / 证据门槛 / 增量守卫）之后，
+    # 否则概率会按「模型当初以为的等级」定区间，与最终等级对不上。
+    # 约定形态（2026-11-20 起）：两个**平级**字段
+    #   "closing_probability": "35%"
+    #   "closing_probability_reasoning": {summary, steps, evidence, confidence}
+    # 与画像概览表的两列同名，回传层与读取层都不需要再做结构转换。
+    probability_raw = assess.get("closing_probability")
+    shape_issues: list[str] = []
+    if isinstance(probability_raw, Mapping):
+        # 误写成嵌套对象：数值还能救，但明确记一笔，提示词没生效时要能看见
+        shape_issues.append("closing_probability 写成了对象，应为裸字符串")
+        probability_raw = probability_raw.get("value")
+
+    model_detail, issues = _validate_probability_detail(
+        assess.get("closing_probability_reasoning")
+    )
+    shape_issues.extend(issues)
+    if shape_issues:
+        logger.warning(
+            "成交概率结构不符合约定（已按兜底处理）: {} | raw={} / {}",
+            "; ".join(shape_issues),
+            assess.get("closing_probability"),
+            assess.get("closing_probability_reasoning"),
+        )
+    probability = normalize_closing_probability(probability_raw, level)
+    probability_detail = _probability_detail(
+        probability=probability,
+        level=level,
+        raw_value=probability_raw,
+        model_detail=model_detail,
+        dim_evidence=dim_evidence,
+        homework=homework,
+        level_confidence=confidence,
+        stage_code=stage_code,
+        clamped=clamped,
+    )
+
+    # 写进 facts：L3 与回传体构造都只吃 facts，概览要读它就得落在这里。
+    # 键名沿用概览契约字段名，避免下游再做一层映射。
+    facts["closing_probability"] = probability
+    facts["closing_probability_detail"] = probability_detail
+
     return {
         "facts_json": json.dumps(facts, ensure_ascii=False, default=str),
         "level": level,
         "level_detail_json": json.dumps(detail, ensure_ascii=False, default=str),
+        "closing_probability": probability,
+        "closing_probability_detail_json": json.dumps(
+            probability_detail, ensure_ascii=False, default=str
+        ),
+        # 结构校验结果：空串表示模型输出符合约定；非空串是问题清单（已兜底但需排查）
+        "closing_probability_shape_issues": "；".join(shape_issues),
         "stage": stage_code,
         "rule_clamped": clamped,
         "evidence_fragments_removed": removed,
@@ -4359,6 +4626,11 @@ WORKFLOW = WorkflowDef(
                 "facts_json",
                 "level",
                 "level_detail_json",
+                # 成交概率：与等级同一次调用产出，在 apply_level 里按档位区间收口。
+                # 空串表示本次不提供（模型没给或给不出数字），下游按「不下发」处理。
+                "closing_probability",
+                "closing_probability_detail_json",
+                "closing_probability_shape_issues",
                 "stage",
                 "rule_clamped",
                 "evidence_fragments_removed",

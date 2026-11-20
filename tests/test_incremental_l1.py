@@ -146,7 +146,10 @@ def test_express_is_not_skipped_without_a_base():
 
 
 def test_assemble_reuses_previous_sections_when_express_did_not_run():
-    """表达层没跑（跳过路径）：装配照样出九节，用的是上一版的文本。"""
+    """表达层没跑（跳过路径）：装配照样出八节，用的是上一版的文本。
+
+    ``customer_overview`` 已下线（2026-11-20），复用清单里即使残留该键也不应再出现。
+    """
     reused = {
         "profile_summary": {"summary": "关注空间"},
         "inferred_tags": ["务实"],
@@ -168,4 +171,6 @@ def test_assemble_reuses_previous_sections_when_express_did_not_run():
     )
     result = json.loads(outcome["result1"])
     assert result["analysis_result"]["product_preferences"] == ["大空间"]
-    assert outcome["section_count"] == 9
+    assert outcome["section_count"] == 8
+    # 已下线的那节不得被复用回来
+    assert "customer_overview" not in result["analysis_result"]

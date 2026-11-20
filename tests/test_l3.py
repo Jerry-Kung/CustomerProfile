@@ -231,19 +231,21 @@ def test_assemble_reports_arrived_section_count_not_padded_count():
 
 
 def test_assemble_hoists_sections_nested_inside_another_section():
-    """表达层把 6/7/8/9 节写进 ``customer_overview`` 内部时，装配必须上提归位。
+    """表达层把后面的节写进前一个对象型节内部时，装配必须上提归位。
 
-    这是 v3.1 实测踩到的坑：提示词里第 6 节的标题与 7、8 挤在同一行，紧跟第 5 节
-    （对象型）之后，模型据此把这几节当成第 5 节的子键。原先的装配只抄顶层键，
+    这是 v3.1 实测踩到的坑：提示词里某节的标题与后面几节挤在同一行，紧跟一个
+    对象型 section 之后，模型据此把这几节当成它的子键。原先的装配只抄顶层键，
     嵌套的值被补空静默抹平——内容还在，位置错了，卡片上就成了空白。
+
+    历史上“被塞”的是 ``customer_overview``；该节已于 2026-11-20 下线，因此这里
+    改用仍存在的对象型节 ``profile_summary`` 作容器，守卫逻辑本身不变。
     """
     expr = json.dumps({"analysis_result": {
-        "profile_summary": {"gender": "男"},
-        "inferred_tags": [{"id": "tag_001", "title": "务实派"}],
-        "usage_scenarios": [{"id": "scn_001", "title": "通勤"}],
-        "communication_strategies": [{"strategy_name": "政策驱动策略"}],
-        "customer_overview": {
-            "business_opp_level": {"value": "A"},
+        "profile_summary": {
+            "gender": "男",
+            "inferred_tags": [{"id": "tag_001", "title": "务实派"}],
+            "usage_scenarios": [{"id": "scn_001", "title": "通勤"}],
+            "communication_strategies": [{"strategy_name": "政策驱动策略"}],
             "purchase_motivations": [{"motivation_name": "换购省钱"}],
             "product_preferences": [{"preference_name": "长续航"}],
             "resistances": [{"resistance_name": "价格不透明", "severity": "高"}],
@@ -258,15 +260,17 @@ def test_assemble_hoists_sections_nested_inside_another_section():
     assert sections["resistances"][0]["severity"] == "高"
     assert sections["emotion_state"]["current_state"]["value"] == "谨慎观望"
     # 上提后不得在原处留副本
-    assert "purchase_motivations" not in sections["customer_overview"]
-    assert "emotion_state" not in sections["customer_overview"]
-    # 第 5 节自己的子键不受影响
-    assert sections["customer_overview"]["business_opp_level"] == {"value": "A"}
-    # 归位算恢复，不算缺节
-    assert out["section_count"] == 9
+    assert "purchase_motivations" not in sections["profile_summary"]
+    assert "emotion_state" not in sections["profile_summary"]
+    # 容器自己的子键不受影响
+    assert sections["profile_summary"]["gender"] == "男"
+    # 归位算恢复，不算缺节（8 个 section 全到齐）
+    assert out["section_count"] == 8
     assert json.loads(out["sections_missing"]) == []
+    # 除容器自身（profile_summary）外，被塞进去的 7 节全部上提
     assert sorted(json.loads(out["sections_hoisted"])) == [
-        "emotion_state", "product_preferences", "purchase_motivations", "resistances",
+        "communication_strategies", "emotion_state", "inferred_tags",
+        "product_preferences", "purchase_motivations", "resistances", "usage_scenarios",
     ]
 
 
@@ -274,12 +278,12 @@ def test_assemble_prefers_top_level_value_over_nested_one():
     """顶层已有该节时，嵌套的那份是多余的，不得覆盖顶层。"""
     expr = json.dumps({"analysis_result": {
         "purchase_motivations": [{"motivation_name": "顶层"}],
-        "customer_overview": {"purchase_motivations": [{"motivation_name": "嵌套"}]},
+        "profile_summary": {"purchase_motivations": [{"motivation_name": "嵌套"}]},
     }}, ensure_ascii=False)
     out = l3.assemble_l3("1", "", "{}", notes_json(), expr)
     sections = json.loads(out["result1"])["analysis_result"]
     assert sections["purchase_motivations"] == [{"motivation_name": "顶层"}]
-    assert "purchase_motivations" not in sections["customer_overview"]
+    assert "purchase_motivations" not in sections["profile_summary"]
 
 
 def test_assemble_shape_matches_baseline():
@@ -288,45 +292,6 @@ def test_assemble_shape_matches_baseline():
     payload = json.loads(out["result1"])
     assert set(payload) == {"phone", "batch_id", "analysis_result"}
     assert set(payload["analysis_result"]) == set(l3.SECTION_KEYS) | {"basic_notes_updates"}
-
-
-def test_assemble_overrides_business_opp_level_with_the_dedicated_assessment():
-    """商机等级由定级环节给定，表达层自己写的一律被覆盖（v3.6）。
-
-    等级与其推理链是一次独立、足量的调用产出的；若让表达层按同一份 facts 再推一遍，
-    卡片与 ``ai_insight`` 就会出现两个说法。
-    """
-    facts = json.dumps(
-        {
-            "deal_level": "H",
-            "deal_level_detail": {
-                "summary": "条件已齐备",
-                "steps": ["已讨论订单与交付", "家属已同意"],
-                "evidence": ["明天来交定金"],
-                "confidence": 0.88,
-            },
-        },
-        ensure_ascii=False,
-    )
-    expr = json.dumps({"analysis_result": {
-        "customer_overview": {"business_opp_level": {"value": "C"}},
-    }}, ensure_ascii=False)
-    out = l3.assemble_l3("1", "", facts, notes_json(), expr)
-    overview = json.loads(out["result1"])["analysis_result"]["customer_overview"]
-    assert overview["business_opp_level"]["value"] == "H"
-    detail = overview["business_opp_level"]["reasoning_detail"]
-    assert detail["steps"] == ["已讨论订单与交付", "家属已同意"]
-    assert detail["confidence"] == 0.88
-
-
-def test_assemble_leaves_business_opp_level_alone_without_a_level():
-    """facts 里没有等级时不得凭空写一个——缺就是缺。"""
-    expr = json.dumps({"analysis_result": {
-        "customer_overview": {"business_opp_level": {"value": "A"}},
-    }}, ensure_ascii=False)
-    out = l3.assemble_l3("1", "", "{}", notes_json(), expr)
-    overview = json.loads(out["result1"])["analysis_result"]["customer_overview"]
-    assert overview["business_opp_level"] == {"value": "A"}
 
 
 def test_assemble_puts_notes_verbatim_into_analysis_result():

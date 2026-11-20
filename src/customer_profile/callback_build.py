@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any, Iterable, Mapping, Sequence
 
 from . import follow_up
@@ -1126,100 +1125,42 @@ def _resistances(express: Mapping[str, Any]) -> list[dict[str, Any]]:
 # 区块：customer_overview（客户概览）
 # ====================================================================
 
-OVERVIEW_VALUE_FIELDS: tuple[str, ...] = (
-    "customer_type",
-    "current_stage",
-    "closing_probability",
-    "core_issue",
-    "breakthrough_point",
-)
-"""概览里**由表达层给值**的字段。
+def build_customer_overview(view: _FactView) -> dict[str, Any]:
+    """``customer_overview``：**只输出成交概率，且是扁平结构**。
 
-``business_opp_level`` **不在此列**：等级由定级环节（``facts.deal_level``）唯一决定，
-表达层无权另推一套——与 ``ai_insight.purchase_intent_level`` 必须同源，否则卡片与
-成交洞察会给出两个等级（production 时代的老毛病）。
-"""
+    下发的形状固定为两个平级键（不是 ``{value, reasoning_detail}`` 嵌套）::
 
-_PROBABILITY_PATTERN = re.compile(r"^(\d{1,3})%$")
-"""成交概率的展示格式：``整数 + %``，如 ``82%``。"""
+        {"closing_probability": "35%",
+         "closing_probability_reasoning": {summary, steps, evidence, confidence}}
 
+    **为什么扁平**：这两个键直接对应画像概览表的两列
+    （``closing_probability`` / ``closing_probability_reasoning``），接口出去也是这两个
+    名字。用嵌套的话回传层与读取层要各做一次映射，中间任何一处漏掉都会变成「写了但读不到」。
 
-def _normalize_probability(value: Any) -> str | None:
-    """把成交概率归一到 ``NN%``；不符合的一律丢弃（返回 ``None``）。
+    2026-11-20 口径收窄：概览只保留这一项。客户类型 / 当前阶段 / 核心问题 / 突破点 /
+    商机等级不再经概览下发——等级走 ``ai_insight.purchase_intent_level``（两处各写一份
+    只会打架），其余四项在表达层已有归属，概览再存一份属于重复存储。
+    同时 L3 的 ``customer_overview`` 节整体下线，9 个板块变 8 个。
 
-    **必须带百分号**：不带 ``%`` 的数字在卡片上无法与「金额」「分数」区分，
-    而模型偶发会输出 ``0.82`` / ``82`` / ``约八成``。这里的容忍只做到「能唯一
-    读成百分比」为止：
+    **数据来源**：``facts.closing_probability`` 与 ``facts.closing_probability_detail``，
+    由定级节点（``pipeline_level_assess`` → ``apply_level``）在同一次 LLM 调用里产出，
+    并按 ``CLOSING_PROBABILITY_RANGE`` 夹紧到该等级的区间内。表达层即便写了同名项
+    也**一律忽略**，避免出现「卡片概率与等级档位对不上」。
 
-    - ``82%`` / `` 82% `` → ``82%``；
-    - ``0.82`` 与 ``82`` **不救**——前者可能是任意比例，后者单位不明，
-      宁可留空（前端展示为待补充）也不猜；
-    - 超出 0~100 的结果丢弃。
+    **契约语义：缺席＝保留原值，显式空值＝清空。** 因此概率为空时返回 ``{}``，
+    调用方据此**不写这个键**，库里的旧值保持不变。
     """
-    text = _as_text(value).strip()
-    match = _PROBABILITY_PATTERN.match(text)
-    if not match:
-        return None
-    number = int(match.group(1))
-    if number > 100:
-        return None
-    return f"{number}%"
-
-
-def build_customer_overview(
-    view: _FactView, express: Mapping[str, Any]
-) -> dict[str, Any]:
-    """``customer_overview``：表达层第 5 节，按 v2 契约透传给画像概览。
-
-    **为什么以前它是空的**：本模块只投影 6 个区块（``ai_insight`` /
-    ``purchase_decisions`` / ``deal_battle`` / ``decision_psychology`` /
-    ``follow_up_history`` / ``basic_notes_updates``），表达层的 ``customer_overview``
-    从来没被取用——模型算出来、L3 收进 ``analysis_result``、到这里被丢掉，于是画像
-    概览表六个字段只剩等级有值（那一个是 L3 兜底 + 接口侧同步补的）。
-
-    **契约语义：缺席＝保留原值，显式空值＝清空。** 因此：
-
-    - 字段的 ``value`` 为空 / 不合法时，**该字段整项不下发**，不是下发 ``null``；
-    - 六个字段一个都拿不到时返回 ``{}``，调用方据此**不写这个键**。
-
-    等级一律取 ``facts.deal_level``（定级环节的结论），表达层给的等级被忽略，
-    ``reasoning_detail`` 用定级环节的推导链（``facts.deal_level_detail``）。
-    """
-    source = express.get("customer_overview")
-    if not isinstance(source, Mapping):
+    probability = _as_text(view.facts.get("closing_probability")).strip()
+    if not probability:
         return {}
 
-    overview: dict[str, Any] = {}
-
-    for field in OVERVIEW_VALUE_FIELDS:
-        entry = source.get(field)
-        if not isinstance(entry, Mapping):
-            continue
-        raw = entry.get("value")
-        if field == "closing_probability":
-            value: Any = _normalize_probability(raw)
-        else:
-            value = _as_text(raw).strip()
-            # 概览字段都是短结论，过长说明模型写成了段落，截断而不是整条丢弃
-            value = value[:255] if value else ""
-        if not value:
-            continue
-        overview[field] = {
-            "value": value,
-            "reasoning_detail": _normalize_detail(
-                entry.get("reasoning_detail") if isinstance(entry.get("reasoning_detail"), Mapping) else {}
-            ),
-        }
-
-    level = proj.normalize_level(view.facts.get("deal_level"))
-    if level and level != "待识别":
-        # 待识别不是有效等级（信息不足），不下发以免覆盖库里已有的等级
-        overview["business_opp_level"] = {
-            "value": level,
-            "reasoning_detail": _level_detail(view),
-        }
-
-    return overview
+    detail = view.facts.get("closing_probability_detail")
+    return {
+        "closing_probability": probability,
+        "closing_probability_reasoning": _normalize_detail(
+            detail if isinstance(detail, Mapping) else {}
+        ),
+    }
 
 
 def build_deal_battle(
@@ -1565,7 +1506,7 @@ def build_analysis_result(
     # ---- customer_overview：表达层第 5 节。历史上这里只投影四个区块，
     # 概览被整节丢弃，导致画像概览表除了等级（L3 兜底 + 接口侧同步）之外全空。
     # 契约：缺席＝保留原值，显式空值＝清空；因此拿不到实质内容时不写这个键。
-    overview = build_customer_overview(view, express)
+    overview = build_customer_overview(view)
     if overview:
         analysis_result["customer_overview"] = overview
 

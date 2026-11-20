@@ -1131,123 +1131,251 @@ def _detail(summary="依据充分"):
     return {"summary": summary, "steps": ["有明确动作"], "evidence": ["客户原话"], "confidence": 0.8}
 
 
-def test_customer_overview_is_projected_not_dropped():
-    """第 5 节必须被透传出去。
+def test_customer_overview_carries_only_closing_probability():
+    """概览只输出成交概率一项（2026-11-20 口径收窄）。
 
-    回归：本模块以前只投影四个区块，表达层的 ``customer_overview`` 被整节丢弃，
-    导致画像概览表除等级外六个字段全空（真实案例：某客户 closing_probability 为 null）。
+    回归：本模块以前连整个 ``customer_overview`` 都不投影，概览全空；
+    之后短暂投影过 6 个字段，但除概率外的 5 项在别处已有归属，重复存储会打架。
     """
     payload = _build(
-        facts=_facts(deal_level="A"),
+        facts=_facts(
+            deal_level="A",
+            closing_probability="65%",
+            closing_probability_detail={"summary": "档内滑动取 65%", "steps": ["有推进动作"],
+                                        "evidence": ["客户已到店试驾"], "confidence": 0.7},
+        ),
         express=_overview_payload(
             customer_type={"value": "高效务实中产", "reasoning_detail": _detail()},
             current_stage={"value": "价格谈判", "reasoning_detail": _detail()},
             core_issue={"value": "交付周期", "reasoning_detail": _detail()},
             breakthrough_point={"value": "锁定现车", "reasoning_detail": _detail()},
-            closing_probability={"value": "82%", "reasoning_detail": _detail()},
         ),
     )
     overview = payload["analysis_result"]["customer_overview"]
-    assert overview["customer_type"]["value"] == "高效务实中产"
-    assert overview["current_stage"]["value"] == "价格谈判"
-    assert overview["core_issue"]["value"] == "交付周期"
-    assert overview["breakthrough_point"]["value"] == "锁定现车"
-    assert overview["closing_probability"]["value"] == "82%"
-    assert overview["closing_probability"]["reasoning_detail"]["summary"] == "依据充分"
+    # 扁平两项，不是 {value, reasoning_detail} 嵌套
+    assert set(overview) == {"closing_probability", "closing_probability_reasoning"}
+    assert overview["closing_probability"] == "65%"
+    assert overview["closing_probability_reasoning"]["summary"] == "档内滑动取 65%"
 
 
-@pytest.mark.parametrize("raw", ["82%", " 82% ", "100%", "0%"])
-def test_closing_probability_accepts_percent_form(raw):
+def test_overview_omitted_when_probability_missing():
+    """没有概率就不写这个键——缺席＝保留库里原值，写空对象会清空概览。"""
     payload = _build(
         facts=_facts(deal_level="B"),
-        express=_overview_payload(closing_probability={"value": raw, "reasoning_detail": _detail()}),
+        express=_overview_payload(customer_type={"value": "务实型", "reasoning_detail": _detail()}),
     )
-    assert payload["analysis_result"]["customer_overview"]["closing_probability"]["value"] == raw.strip()
+    assert "customer_overview" not in payload["analysis_result"]
 
 
-@pytest.mark.parametrize("raw", ["82", "0.82", "约八成", "82 %", "+82%", "101%", "-5%", "", None])
-def test_closing_probability_rejects_non_percent_form(raw):
-    """必须是 ``NN%``：无百分号的数字无法与金额/分数区分，宁可留空也不猜。"""
+def test_closing_probability_comes_from_facts_not_express():
+    """概率只有一个来源：定级节点写进 facts 的那个值；表达层的同名项一律忽略。"""
     payload = _build(
-        facts=_facts(deal_level="B"),
-        express=_overview_payload(closing_probability={"value": raw, "reasoning_detail": _detail()}),
-    )
-    assert "closing_probability" not in payload["analysis_result"]["customer_overview"]
-
-
-def test_overview_level_follows_facts_not_express():
-    """等级以定级环节的 ``deal_level`` 为准，表达层写的等级被忽略。"""
-    payload = _build(
-        facts=_facts(deal_level="a级"),
-        express=_overview_payload(business_opp_level={"value": "H", "reasoning_detail": _detail()}),
-    )
-    level = payload["analysis_result"]["customer_overview"]["business_opp_level"]
-    assert level["value"] == "A"
-
-
-def test_overview_level_matches_ai_insight_level():
-    """概览的等级与 ``ai_insight.purchase_intent_level`` 必须同源，不能出现两个等级。"""
-    payload = _build(
-        facts=_facts(deal_level="C"),
-        express=_overview_payload(customer_type={"value": "价格敏感型", "reasoning_detail": _detail()}),
-    )
-    result = payload["analysis_result"]
-    assert result["customer_overview"]["business_opp_level"]["value"] == "C"
-    assert result["ai_insight"]["purchase_intent_level"]["value"] == "C"
-
-
-def test_overview_omitted_entirely_when_nothing_usable():
-    """拿不到任何实质内容时不写这个键——缺席＝保留原值，写空对象会清空概览。"""
-    assert "customer_overview" not in _build(facts=_facts(), express=_express())["analysis_result"]
-    empty = _build(
-        facts=_facts(),
-        express=_overview_payload(customer_type={"value": "", "reasoning_detail": _detail()}),
-    )
-    assert "customer_overview" not in empty["analysis_result"]
-
-
-def test_overview_empty_fields_are_dropped_not_nulled():
-    """单字段为空时整项不下发，而不是下发 null（null 会被当成显式清空）。"""
-    payload = _build(
-        facts=_facts(deal_level="B"),
+        facts=_facts(deal_level="B", closing_probability="30%"),
         express=_overview_payload(
-            customer_type={"value": "务实型", "reasoning_detail": _detail()},
-            core_issue={"value": "", "reasoning_detail": _detail()},
+            closing_probability={"value": "88%", "reasoning_detail": _detail("表达层的值")},
         ),
     )
     overview = payload["analysis_result"]["customer_overview"]
-    assert overview["customer_type"]["value"] == "务实型"
-    assert "core_issue" not in overview
+    assert overview["closing_probability"] == "30%"
 
 
-def test_overview_reasoning_detail_always_four_keys():
-    """概览内每个 ``reasoning_detail`` 都是四键，与其它区块一致。"""
+@pytest.mark.parametrize("level,probability", [
+    ("H", "60%"), ("H", "100%"), ("A", "40%"), ("A", "80%"),
+    ("B", "20%"), ("B", "40%"), ("C", "5%"), ("C", "20%"),
+])
+def test_closing_probability_kept_within_level_range(level, probability):
+    """区间端点是合法的：回传层不再重复校验区间（收口在 apply_level）。"""
     payload = _build(
-        facts=_facts(deal_level="A"),
-        express=_overview_payload(
-            customer_type={"value": "务实型", "reasoning_detail": {"summary": "只说了一句"}},
-        ),
+        facts=_facts(deal_level=level, closing_probability=probability),
+        express=_overview_payload(),
     )
-    detail = payload["analysis_result"]["customer_overview"]["customer_type"]["reasoning_detail"]
+    assert payload["analysis_result"]["customer_overview"]["closing_probability"] == probability
+
+
+def test_probability_reasoning_detail_always_four_keys():
+    """概览内 ``reasoning_detail`` 仍是四键，与其它区块一致。"""
+    payload = _build(
+        facts=_facts(deal_level="A", closing_probability="65%",
+                     closing_probability_detail={"summary": "只说了一句"}),
+        express=_overview_payload(),
+    )
+    detail = payload["analysis_result"]["customer_overview"]["closing_probability_reasoning"]
     assert set(detail) == {"summary", "steps", "evidence", "confidence"}
 
 
-def test_overview_level_detail_comes_from_level_chain():
-    """等级依据取定级环节的推理链，而不是表达层那句话。"""
-    chain = {"summary": "定级结论：A", "steps": ["证据一", "证据二"], "evidence": ["原文"], "confidence": 0.9}
-    payload = _build(
-        facts=_facts(deal_level="A", deal_level_detail=chain),
-        express=_overview_payload(customer_type={"value": "务实型", "reasoning_detail": _detail()}),
+# ---------------------------------------------------------------- 概率收口（apply_level）
+
+def _apply_level(assess: dict, level_hint: str = "", records="[]", facts="{}", stage=""):
+    from customer_profile.workflows import customer_profile_pipeline as pipe
+
+    return pipe.apply_level(
+        records, facts, json.dumps(assess, ensure_ascii=False), stage=stage
     )
-    level = payload["analysis_result"]["customer_overview"]["business_opp_level"]
-    assert level["reasoning_detail"]["summary"] == "定级结论：A"
-    assert level["reasoning_detail"]["steps"] == ["证据一", "证据二"]
 
 
-def test_overview_skips_pending_level():
-    """待识别不是有效等级，不覆盖库里已有等级。"""
-    payload = _build(
-        facts=_facts(deal_level="待识别"),
-        express=_overview_payload(customer_type={"value": "务实型", "reasoning_detail": _detail()}),
+@pytest.mark.parametrize("level,raw,expected", [
+    # 档内正常值：原样（已对齐 5 的倍数）
+    ("B", "30%", "30%"),
+    ("A", "65%", "65%"),
+    ("H", "90%", "90%"),
+    # 越档：拉回区间边界
+    ("C", "85%", "20%"),
+    ("C", "1%", "5%"),
+    ("B", "90%", "40%"),
+    ("A", "95%", "80%"),
+    ("H", "10%", "60%"),
+    # 形态归一
+    ("B", "30", "30%"),
+    ("B", "0.3", "30%"),
+    ("B", " 约30% ", "30%"),
+    ("B", "33%", "35%"),
+    ("B", "32%", "30%"),
+])
+def test_probability_is_clamped_into_level_range(level, raw, expected):
+    """概率必须落在等级区间内：等级定了就不能被概率反过来改。"""
+    from customer_profile.workflows.customer_profile_pipeline import (
+        normalize_closing_probability,
     )
-    assert "business_opp_level" not in payload["analysis_result"]["customer_overview"]
+
+    assert normalize_closing_probability(raw, level) == expected
+
+
+@pytest.mark.parametrize("raw", ["", None, "待评估", "高", "%"])
+def test_probability_without_number_is_omitted(raw):
+    """读不出数字就不给：空串表示「本次不提供」，绝不当成 0%。"""
+    from customer_profile.workflows.customer_profile_pipeline import (
+        normalize_closing_probability,
+    )
+
+    assert normalize_closing_probability(raw, "B") == ""
+
+
+def test_apply_level_returns_probability_and_writes_facts():
+    """概率由 apply_level 写进 facts，L3 与回传体都从 facts 取，保证同源。"""
+    assess = {
+        "stage": "lead",
+        "level": "B",
+        "closing_probability": "30%",
+        "confidence": 0.7,
+        "time_window": "30天内",
+        "dimensions": {
+            "want_to_buy": {"value": "有换购需求", "evidence": ["客户明确说要换一台大空间的车"]},
+            "can_to_buy": {"value": "预算匹配", "evidence": ["客户主动询问落地价并按预算核算"]},
+            "when_to_buy": {"value": "30天内", "evidence": ["客户说这个月内定，但未约到店时间"]},
+        },
+        "homework_evidence": ["客户主动要求算落地价，属于实质推进动作"],
+        "steps": ["需求真实", "预算匹配", "时间窗口不明确，定为B"],
+        "summary": "需求与预算具备，时间窗口未落实，定为B",
+    }
+    out = _apply_level({"level": "B", **assess})
+    facts = json.loads(out["facts_json"])
+    assert out["closing_probability"] == "30%"
+    assert facts["closing_probability"] == "30%"
+    assert facts["closing_probability_detail"]["summary"]
+    assert out["parse_ok"] is True
+
+
+def test_apply_level_clamps_probability_after_downgrade():
+    """阶段上限把 H 压成 A 之后，概率要按 A 的区间重新收口（不能留 H 的 90%）。"""
+    assess = {
+        "level": "H",
+        "closing_probability": "90%",
+        "confidence": 0.8,
+        "time_window": "7天内",
+        "dimensions": {
+            "want_to_buy": {"value": "需求明确", "evidence": ["客户明确表示要买这台车"]},
+            "can_to_buy": {"value": "预算充足", "evidence": ["客户全款且已有牌照指标"]},
+            "when_to_buy": {"value": "7天内", "evidence": ["客户约定本周到店交定金"]},
+        },
+        "homework_evidence": ["客户已明确约定到店交定金的时间"],
+        "steps": ["需求明确", "条件具备", "时间在7天内"],
+        "summary": "各项条件具备",
+    }
+    # stage=lead 时 H 被压到 A（LEVEL-02），随后证据门槛（LEVEL-03）再降到 B：
+    # 概率要跟着最终等级走，落到 B 的区间（20~40），而不是停在 H 的 90%。
+    out = _apply_level(assess, stage="lead")
+    assert out["level"] == "B"
+    assert out["closing_probability"] == "40%"
+
+
+# ---------------------------------------------------------------- 概率结构校验
+
+def _assess_with_probability(probability, reasoning=None):
+    """造一份最小可用的定级结果。
+
+    ``probability`` 为 ``closing_probability``；``reasoning`` 为平级的
+    ``closing_probability_reasoning``（不传就不带这个键）。
+    """
+    return {
+        "stage": "lead",
+        "level": "B",
+        "confidence": 0.72,
+        "closing_probability": probability,
+        **({"closing_probability_reasoning": reasoning} if reasoning is not None else {}),
+        "dimensions": {
+            "want_to_buy": {"value": "需求明确", "evidence": ["客户明确表示年内换车"]},
+            "can_to_buy": {"value": "预算匹配", "evidence": ["客户主动按预算核算落地价"]},
+            "when_to_buy": {"value": "30天内", "evidence": ["客户说这个月内定但未约到店"]},
+        },
+        "homework_evidence": ["客户已完成试驾并主动询问交付时间"],
+        "steps": ["需求明确", "预算匹配", "时间未落实，定为B"],
+        "summary": "需求与预算具备，时间未落定，定为B",
+    }
+
+
+def test_probability_structure_ok_has_no_issues():
+    """符合约定时不报结构问题，且模型给的依据被完整采用。"""
+    out = _apply_level(_assess_with_probability("35%", {
+        "summary": "综合意向、阻力与阶段评估。",
+        "steps": ["存在价格与交付两项阻力"],
+        "evidence": ["决策阻力：价格敏感、交付顾虑"],
+        "confidence": 0.7,
+    }))
+    assert out["closing_probability_shape_issues"] == ""
+    detail = json.loads(out["closing_probability_detail_json"])
+    assert detail["summary"] == "综合意向、阻力与阶段评估。"
+    assert detail["steps"] == ["存在价格与交付两项阻力"]
+
+
+@pytest.mark.parametrize("probability,reasoning,expected_issue", [
+    # 概率写成了嵌套对象（旧形态）
+    ({"value": "35%", "reasoning_detail": {"summary": "x"}}, None, "写成了对象"),
+    # 缺依据对象
+    ("35%", None, "缺少 closing_probability_reasoning"),
+    # 依据写成字符串
+    ("35%", "综合评估", "应为对象"),
+    # 数组写成字符串
+    ("35%", {"summary": "x", "steps": "有阻力", "evidence": ["原话"]}, "steps 应为数组"),
+    ("35%", {"summary": "x", "steps": ["a"], "evidence": "原话"}, "evidence 应为数组"),
+    # 自造键
+    ("35%", {"summary": "x", "steps": ["a"], "evidence": ["b"], "reason": "自造"}, "多余键"),
+])
+def test_probability_structure_issues_are_reported(probability, reasoning, expected_issue):
+    """结构不符要能被发现——否则模型一直输出错形状也没人知道。"""
+    out = _apply_level(_assess_with_probability(probability, reasoning))
+    assert expected_issue in out["closing_probability_shape_issues"]
+    # 已经兜底：数值仍然拿到
+    assert out["closing_probability"] == "35%"
+
+
+def test_probability_falls_back_when_detail_unusable():
+    """模型依据不可用时退到从定级证据派生，而不是留空让卡片没依据。"""
+    out = _apply_level(_assess_with_probability(
+        "35%", {"summary": "", "steps": [], "evidence": []}
+    ))
+    detail = json.loads(out["closing_probability_detail_json"])
+    assert detail["summary"]
+    assert detail["steps"]
+    assert detail["evidence"]
+
+
+def test_probability_confidence_never_exceeds_level_confidence():
+    """概率是等级之上的二次判断，置信度不得高于等级本身。"""
+    out = _apply_level(_assess_with_probability("35%", {
+        "summary": "综合评估",
+        "steps": ["有阻力"],
+        "evidence": ["价格敏感"],
+        "confidence": 0.99,
+    }))
+    detail = json.loads(out["closing_probability_detail_json"])
+    assert detail["confidence"] <= 0.72

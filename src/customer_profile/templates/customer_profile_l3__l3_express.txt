@@ -1,7 +1,7 @@
 你的任务是**把一份已经定稿的客户事实，写成一张销售看的人设画像卡**。
 
 **你不是在分析客户，也不是在补充事实。** 上游已经用代码规则把事实定稿了——下面给你的
-`facts` 就是**唯一的事实来源**。你的工作只有两件：**组织**（把平铺的字段归到 9 个板块）
+`facts` 就是**唯一的事实来源**。你的工作只有两件：**组织**（把平铺的字段归到 8 个板块）
 与**措辞**（写成销售能一眼看懂的短句）。
 
 ## 一、事实定稿（唯一事实来源）
@@ -48,13 +48,15 @@
    （「一手交互」「第三方预测」之类）、字段键名（如 `core_concerns`）、英文键或
    「未知渠道」这类占位串。
 
-## 四、要输出的 9 个板块
+## 四、要输出的 8 个板块
 
 逐个输出下列键，形状如下。
 
-**这 9 个键是平级的**，一律平铺在 `analysis_result` 之下，没有从属关系。**不得**把其中任何
-一个嵌进另一个板块内部（例：把 `purchase_motivations` 写进 `customer_overview` 里面）。
-每个键的值只装它自己那一节的内容。
+**这 8 个键是平级的**，一律平铺在 `analysis_result` 之下，没有从属关系。**不得**把其中任何
+一个嵌进另一个板块内部。每个键的值只装它自己那一节的内容。
+
+> `customer_overview` 已从本层下线：商机等级由定级环节产出（写入 `ai_insight`），
+> 成交概率同样由定级环节计算并直接回传，本层不再需要这两个板块。
 
 ### 1. `profile_summary`（对象）
 ```
@@ -90,20 +92,7 @@
 ```
 - 优先从上面的邀约策略库里选策略与话术，不要另造。
 
-### 5. `customer_overview`（对象）
-```
-{"business_opp_level": {"value": "", "reasoning_detail": {...}},
- "closing_probability": {"value": "", "reasoning_detail": {...}},
- "customer_type": {"value": "", "reasoning_detail": {...}},
- "current_stage": {"value": "", "reasoning_detail": {...}},
- "core_issue": {"value": "", "reasoning_detail": {...}},
- "breakthrough_point": {"value": "", "reasoning_detail": {...}}}
-```
-- `business_opp_level` **必须**与客户信息里的「商机等级」一致（同一个值，不得写出两个等级）；
-  它的 `reasoning_detail` 以客户信息里的商机定级结论为准（照实组织，不要另推一套等级）；
-- 其余各项是判断类结论，措辞可以给，但依据只能来自客户信息。
-
-### 6. `purchase_motivations`（数组，0–4 项）
+### 5. `purchase_motivations`（数组，0–4 项）
 ```
 [{"motivation_name": "", "description": "", "rank_order": 1, "reasoning_detail": {...}}]
 ```
@@ -111,7 +100,7 @@
   不要因为表里没有直接写着「购车动机」四个字就交空数组；
 - 确实一条相关线索都没有（相关字段全空）时，才给空数组。
 
-### 7. `product_preferences`（数组，0–4 项）
+### 6. `product_preferences`（数组，0–4 项）
 ```
 [{"preference_name": "", "description": "", "reasoning_detail": {...}}]
 ```
@@ -119,14 +108,14 @@
 - **先看客户信息再决定写不写**：其中有车型意向、关注点、用车需求，就据此写出对应条目；
 - 确实一条相关线索都没有时，才给空数组。
 
-### 8. `resistances`（数组，0–4 项）
+### 7. `resistances`（数组，0–4 项）
 ```
 [{"resistance_name": "", "severity": "", "description": "", "reasoning_detail": {...}}]
 ```
 - **先看客户信息再决定写不写**：其中有吐槽点、顾虑、比价行为，就据此写出对应条目；
 - 确实一条相关线索都没有时，才给空数组。
 
-### 9. `emotion_state`（对象）
+### 8. `emotion_state`（对象）
 ```
 {"current_state": {"value": "", "reasoning_detail": {...}},
  "brand_attitude": {"value": "", "reasoning_detail": {...}},
@@ -154,7 +143,7 @@
 
 ## 六、输出格式
 
-只输出一个 JSON 对象，9 个键都在：
+只输出一个 JSON 对象，8 个键都在：
 
 ```json
 {"analysis_result": {
@@ -162,7 +151,6 @@
   "inferred_tags": [...],
   "usage_scenarios": [...],
   "communication_strategies": [...],
-  "customer_overview": {...},
   "purchase_motivations": [...],
   "product_preferences": [...],
   "resistances": [...],

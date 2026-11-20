@@ -43,13 +43,15 @@ SECTIONS: tuple[str, ...] = (
     "inferred_tags",
     "usage_scenarios",
     "communication_strategies",
-    "customer_overview",
     "purchase_motivations",
     "product_preferences",
     "resistances",
     "emotion_state",
 )
-"""回传体里会被沿用的九板块（表达跳过时整段复用）。"""
+"""回传体里会被沿用的八个板块（表达跳过时整段复用）。
+
+``customer_overview`` 已下线（2026-11-20）：该节由定级环节与回传层各自产出，
+不再来自表达层的 section 复用。"""
 
 
 def _payload(value: Any) -> Any:
@@ -197,7 +199,7 @@ def assemble_base_claims(
 
     - ``fields_json``：与 ``localize_claims`` 同形的断言 JSON，直接喂 ``project_claims``；
     - ``facts``：上一版事实表（表达跳过时用来判「事实有没有变」）；
-    - ``sections``：上一版九板块（表达跳过时整段复用）；
+    - ``sections``：上一版八个板块（表达跳过时整段复用）；
     - ``stats``：三条规则各命中多少次，进运行台留痕。
 
     任何一步解析失败都**退回空底座**，调度层据此落 T3——宁可多跑一次全量，也不要拿
