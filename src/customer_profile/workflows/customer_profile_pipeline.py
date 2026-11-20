@@ -3524,15 +3524,15 @@ LEVEL_EVIDENCE_MIN_CHARS = 12
 
 CLOSING_PROBABILITY_RANGE: dict[str, tuple[int, int]] = {
     "H": (60, 100),
-    "A": (40, 80),
-    "B": (20, 40),
-    "C": (5, 20),
-    "待识别": (5, 20),
+    "A": (40, 59),
+    "B": (20, 39),
+    "C": (1, 19),
+    "待识别": (1, 19),
 }
 """成交概率的档位区间（含端点，百分点）。**等级定死之后概率不得越档**。
 
-取值口径沿用历史定级提示词（`customer_profile_production__1777373071079`）第 3 步，
-只补了 H 档——v3.6 之后新增了 H，历史表里没有它。
+逐档对齐《成交概率》设计文档 §2.3：上界归高档、避免端点重叠，
+因此 A 档到 59、B 档到 39、C 档到 19，而不是取整十的端点。
 """
 
 
@@ -3563,8 +3563,9 @@ def normalize_closing_probability(value, level: str) -> str:
     if "%" not in text and 0 < number < 1:
         # `0.65` 这类小数比例：乘 100 才是百分点
         number *= 100
+    # **不强制对齐 5 的倍数**：文档只要求是整数。强制对齐会把 52/53 这类
+    # 本可以体现档内差异的值压回整档，反而让概率趋同。
     percent = int(round(number))
-    percent = int(round(percent / 5.0) * 5)
     low, high = CLOSING_PROBABILITY_RANGE.get(level, (0, 100))
     return f"{max(low, min(high, percent))}%"
 

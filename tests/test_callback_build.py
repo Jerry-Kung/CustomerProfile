@@ -1180,8 +1180,8 @@ def test_closing_probability_comes_from_facts_not_express():
 
 
 @pytest.mark.parametrize("level,probability", [
-    ("H", "60%"), ("H", "100%"), ("A", "40%"), ("A", "80%"),
-    ("B", "20%"), ("B", "40%"), ("C", "5%"), ("C", "20%"),
+    ("H", "60%"), ("H", "100%"), ("A", "40%"), ("A", "59%"),
+    ("B", "20%"), ("B", "39%"), ("C", "1%"), ("C", "19%"),
 ])
 def test_closing_probability_kept_within_level_range(level, probability):
     """区间端点是合法的：回传层不再重复校验区间（收口在 apply_level）。"""
@@ -1214,25 +1214,29 @@ def _apply_level(assess: dict, level_hint: str = "", records="[]", facts="{}", s
 
 
 @pytest.mark.parametrize("level,raw,expected", [
-    # 档内正常值：原样（已对齐 5 的倍数）
+    # 档内正常值：原样保留（**不对齐 5 的倍数**，52/47 这类值要能留住档内差异）
     ("B", "30%", "30%"),
-    ("A", "65%", "65%"),
+    ("A", "52%", "52%"),
+    ("B", "33%", "33%"),
     ("H", "90%", "90%"),
-    # 越档：拉回区间边界
-    ("C", "85%", "20%"),
-    ("C", "1%", "5%"),
-    ("B", "90%", "40%"),
-    ("A", "95%", "80%"),
+    # 越档：拉回区间边界（区间按设计文档，上界归高档不重叠）
+    ("C", "85%", "19%"),
+    ("B", "90%", "39%"),
+    ("A", "95%", "59%"),
+    ("A", "10%", "40%"),
     ("H", "10%", "60%"),
+    ("C", "0%", "1%"),
     # 形态归一
     ("B", "30", "30%"),
     ("B", "0.3", "30%"),
     ("B", " 约30% ", "30%"),
-    ("B", "33%", "35%"),
-    ("B", "32%", "30%"),
 ])
 def test_probability_is_clamped_into_level_range(level, raw, expected):
-    """概率必须落在等级区间内：等级定了就不能被概率反过来改。"""
+    """概率必须落在等级区间内：等级定了就不能被概率反过来改。
+
+    **不强制 5 的倍数**：文档只要求整数，强制对齐会把 52/47 压回整档，
+    反而让概率趋同（这是三个 A 级客户都给 55% 的原因之一）。
+    """
     from customer_profile.workflows.customer_profile_pipeline import (
         normalize_closing_probability,
     )
@@ -1292,10 +1296,10 @@ def test_apply_level_clamps_probability_after_downgrade():
         "summary": "各项条件具备",
     }
     # stage=lead 时 H 被压到 A（LEVEL-02），随后证据门槛（LEVEL-03）再降到 B：
-    # 概率要跟着最终等级走，落到 B 的区间（20~40），而不是停在 H 的 90%。
+    # 概率要跟着最终等级走，落到 B 的区间（20~39），而不是停在 H 的 90%。
     out = _apply_level(assess, stage="lead")
     assert out["level"] == "B"
-    assert out["closing_probability"] == "40%"
+    assert out["closing_probability"] == "39%"
 
 
 # ---------------------------------------------------------------- 概率结构校验

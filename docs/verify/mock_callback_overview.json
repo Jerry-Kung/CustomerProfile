@@ -3,166 +3,44 @@
   "batch_id": "mock-batch-20261120",
   "analysis_result": {
     "profile_summary": {
-      "name": "刘"
+      "name": "测试",
+      "gender": "男"
     },
     "basic_notes_updates": [],
     "ai_insight": {
       "purchase_intent_level": {
-        "value": "A",
+        "value": "B",
         "reasoning_detail": {
-          "summary": "客户增购六座家用车需求明确、车型锁定、支付条件具备，已进入价格核算阶段；但试驾未兑现、计划时间在3个月内，未达H级，故定为A级。",
+          "summary": "需求与支付条件具备，时间未落定，定为B",
           "steps": [
-            "意向车型M817 MAX已锁定，需求明确",
-            "全款、已有牌照、无置换，支付与上牌条件具备",
-            "已带家人到店看车并获认可，家庭决策障碍基本消除",
-            "试驾多次排程取消，动作尚未兑现",
-            "计划3个月内购车，时间窗口未达7天内"
+            "需求明确",
+            "支付条件具备",
+            "时间窗口未落实，定为B"
           ],
           "evidence": [
-            "客户留资即选择M817 MAX",
-            "跟进记录显示客户带妻子到店看车",
-            "客户资料显示全款、有牌照、无置换"
+            "客户明确表示要增购一台六座家用车",
+            "客户资料显示全款、已有牌照、无置换",
+            "客户说计划3个月内购车，但未约到店",
+            "客户主动询问购车政策，属于实质推进动作"
           ],
-          "confidence": 0.7
-        }
-      },
-      "customer_segment": {
-        "value": "务实顾家六座刚需客",
-        "reasoning_detail": {
-          "summary": "根据客户整体表现归纳的客户群标签",
-          "steps": [
-            "根据客户在沟通中表现出的整体特点归纳"
-          ],
-          "evidence": [],
-          "confidence": 0.7
+          "confidence": 0.72
         }
       }
     },
     "customer_overview": {
-      "customer_type": {
-        "value": "务实顾家六座刚需客",
-        "reasoning_detail": {
-          "summary": "增购六座家用车，关注空间与家庭乘坐体验。",
-          "steps": [
-            "增购需求明确",
-            "用车场景为家庭出行"
-          ],
-          "evidence": [
-            "留资意向M817 MAX"
-          ],
-          "confidence": 0.8
-        }
-      },
-      "current_stage": {
-        "value": "价格核算阶段",
-        "reasoning_detail": {
-          "summary": "客户已主动询问购车政策，进入价格核算。",
-          "steps": [
-            "需求已确认",
-            "开始询问政策"
-          ],
-          "evidence": [
-            "跟进记录：客户主动询问购车政策"
-          ],
-          "confidence": 0.8
-        }
-      },
-      "closing_probability": {
-        "value": "72%",
-        "reasoning_detail": {
-          "summary": "需求与车型已收口、支付条件具备，仅试驾未兑现与交付周期两处不确定，综合判断七成左右。",
-          "steps": [
-            "需求收口，无需产品教育",
-            "支付与上牌条件具备",
-            "试驾未兑现削弱确定性"
-          ],
-          "evidence": [
-            "客户资料显示全款、有牌照、无置换",
-            "跟进记录显示试驾排程取消一次"
-          ],
-          "confidence": 0.72
-        }
-      },
-      "core_issue": {
-        "value": "试驾未完成，交付时间不确定",
-        "reasoning_detail": {
-          "summary": "成交动作已具备，卡在试驾兑现与交付节点。",
-          "steps": [
-            "价格已进入核算",
-            "试驾尚未完成"
-          ],
-          "evidence": [
-            "跟进记录显示试驾排程取消"
-          ],
-          "confidence": 0.75
-        }
-      },
-      "breakthrough_point": {
-        "value": "锁定试驾与交付节点",
-        "reasoning_detail": {
-          "summary": "给出确定的试驾与交付时间可即时推进。",
-          "steps": [
-            "价格已进入核算",
-            "只差行动兑现"
-          ],
-          "evidence": [
-            "客户多次表示周末有空"
-          ],
-          "confidence": 0.78
-        }
-      },
-      "business_opp_level": {
-        "value": "A",
-        "reasoning_detail": {
-          "summary": "客户增购六座家用车需求明确、车型锁定、支付条件具备，已进入价格核算阶段；但试驾未兑现、计划时间在3个月内，未达H级，故定为A级。",
-          "steps": [
-            "意向车型M817 MAX已锁定，需求明确",
-            "全款、已有牌照、无置换，支付与上牌条件具备",
-            "已带家人到店看车并获认可，家庭决策障碍基本消除",
-            "试驾多次排程取消，动作尚未兑现",
-            "计划3个月内购车，时间窗口未达7天内"
-          ],
-          "evidence": [
-            "客户留资即选择M817 MAX",
-            "跟进记录显示客户带妻子到店看车",
-            "客户资料显示全款、有牌照、无置换"
-          ],
-          "confidence": 0.7
-        }
+      "closing_probability": "35%",
+      "closing_probability_reasoning": {
+        "summary": "综合意向、阻力与阶段评估，等级 B 对应 20%~40%，判定成交概率 35%。",
+        "steps": [
+          "存在价格与交付两项阻力"
+        ],
+        "evidence": [
+          "决策阻力：价格敏感、交付顾虑"
+        ],
+        "confidence": 0.7
       }
     },
     "purchase_decisions": [
-      {
-        "category": "到店动因",
-        "items": [
-          {
-            "id": "visit-f022514bcb",
-            "label": "家庭出行",
-            "reasoning_detail": {
-              "summary": "购车用途为家庭出行",
-              "steps": [
-                "客户资料中已有这条信息，直接采用"
-              ],
-              "evidence": [],
-              "confidence": 0.7
-            },
-            "rank_order": 1
-          },
-          {
-            "id": "visit-68d9acdab6",
-            "label": "空间、油耗",
-            "reasoning_detail": {
-              "summary": "关注空间、油耗",
-              "steps": [
-                "客户资料中已有这条信息，直接采用"
-              ],
-              "evidence": [],
-              "confidence": 0.7
-            },
-            "rank_order": 2
-          }
-        ]
-      },
       {
         "category": "换车动因",
         "items": [
@@ -198,55 +76,7 @@
             "rank_order": 1
           }
         ]
-      },
-      {
-        "category": "核心关注",
-        "items": [
-          {
-            "id": "focus-68d9acdab6",
-            "label": "空间、油耗",
-            "reasoning_detail": {
-              "summary": "关注空间、油耗",
-              "steps": [
-                "客户资料中已有这条信息，直接采用"
-              ],
-              "evidence": [],
-              "confidence": 0.7
-            },
-            "rank_order": 1
-          }
-        ]
       }
-    ],
-    "deal_battle": {
-      "win_conditions": [
-        {
-          "id": "win-793eff3fd0",
-          "label": "客户明确关注空间、油耗",
-          "reasoning_detail": {
-            "summary": "客户资料中记录为：空间、油耗",
-            "steps": [
-              "客户资料中已有这条信息，直接采用"
-            ],
-            "evidence": [],
-            "confidence": 0.7
-          },
-          "rank_order": 1
-        },
-        {
-          "id": "win-b36aad4cdf",
-          "label": "计划购车时间：3个月内",
-          "reasoning_detail": {
-            "summary": "客户资料中记录为：3个月内",
-            "steps": [
-              "客户资料中已有这条信息，直接采用"
-            ],
-            "evidence": [],
-            "confidence": 0.7
-          },
-          "rank_order": 2
-        }
-      ]
-    }
+    ]
   }
 }
