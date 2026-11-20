@@ -276,3 +276,6 @@ docs/sqlite缺陷报告.md
 # 销售姓名，属真实客户数据，一律不入库。问题收口后删除；需要长期留存时先脱敏，
 # 再按 docs/README.md 的归属移入正式目录。
 docs/bug-fix/
+
+# PyCharm/IDEA 本机配置
+.idea/

@@ -1118,3 +1118,136 @@ def test_confirm_label_reuses_the_card_wording_for_purchase_nature():
     )
     labels = [i["label"] for i in _categories(payload)["换车动因"]]
     assert labels == ["待确认：购车性质"]
+
+
+# ---------------------------------------------------------------- customer_overview
+
+def _overview_payload(**fields):
+    """造一份表达层的 customer_overview（第 5 节）。"""
+    return _express(customer_overview=fields)
+
+
+def _detail(summary="依据充分"):
+    return {"summary": summary, "steps": ["有明确动作"], "evidence": ["客户原话"], "confidence": 0.8}
+
+
+def test_customer_overview_is_projected_not_dropped():
+    """第 5 节必须被透传出去。
+
+    回归：本模块以前只投影四个区块，表达层的 ``customer_overview`` 被整节丢弃，
+    导致画像概览表除等级外六个字段全空（真实案例：某客户 closing_probability 为 null）。
+    """
+    payload = _build(
+        facts=_facts(deal_level="A"),
+        express=_overview_payload(
+            customer_type={"value": "高效务实中产", "reasoning_detail": _detail()},
+            current_stage={"value": "价格谈判", "reasoning_detail": _detail()},
+            core_issue={"value": "交付周期", "reasoning_detail": _detail()},
+            breakthrough_point={"value": "锁定现车", "reasoning_detail": _detail()},
+            closing_probability={"value": "82%", "reasoning_detail": _detail()},
+        ),
+    )
+    overview = payload["analysis_result"]["customer_overview"]
+    assert overview["customer_type"]["value"] == "高效务实中产"
+    assert overview["current_stage"]["value"] == "价格谈判"
+    assert overview["core_issue"]["value"] == "交付周期"
+    assert overview["breakthrough_point"]["value"] == "锁定现车"
+    assert overview["closing_probability"]["value"] == "82%"
+    assert overview["closing_probability"]["reasoning_detail"]["summary"] == "依据充分"
+
+
+@pytest.mark.parametrize("raw", ["82%", " 82% ", "100%", "0%"])
+def test_closing_probability_accepts_percent_form(raw):
+    payload = _build(
+        facts=_facts(deal_level="B"),
+        express=_overview_payload(closing_probability={"value": raw, "reasoning_detail": _detail()}),
+    )
+    assert payload["analysis_result"]["customer_overview"]["closing_probability"]["value"] == raw.strip()
+
+
+@pytest.mark.parametrize("raw", ["82", "0.82", "约八成", "82 %", "+82%", "101%", "-5%", "", None])
+def test_closing_probability_rejects_non_percent_form(raw):
+    """必须是 ``NN%``：无百分号的数字无法与金额/分数区分，宁可留空也不猜。"""
+    payload = _build(
+        facts=_facts(deal_level="B"),
+        express=_overview_payload(closing_probability={"value": raw, "reasoning_detail": _detail()}),
+    )
+    assert "closing_probability" not in payload["analysis_result"]["customer_overview"]
+
+
+def test_overview_level_follows_facts_not_express():
+    """等级以定级环节的 ``deal_level`` 为准，表达层写的等级被忽略。"""
+    payload = _build(
+        facts=_facts(deal_level="a级"),
+        express=_overview_payload(business_opp_level={"value": "H", "reasoning_detail": _detail()}),
+    )
+    level = payload["analysis_result"]["customer_overview"]["business_opp_level"]
+    assert level["value"] == "A"
+
+
+def test_overview_level_matches_ai_insight_level():
+    """概览的等级与 ``ai_insight.purchase_intent_level`` 必须同源，不能出现两个等级。"""
+    payload = _build(
+        facts=_facts(deal_level="C"),
+        express=_overview_payload(customer_type={"value": "价格敏感型", "reasoning_detail": _detail()}),
+    )
+    result = payload["analysis_result"]
+    assert result["customer_overview"]["business_opp_level"]["value"] == "C"
+    assert result["ai_insight"]["purchase_intent_level"]["value"] == "C"
+
+
+def test_overview_omitted_entirely_when_nothing_usable():
+    """拿不到任何实质内容时不写这个键——缺席＝保留原值，写空对象会清空概览。"""
+    assert "customer_overview" not in _build(facts=_facts(), express=_express())["analysis_result"]
+    empty = _build(
+        facts=_facts(),
+        express=_overview_payload(customer_type={"value": "", "reasoning_detail": _detail()}),
+    )
+    assert "customer_overview" not in empty["analysis_result"]
+
+
+def test_overview_empty_fields_are_dropped_not_nulled():
+    """单字段为空时整项不下发，而不是下发 null（null 会被当成显式清空）。"""
+    payload = _build(
+        facts=_facts(deal_level="B"),
+        express=_overview_payload(
+            customer_type={"value": "务实型", "reasoning_detail": _detail()},
+            core_issue={"value": "", "reasoning_detail": _detail()},
+        ),
+    )
+    overview = payload["analysis_result"]["customer_overview"]
+    assert overview["customer_type"]["value"] == "务实型"
+    assert "core_issue" not in overview
+
+
+def test_overview_reasoning_detail_always_four_keys():
+    """概览内每个 ``reasoning_detail`` 都是四键，与其它区块一致。"""
+    payload = _build(
+        facts=_facts(deal_level="A"),
+        express=_overview_payload(
+            customer_type={"value": "务实型", "reasoning_detail": {"summary": "只说了一句"}},
+        ),
+    )
+    detail = payload["analysis_result"]["customer_overview"]["customer_type"]["reasoning_detail"]
+    assert set(detail) == {"summary", "steps", "evidence", "confidence"}
+
+
+def test_overview_level_detail_comes_from_level_chain():
+    """等级依据取定级环节的推理链，而不是表达层那句话。"""
+    chain = {"summary": "定级结论：A", "steps": ["证据一", "证据二"], "evidence": ["原文"], "confidence": 0.9}
+    payload = _build(
+        facts=_facts(deal_level="A", deal_level_detail=chain),
+        express=_overview_payload(customer_type={"value": "务实型", "reasoning_detail": _detail()}),
+    )
+    level = payload["analysis_result"]["customer_overview"]["business_opp_level"]
+    assert level["reasoning_detail"]["summary"] == "定级结论：A"
+    assert level["reasoning_detail"]["steps"] == ["证据一", "证据二"]
+
+
+def test_overview_skips_pending_level():
+    """待识别不是有效等级，不覆盖库里已有等级。"""
+    payload = _build(
+        facts=_facts(deal_level="待识别"),
+        express=_overview_payload(customer_type={"value": "务实型", "reasoning_detail": _detail()}),
+    )
+    assert "business_opp_level" not in payload["analysis_result"]["customer_overview"]
