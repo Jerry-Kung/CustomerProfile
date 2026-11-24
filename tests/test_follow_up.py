@@ -196,8 +196,14 @@ def test_fixed_fields_drop_placeholders_and_bare_codes():
     assert fields["follow_up_result"] == "仍需后续跟进"
 
 
+def test_fixed_fields_carries_channel_from_method():
+    """跟进渠道是 1124-v2 版新增的第七项固定属性，取自沟通方式。"""
+    assert fu.fixed_fields({"method": "电话"})["follow_up_channel"] == "电话"
+    assert "follow_up_channel" not in fu.fixed_fields({"method": "无"})
+
+
 def test_extra_info_keeps_only_open_tags():
-    """1124 版契约把六项固定属性提升为一级字段，``extra_info`` 只留开放标签。"""
+    """固定属性提升为一级字段后，``extra_info`` 只留开放标签（渠道也已是固定字段）。"""
     extra = fu.fallback_extra(
         {
             "method": "电话",
@@ -211,7 +217,6 @@ def test_extra_info_keeps_only_open_tags():
         }
     )
     assert extra == {
-        "跟进渠道": "电话",
         "参与人": ["销售顾问郑伊美", "客户本人"],
         "战败类型": "价格原因",
     }
@@ -265,19 +270,21 @@ def test_assemble_groups_by_model_and_backfills_the_rest():
     assert supplemented == [2]
     assert len(nodes) == 2
     assert nodes[0]["node_name"] == "连续两次邀约"
-    assert nodes[0]["contents"] == [
-        "销售顾问连续两次电话联系客户邀请试驾，均未接通。",
-        "本次仍需后续跟进，约定次日再沟通。",
-    ]
+    # 模型仍可能返回 ``next_step``，装配侧忽略它——卡片只出一段小结。
+    assert nodes[0]["contents"] == ["销售顾问连续两次电话联系客户邀请试驾，均未接通。"]
     # 模型没覆盖的第三条回落到兜底，仍在时间序末尾。
     assert nodes[1]["contents"] == ["三"]
 
 
-def test_contents_are_summary_then_next_step_never_the_raw_text():
-    """``contents`` 是模型的「跟进小结 + 后续安排」两段，销售原文不进卡片。
+def test_contents_are_one_summary_paragraph_never_the_raw_text():
+    """``contents`` 只有一段模型写的小结，销售原文不进卡片。
 
     2026-11-17 口径：原文大量是「电话没接通」「白天联系。。。。。。」这类碎片，与小结并列
     只是让读者把同一件事读两遍，因此整段去掉。这里钉住「原文一条都不出现」。
+
+    2026-11-24 起 ``next_step`` 段整体删除：六项固定属性提为一级字段后，它实测 61/61
+    个节点都在复述「跟进结果/意向级别/转商机/下次跟进时间」，净增信息为零，还常与小
+    结写的沟通内容互相打架。这些值由字段标签承担。
     """
     records = fu.parse_records(
         _records_json(
@@ -297,22 +304,44 @@ def test_contents_are_summary_then_next_step_never_the_raw_text():
         ]
     }
     nodes, _ = fu.assemble(records, model)
-    assert nodes[0]["contents"] == [
-        "销售顾问三次电话联系客户邀请试驾，均未接通。",
-        "本次仍需后续跟进，约定次日再联系。",
-    ]
+    assert nodes[0]["contents"] == ["销售顾问三次电话联系客户邀请试驾，均未接通。"]
 
 
-def test_next_step_absent_still_yields_the_summary():
-    """模型漏写 ``next_step`` 时只出小结，不编造一条后续安排。"""
+def test_next_step_from_the_model_is_ignored():
+    """模型仍返回 ``next_step``（旧提示词、外部调用方）时整段丢弃。"""
     records = fu.parse_records(_records_json(_record("电话没接通")))
-    model = {"nodes": [{"records": [1], "node_name": "首次电话邀约", "summary": "销售顾问电话联系客户，客户未接听。"}]}
+    model = {
+        "nodes": [
+            {
+                "records": [1],
+                "node_name": "首次电话邀约",
+                "summary": "销售顾问电话联系客户，客户未接听。",
+                "next_step": "本次仍需后续跟进，约定次日再联系。",
+            }
+        ]
+    }
     nodes, _ = fu.assemble(records, model)
     assert nodes[0]["contents"] == ["销售顾问电话联系客户，客户未接听。"]
 
 
-def test_model_paragraph_may_arrive_as_a_list():
-    """模型偶尔把一段给成数组：内容非空就照收，不因形态不合预期整段丢掉。"""
+def test_next_step_alone_does_not_replace_the_summary():
+    """只给了 ``next_step``、没给 ``summary`` 时回落销售原文，不把模板句当正文。"""
+    records = fu.parse_records(_records_json(_record("电话没接通")))
+    model = {
+        "nodes": [
+            {
+                "records": [1],
+                "node_name": "首次电话邀约",
+                "next_step": "本次仍需后续跟进，约定次日再联系。",
+            }
+        ]
+    }
+    nodes, _ = fu.assemble(records, model)
+    assert nodes[0]["contents"] == ["电话没接通"]
+
+
+def test_model_summary_may_arrive_as_a_list():
+    """模型偶尔把小结给成数组：内容非空就照收，不因形态不合预期整句丢掉。"""
     records = fu.parse_records(_records_json(_record("电话没接通")))
     model = {
         "nodes": [
@@ -325,7 +354,7 @@ def test_model_paragraph_may_arrive_as_a_list():
         ]
     }
     nodes, _ = fu.assemble(records, model)
-    assert nodes[0]["contents"] == ["销售顾问电话联系客户，客户未接听。", "约定次日再联系。"]
+    assert nodes[0]["contents"] == ["销售顾问电话联系客户，客户未接听。"]
 
 
 def test_extra_info_reflects_the_latest_record_of_a_merged_node():
@@ -410,8 +439,8 @@ def test_raw_content_is_kept_verbatim_including_inner_whitespace():
     assert nodes[0]["contents"][0] == raw.strip()
 
 
-def test_model_paragraphs_are_whitespace_collapsed():
-    """模型写的两段反而要折叠空白：那里是模型偶发的换行与多余空格。"""
+def test_model_summary_is_whitespace_collapsed():
+    """模型写的小结反而要折叠空白：那里是模型偶发的换行与多余空格。"""
     records = fu.parse_records(_records_json(_record("原文")))
     model = {
         "nodes": [
@@ -424,7 +453,7 @@ def test_model_paragraphs_are_whitespace_collapsed():
         ]
     }
     nodes, _ = fu.assemble(records, model)
-    assert nodes[0]["contents"] == ["第一句。 第二句。", "约定次日再联系。"]
+    assert nodes[0]["contents"] == ["第一句。 第二句。"]
 
 
 def test_node_caps_at_contract_limits():
@@ -543,8 +572,16 @@ def test_extra_info_no_longer_duplicates_fixed_fields():
     records = fu.parse_records(_records_json(_record("电话没接通")))
     nodes, _ = fu.assemble(records, None)
     extra = nodes[0]["extra_info"]
-    assert set(extra) == {"跟进渠道", "参与人"}
-    for legacy_key in ("关联车型", "跟进结果", "意向级别", "是否转商机", "下一步跟进"):
+    assert set(extra) == {"参与人"}
+    for legacy_key in (
+        "跟进渠道",
+        "渠道",
+        "关联车型",
+        "跟进结果",
+        "意向级别",
+        "是否转商机",
+        "下一步跟进",
+    ):
         assert legacy_key not in extra
 
 
@@ -567,7 +604,7 @@ def test_merged_node_keeps_every_consultant_but_follow_up_by_takes_the_latest():
 
 
 def test_sanitize_promotes_legacy_extra_info_fields():
-    """旧形状节点（六项都在 ``extra_info``）经自检后提升为一级字段，并去掉重复键。"""
+    """旧形状节点（七项都在 ``extra_info``）经自检后提升为一级字段，并去掉重复键。"""
     raw = [
         {
             "node_name": "首次到店",
@@ -592,8 +629,8 @@ def test_sanitize_promotes_legacy_extra_info_fields():
     assert node["follow_up_result"] == "预约试驾"
     assert node["converted_to_opportunity"] == "是"
     assert node["next_follow_up_at"] == "2026-05-22"
+    assert node["follow_up_channel"] == "到店"
     assert node["extra_info"] == {
-        "跟进渠道": "到店",
         "参与人": ["销售顾问张三", "客户本人"],
         "战败类型": "价格原因",
     }
@@ -620,6 +657,7 @@ def test_sanitize_caps_fixed_field_lengths():
             "node_name": "A",
             "contents": ["x"],
             "follow_up_by": "人" * 120,
+            "follow_up_channel": "道" * 80,
             "related_model": "车" * 120,
             "intent_level": "级" * 80,
             "follow_up_result": "果" * 120,
@@ -630,6 +668,7 @@ def test_sanitize_caps_fixed_field_lengths():
     kept, _ = fu.sanitize(raw)
     node = kept[0]
     assert len(node["follow_up_by"]) == fu.MAX_FOLLOW_UP_BY_CHARS
+    assert len(node["follow_up_channel"]) == fu.MAX_FOLLOW_UP_CHANNEL_CHARS
     assert len(node["related_model"]) == fu.MAX_RELATED_MODEL_CHARS
     assert len(node["intent_level"]) == fu.MAX_INTENT_LEVEL_CHARS
     assert len(node["follow_up_result"]) == fu.MAX_FOLLOW_UP_RESULT_CHARS
@@ -660,7 +699,17 @@ def test_sanitize_prefers_top_level_over_extra_info():
     ]
     kept, _ = fu.sanitize(raw)
     assert kept[0]["intent_level"] == "A 级意向（高）"
-    assert kept[0]["extra_info"] == {"跟进渠道": "电话"}
+    # 意向级别被一级字段覆盖丢弃；跟进渠道没有一级值，按别名提升。
+    assert kept[0]["follow_up_channel"] == "电话"
+    assert kept[0]["extra_info"] == {}
+
+
+def test_sanitize_promotes_channel_alias():
+    """v2 契约把 ``渠道`` 也列为兼容别名，旧调用方给这个键同样能提升。"""
+    raw = [{"node_name": "A", "contents": ["x"], "extra_info": {"渠道": "微信"}}]
+    kept, _ = fu.sanitize(raw)
+    assert kept[0]["follow_up_channel"] == "微信"
+    assert kept[0]["extra_info"] == {}
 
 
 def test_sanitize_drops_empty_and_placeholder_fixed_fields():
@@ -714,7 +763,7 @@ def test_missing_llm_also_falls_back():
     assert len(json.loads(out["follow_up_json"])) == 1
 
 
-def test_happy_path_uses_model_names_and_writes_both_paragraphs():
+def test_happy_path_uses_model_names_and_writes_one_paragraph():
     import asyncio
 
     llm = _FakeLLM(
@@ -723,7 +772,8 @@ def test_happy_path_uses_model_names_and_writes_both_paragraphs():
                 {
                     "records": [1],
                     "node_name": "首次电话邀约",
-                    "summary": "销售顾问电话联系客户邀请试驾，客户未接听。",
+                    "summary": "销售顾问电话联系客户邀请试驾，客户未接听，计划次日再联系。",
+                    # 旧提示词或外部调用方仍可能带回这一段；装配侧忽略。
                     "next_step": "本次仍需后续跟进，约定次日再沟通。",
                 }
             ]
@@ -734,11 +784,9 @@ def test_happy_path_uses_model_names_and_writes_both_paragraphs():
     assert out["follow_status"] == "ok"
     assert out["fallback_used"] == "false"
     assert nodes[0]["node_name"] == "首次电话邀约"
-    # 两段式：跟进小结在前，后续安排在后；销售原文不上卡片。
-    assert nodes[0]["contents"] == [
-        "销售顾问电话联系客户邀请试驾，客户未接听。",
-        "本次仍需后续跟进，约定次日再沟通。",
-    ]
+    # 单段：只有跟进小结，销售原文不上卡片，``next_step`` 不再出现。
+    assert nodes[0]["contents"] == ["销售顾问电话联系客户邀请试驾，客户未接听，计划次日再联系。"]
+
     assert nodes[0]["followed_at"] == "2026-11-01T15:38:40"
     assert nodes[0]["followed_at_text"] == "2026年11月1日下午"
 
@@ -757,17 +805,16 @@ def test_prompt_carries_records_and_excludes_internal_ids():
 
 # ---------------------------------------------------------------- 渠道标签与正文打架
 
-def test_channel_label_dropped_when_record_text_says_another_channel():
+def test_channel_field_dropped_when_record_text_says_another_channel():
     """UAT ``15903771774``：正文写「微信已经联系」，沟通方式码却是「电话」。
 
     码值不可信是实测出来的（11-02 批次 110 条含「微信」的原文里 99 条标「电话」）。
-    卡片上宁可少一行「跟进渠道」，也不能出现与节点名相反的小图标。
+    卡片上宁可少一个「跟进渠道」，也不能出现与节点名相反的小图标。
     """
     item = {"method": "电话", "content": "微信已经联系说找个时间过来门店看一下具体的权益政策。"}
     assert fu.channel_conflicts(item["method"], [item["content"]]) is True
-    extra = fu.fallback_extra(item)
-    # 记录字段本身仍解出「电话」——守卫在装配层，不在取值层。
-    assert extra["跟进渠道"] == "电话"
+    # 取值层照常解出「电话」——守卫在装配层，不在取值层。
+    assert fu.fixed_fields(item)["follow_up_channel"] == "电话"
 
 
 def test_channel_label_kept_when_text_agrees_or_is_silent():
@@ -780,7 +827,7 @@ def test_channel_label_kept_when_text_agrees_or_is_silent():
 
 
 def test_node_omits_channel_when_it_contradicts_node_name():
-    """节点名说「微信」、码值说「电话」：装配出的节点不带 ``跟进渠道``。
+    """节点名说「微信」、码值说「电话」：装配出的节点不带 ``follow_up_channel``。
 
     这是 ``15903771774`` 第 3 条的现场复现。
     """
@@ -790,12 +837,12 @@ def test_node_omits_channel_when_it_contradicts_node_name():
         {"nodes": [{
             "records": [1],
             "node_name": "微信邀约到店",
-            "summary": "销售顾问通过微信联系客户，邀请其到门店了解具体权益政策。",
-            "next_step": "客户尚未确定到店时间，约定11月18日再次跟进。",
+            "summary": "销售顾问通过微信联系客户，邀请其到门店了解具体权益政策，约定11月18日再次跟进。",
         }]},
     )
     node = nodes[0]
     assert node["node_name"] == "微信邀约到店"
+    assert "follow_up_channel" not in node
     assert "跟进渠道" not in node["extra_info"]
     # 其余标签不受影响。
     assert node["intent_level"] == "A 级意向（高）"

@@ -1,7 +1,7 @@
 """客户跟进履历：把「销售跟进记录」整理成回传体 ``follow_up_history``。
 
-业务契约见 ``docs/reference/AI画像回传接口变更说明-客户跟进履历-1124.md``；本仓库
-这一版升级的取舍见 ``docs/feature-followup-record/跟进履历固定字段升级-方案.md``。
+业务契约见 ``docs/reference/AI画像回传接口变更说明-客户跟进履历-1124-v2.md``；本仓库
+这一版升级的取舍见 ``docs/history/feature-followup-record/跟进履历固定字段升级-方案.md``。
 这里只记**代码为什么长这样**。
 
 ## 为什么单独一次 LLM 调用（而不是塞进 L1）
@@ -22,28 +22,33 @@ L2 兜底裁决同一骨架。
 契约写明的硬约束（``id``/``sequence`` 唯一、节点数上限、各字段长度、``followed_at``
 格式）**错一条就是整次回写 400 回滚**——连带已算好的定级、Notes 与九个板块一起作废。
 这些判据全部可机器验证，因此一律留在代码里；模型负责所有要读懂人话才能做的事：
-给节点起名、把跟进过程写成小结、写清这次跟进的下一步。
+给节点起名、把跟进过程写成一段小结，记录里有明确的下一步时并进小结最后一句。
 
 **模型不输出 ``extra_info``**：渠道、参与人、车型、跟进结果、意向级别、下一步全都能从
-记录字段确定性取到，交给模型只会引入「把码值抄错」这一种新失败模式。（``next_step``
-是**叙述**而非字段值：它要把结论与约定时间讲成一句连贯的话，这是模型的事；取值仍以
-记录字段为准，提示词已就此立规矩。）
+记录字段确定性取到，交给模型只会引入「把码值抄错」这一种新失败模式。
 
-## 六项固定属性是一级字段（1124 版契约）
+## 七项固定属性是一级字段（1124-v2 版契约）
 
-跟进人、关联车型、意向级别、跟进结果、转商机、下次跟进时间在 1124 版契约里从
-``extra_info`` 提升为节点一级字段。它们仍然**由代码从记录字段确定性取值**（理由同上），
-``extra_info`` 只留开放标签（渠道、参与人、战败类型）。服务端提取固定字段后会从
+跟进人、跟进渠道、关联车型、意向级别、跟进结果、转商机、下次跟进时间在 1124-v2 版
+契约里从 ``extra_info`` 提升为节点一级字段。它们仍然**由代码从记录字段确定性取值**
+（理由同上），``extra_info`` 只留开放标签（参与人、战败类型）。服务端提取固定字段后会从
 ``extra_info`` 去重，我们这边先不重复，等于同一事实只发一遍。
 
-:func:`sanitize` 同时承担旧形状的**提升**：历史产物与外部调用方给的节点里，六项可能
+:func:`sanitize` 同时承担旧形状的**提升**：历史产物与外部调用方给的节点里，七项可能
 还在 ``extra_info``（别名见 :data:`_FIXED_FIELDS`），自检时提到一级并从 ``extra_info``
 删掉。我们旧版把下次跟进写成 ``下一步跟进``——它不在服务端的别名表里，只有这里的
 提升认得，回放旧批次时靠它保住这个值。
 
-## ``contents``：跟进小结 + 后续安排，两段都由模型写
+## ``contents``：只有一段跟进小结，由模型写
 
-``_node`` 里的 ``contents`` 是 ``[summary, next_step]``，销售手写的原文不进 ``contents``。
+``_node`` 里的 ``contents`` 是 ``[summary]``，销售手写的原文不进 ``contents``。
+
+**``next_step``（后续安排）段为什么删除**（2026-11-24）：固定属性提为一级字段后，
+第二段实测 61/61 个节点都在复述「本次仍需后续跟进，意向级别为 X，约定下次跟进时间为 X」
+——每个成分都能在字段里原样找到，净增信息为零。它还常与小结写的沟通内容互相打架
+（客户已提车、字段仍填「仍需后续跟进」，两段并排出现）。结论、等级、转商机、时间由
+字段标签承担；记录里有明确的下一步时，提示词要求写进小结的最后一句。模型若仍返回
+``next_step``（旧提示词、外部调用方），装配侧整段丢弃。
 
 **为什么原文不是第一段**：原文是取证凭据，小结是交接读物，两者服务的人不同。卡片的使用者是
 接手的销售，而销售手写的原文大量是「电话没人接」「白天联系。。。。。。」这类碎片，与模型
@@ -81,7 +86,7 @@ MAX_NODES = 100
 """契约 §3.3：单客户最多 100 个节点。"""
 
 MAX_CONTENTS = 20
-"""契约 §3.3：``contents`` 最多 20 条。当前两段（跟进小结 + 后续安排），远低于上限。"""
+"""契约 §3.3：``contents`` 最多 20 条。当前只有一段跟进小结，远低于上限。"""
 
 MAX_CONTENT_CHARS = 1000
 MAX_NODE_NAME_CHARS = 100
@@ -89,12 +94,13 @@ MAX_EXTRA_BYTES = 64 * 1024
 """契约 §3.3 的字段上限，逐条对应，改这里之前先回看契约。"""
 
 MAX_FOLLOW_UP_BY_CHARS = 100
+MAX_FOLLOW_UP_CHANNEL_CHARS = 50
 MAX_RELATED_MODEL_CHARS = 100
 MAX_INTENT_LEVEL_CHARS = 50
 MAX_FOLLOW_UP_RESULT_CHARS = 100
 MAX_CONVERTED_CHARS = 50
 MAX_NEXT_FOLLOW_UP_CHARS = 100
-"""1124 版契约 §3.2 六项固定属性的上限，逐条对应。"""
+"""1124-v2 版契约 §3.2 七项固定属性的上限，逐条对应。"""
 
 MIN_COMPLETION_TOKENS = 30
 """输出量下限。与 L2 兜底同思路：非空输入却只回几 token，等于模型没干活。
@@ -150,6 +156,7 @@ _PROMPT_FIELDS: tuple[tuple[str, str], ...] = (
 _FIXED_FIELDS: tuple[tuple[str, str, int, tuple[str, ...]], ...] = (
     # (回传字段, 记录里的来源键, 契约上限, extra_info 历史别名)
     ("follow_up_by", "consultant", MAX_FOLLOW_UP_BY_CHARS, ("跟进人", "销售顾问")),
+    ("follow_up_channel", "method", MAX_FOLLOW_UP_CHANNEL_CHARS, ("跟进渠道", "渠道")),
     ("related_model", "vehicle", MAX_RELATED_MODEL_CHARS, ("关联车型",)),
     ("intent_level", "level", MAX_INTENT_LEVEL_CHARS, ("意向级别", "意向等级")),
     ("follow_up_result", "result", MAX_FOLLOW_UP_RESULT_CHARS, ("跟进结果",)),
@@ -167,7 +174,7 @@ _FIXED_FIELDS: tuple[tuple[str, str, int, tuple[str, ...]], ...] = (
         ("下次跟进时间", "下次跟进", "下一步跟进"),
     ),
 )
-"""六项固定属性：回传字段、记录来源键、上限、``extra_info`` 里的历史别名。
+"""七项固定属性：回传字段、记录来源键、上限、``extra_info`` 里的历史别名。
 
 别名前三组与服务端契约的兼容口径一致（它们决定服务端能否从旧形状里提取），最后一组
 ``下一步跟进`` 是本仓库旧版的输出键，服务端不认识，只能在本地自检时提升。
@@ -220,7 +227,7 @@ def _literal(value: Any) -> str:
 
 
 def _paragraph(value: Any) -> list[str]:
-    """模型给出的一个「段」（``summary`` / ``next_step``）折成非空字符串列表。
+    """模型给出的一段「小结」（``summary``）折成非空字符串列表。
 
     正常情况下模型给的是一个字符串；给成数组、或者多给几段，都接受并保留——
     只要内容非空，装配侧照收，不因为形态不合预期就整段丢掉。
@@ -430,7 +437,7 @@ def _next_follow_up(raw: Any) -> str:
 def _fixed_value(key: str, raw: Any) -> str:
     """把一项固定属性折成回传值；取不到给空串。
 
-    只认字符串（转商机额外认布尔）——契约的六项都是字符串列，把数字或结构体 ``str()``
+    只认字符串（转商机额外认布尔）——契约的七项都是字符串列，把数字或结构体 ``str()``
     成 ``"{'key': ...}"`` 等于把内部形态印到卡片上。
     """
     if key == "converted_to_opportunity":
@@ -443,7 +450,7 @@ def _fixed_value(key: str, raw: Any) -> str:
 
 
 def fixed_fields(item: Mapping[str, Any]) -> dict[str, str]:
-    """从一条记录确定性产出六项固定属性（1124 版契约 §3.2）。
+    """从一条记录确定性产出七项固定属性（1124-v2 版契约 §3.2）。
 
     空值、占位串与未解码的裸码不出键——契约允许缺省，卡片上也不该出现「跟进人：无」。
     """
@@ -458,13 +465,10 @@ def fixed_fields(item: Mapping[str, Any]) -> dict[str, str]:
 def fallback_extra(item: Mapping[str, str]) -> dict[str, Any]:
     """从记录字段确定性取 ``extra_info`` 的**开放标签**。
 
-    1124 版契约把六项固定属性提成一级字段（:func:`fixed_fields`），这里只留契约没有
-    结构化承载的三项：渠道、参与人、战败类型。取不到的键不出现，不留空串。
+    1124-v2 版契约把七项固定属性提成一级字段（:func:`fixed_fields`），这里只留契约
+    没有结构化承载的两项：参与人、战败类型。取不到的键不出现，不留空串。
     """
     extra: dict[str, Any] = {}
-    method = _literal(item.get("method"))
-    if method:
-        extra["跟进渠道"] = method
     consultant = _literal(item.get("consultant"))
     if consultant:
         extra["参与人"] = [f"销售顾问{consultant}", "客户本人"]
@@ -480,7 +484,7 @@ def fallback_extra(item: Mapping[str, str]) -> dict[str, Any]:
 def _clean_contents(items: Iterable[Any]) -> list[str]:
     """``contents`` 清洗：去空、去重、限长、限条数。
 
-    模型写的两段都走这里——折叠空白是对的，模型偶发换行与多余空格。
+    模型写的小结走这里——折叠空白是对的，模型偶发换行与多余空格。
     销售原文只在兜底时才进 ``contents``，那条路径走 :func:`_clean_verbatim`。
     """
     out: list[str] = []
@@ -553,7 +557,6 @@ def model_groups(model_output: Any, total: int) -> list[dict[str, Any]]:
                 "indexes": sorted(indexes),
                 "name": _text(entry.get("node_name")),
                 "summary": _paragraph(entry.get("summary")),
-                "next_step": _paragraph(entry.get("next_step")),
             }
         )
     return groups
@@ -567,18 +570,17 @@ def _node(
     *,
     name: str,
     summary: Iterable[Any],
-    next_step: Iterable[Any],
     position: int,
 ) -> dict[str, Any]:
     """构造一个契约形状的节点。
 
-    ``contents`` 是模型写的两段：**跟进小结** 与 **后续安排**。销售原文不进 ``contents``
-    （原因见模块文档）。
+    ``contents`` 是模型写的一段**跟进小结**。销售原文不进 ``contents``（原因见模块文档）；
+    后续安排不单独成段，记录里有明确下一步时写进小结最后一句，其余由七项固定字段承担。
 
     唯一的原文返场：模型对这一组什么都没写时，把组内原文逐字放进来兜底。履历的价值首先
     在于「这一段不能空」——宁可让读者看到一句粗糙的原文，也不要一片空白。
     """
-    written = _clean_contents([*summary, *next_step])
+    written = _clean_contents(summary)
     if written:
         contents = written
     else:
@@ -601,21 +603,21 @@ def _node(
         text = readable_time(followed_at)
         if text:
             node["followed_at_text"] = text
-    # 六项固定属性与 ``extra_info`` 取组内**最新**那条记录：一个节点合并了多次跟进时，
+    # 七项固定属性与 ``extra_info`` 取组内**最新**那条记录：一个节点合并了多次跟进时，
     # 卡片下方标签要反映这组跟进的最终状态（结果、意向级别、下次跟进时间），否则读者会
     # 看到正文写「A 级、11 月 3 日」而字段写「C 级、11 月 1 日」。时间轴位置仍用首条
     # （``followed_at`` 不动）。
     tail = members[-1]
     node.update(fixed_fields(tail))
     extra = fallback_extra(tail)
-    # 渠道标签是**唯一**可能与正文打架的一项：其余键取自记录字段，与措辞无关。
-    # 码值不可信时（见 :func:`channel_conflicts`），宁可不出这个键，也不让卡片上的
+    # 渠道是**唯一**可能与正文打架的一项：其余键取自记录字段，与措辞无关。
+    # 码值不可信时（见 :func:`channel_conflicts`），宁可不出这个字段，也不让卡片上的
     # 小图标与节点名写反。
-    if "跟进渠道" in extra and channel_conflicts(
-        extra["跟进渠道"],
+    if "follow_up_channel" in node and channel_conflicts(
+        node["follow_up_channel"],
         [node["node_name"], *contents, *(item.get("content") for item in members)],
     ):
-        extra.pop("跟进渠道")
+        node.pop("follow_up_channel")
     # 参与人是个例外：合并节点里每个顾问都参与过，只留最后一位会把前面的人抹掉。
     consultants = list(
         dict.fromkeys(
@@ -646,7 +648,7 @@ def assemble(
     groups = model_groups(model_output, total)
     covered = {index for group in groups for index in group["indexes"]}
 
-    slots: list[tuple[str, int, list[Mapping[str, str]], str, list[str], list[str]]] = []
+    slots: list[tuple[str, int, list[Mapping[str, str]], str, list[str]]] = []
     for group in groups:
         indexes = group["indexes"]
         members = [records[index] for index in indexes]
@@ -657,7 +659,6 @@ def assemble(
                 members,
                 group["name"],
                 group["summary"],
-                group["next_step"],
             )
         )
 
@@ -667,14 +668,14 @@ def assemble(
             continue
         supplemented.append(index)
         # 代码补出来的节点没有模型措辞，``_node`` 会退回组内原文。
-        slots.append((_text(item.get("created_at")), index, [item], "", [], []))
+        slots.append((_text(item.get("created_at")), index, [item], "", []))
 
     # 跨组补充的记录按「本条记录的创建时间」定位，与模型分组共用同一时间轴；
     # 同一时刻再比记录下标，保证顺序稳定。
     slots.sort(key=lambda slot: (slot[0], slot[1]))
 
     nodes: list[dict[str, Any]] = []
-    for position, (_, _, members, name, summary, next_step) in enumerate(
+    for position, (_, _, members, name, summary) in enumerate(
         slots[:MAX_NODES], start=1
     ):
         nodes.append(
@@ -682,7 +683,6 @@ def assemble(
                 members,
                 name=name,
                 summary=summary,
-                next_step=next_step,
                 position=position,
             )
         )
@@ -693,11 +693,11 @@ def assemble(
 
 
 def promote_fixed_fields(entry: Mapping[str, Any]) -> dict[str, Any]:
-    """把任意形状的节点提升成 1124 版：六项固定属性提到一级，``extra_info`` 去重。
+    """把任意形状的节点提升成 1124-v2 版：七项固定属性提到一级，``extra_info`` 去重。
 
     处理两种来源：
 
-    1. 本仓库旧版的产物（六项在 ``extra_info``，下次跟进叫 ``下一步跟进``）；
+    1. 本仓库旧版的产物（七项在 ``extra_info``，下次跟进叫 ``下一步跟进``）；
     2. 外部调用方或回放批次给的、服务端兼容口径的节点（别名见 :data:`_FIXED_FIELDS`）。
 
     一级字段优先于别名；别名无论提没提到值都从 ``extra_info`` 删掉——服务端提取后也会
@@ -794,7 +794,7 @@ def sanitize(nodes: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if text:
             node["followed_at_text"] = text[:MAX_NODE_NAME_CHARS]
 
-        # 六项固定属性：先提升（旧形状 → 一级字段），再逐项取限长后的值。
+        # 七项固定属性：先提升（旧形状 → 一级字段），再逐项取限长后的值。
         # 空值与占位串不出键；``extra_info`` 里的同名旧键已在提升时删掉。
         normalized = promote_fixed_fields(entry)
         for key, _, _, _ in _FIXED_FIELDS:
@@ -914,6 +914,7 @@ __all__ = [
     "MAX_CONVERTED_CHARS",
     "MAX_CONTENTS",
     "MAX_FOLLOW_UP_BY_CHARS",
+    "MAX_FOLLOW_UP_CHANNEL_CHARS",
     "MAX_FOLLOW_UP_RESULT_CHARS",
     "MAX_INTENT_LEVEL_CHARS",
     "MAX_NEXT_FOLLOW_UP_CHARS",
