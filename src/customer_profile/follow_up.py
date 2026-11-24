@@ -24,20 +24,36 @@ L2 兜底裁决同一骨架。
 这些判据全部可机器验证，因此一律留在代码里；模型负责所有要读懂人话才能做的事：
 给节点起名、把跟进过程写成一段小结，记录里有明确的下一步时并进小结最后一句。
 
-**模型不输出 ``extra_info``**：渠道、参与人、车型、跟进结果、意向级别、下一步全都能从
+**模型不输出 ``extra_info``**：渠道、车型、跟进结果、意向级别、战败类型全都能从
 记录字段确定性取到，交给模型只会引入「把码值抄错」这一种新失败模式。
 
 ## 七项固定属性是一级字段（1124-v2 版契约）
 
 跟进人、跟进渠道、关联车型、意向级别、跟进结果、转商机、下次跟进时间在 1124-v2 版
 契约里从 ``extra_info`` 提升为节点一级字段。它们仍然**由代码从记录字段确定性取值**
-（理由同上），``extra_info`` 只留开放标签（参与人、战败类型）。服务端提取固定字段后会从
+（理由同上），``extra_info`` 只留开放标签（战败类型）。服务端提取固定字段后会从
 ``extra_info`` 去重，我们这边先不重复，等于同一事实只发一遍。
+
+**「参与人」已移除**（2026-11-24，业务方要求）：它是历史版本自加的编外标签，契约从未
+有此键，下游也没有消费方。装配侧不再产出，:func:`promote_fixed_fields` 同时剥离旧批次
+与外部调用方节点里的残留。
 
 :func:`sanitize` 同时承担旧形状的**提升**：历史产物与外部调用方给的节点里，七项可能
 还在 ``extra_info``（别名见 :data:`_FIXED_FIELDS`），自检时提到一级并从 ``extra_info``
 删掉。我们旧版把下次跟进写成 ``下一步跟进``——它不在服务端的别名表里，只有这里的
 提升认得，回放旧批次时靠它保住这个值。
+
+## 渠道与车系的两处取值口径（2026-11-24）
+
+**渠道冲突以正文为准**：``communicationmethods`` 大面积错填 90441（电话）而正文写微信
+（11-02 批次 972 条里冲突 64 条）。码值与这条记录的正文冲突、正文只提到一个渠道时，
+取正文渠道；正文提到多个渠道（「电话没接，又发了微信」）或没有渠道词时仍不出这个
+标签。兜底后的值再受节点级守卫约束，与模型写的小结矛盾时同样丢弃。
+
+**``related_model`` 带车系**：跟进记录只有版本名（Ultra / PRO），车系（X700 / M817）
+在 ``OntologyLeadInfo``。同一客户的线索里版本名能唯一落到车系时拼成「车系 版本」
+（如 ``M817 PRO``）；多义时只留版本名；记录没填版本、客户只有一个车系时只出车系。
+映射必须按客户做——``Ultra`` 在全批次里既属 X700 也属 M817，全局表必错。
 
 ## ``contents``：只有一段跟进小结，由模型写
 
@@ -79,6 +95,14 @@ SYSTEM_TEXT = "You are a helpful AI assistant."
 FOLLOW_CHANNEL = "OntologyLeadFollowRecord"
 """跟进渠道在 L0 记录层里的 ``channel`` 键。数据源只有这一个。"""
 
+LEAD_CHANNEL = "OntologyLeadInfo"
+"""车系所在的线索渠道。
+
+跟进记录只有**车型版本**（``vehiclemodelname``：Ultra / Max+ / PRO…），车系
+（X700 / M817…）只在 ``OntologyLeadInfo.vehicle_series_name``。业务方要求
+``related_model`` 带车系，只能从同客户线索里取。
+"""
+
 FOLLOW_SOURCE_NAME = "销售跟进记录"
 """渠道中文名，与 ``CHANNELS`` 表一致。按 ``channel`` 匹配不到时的兜底判据。"""
 
@@ -115,9 +139,21 @@ PLACEHOLDER_VALUES = frozenset(
 _BARE_CODE = re.compile(r"^\d{4,8}$")
 """未登记的字典码（渲染层原样输出）。它不是业务事实，不进对客产物。"""
 
+_LEGACY_OPEN_TAGS = ("参与人",)
+"""历史版本自加的开放标签，契约从未有此键，2026-11-24 业务方要求移除。
+
+装配侧已不再产出；自检再从旧批次与外部调用方给的节点里剥离，保证回写体里不再出现。
+"""
+
 _DATE_PATTERN = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$"
 )
+
+_LEAD_BLOCK = re.compile(r"^\s*\[第\s*\d+\s*条\]\s*$")
+"""``OntologyLeadInfo`` 一条 L0 记录里可能渲染多条线索，用 ``[第 N 条]`` 分块。"""
+
+_MODEL_ALIASES = {"全新M817": "M817"}
+"""车系命名归一：同一车系的两种写法，判歧义时视为同一个。展示仍用上游原值。"""
 
 # 记录正文的字段名 → 内部键。正文由 ``ontology_payload.render_record`` 生成，
 # 格式是「中文名：值」逐行；这里是**读回自己写的格式**，不是解析第三方协议。
@@ -290,6 +326,59 @@ def parse_records(records_json: Any) -> list[dict[str, str]]:
     return parsed
 
 
+def _lead_blocks(content: Any) -> list[str]:
+    """把 ``OntologyLeadInfo`` 的渲染正文按 ``[第 N 条]`` 切成单条线索。"""
+    blocks: list[list[str]] = [[]]
+    for line in str(content or "").splitlines():
+        if _LEAD_BLOCK.match(line):
+            blocks.append([])
+            continue
+        blocks[-1].append(line)
+    return ["\n".join(lines) for lines in blocks if lines]
+
+
+def _norm_model(value: str) -> str:
+    return re.sub(r"\s+", "", value).upper()
+
+
+def _norm_series(value: str) -> str:
+    text = re.sub(r"\s+", "", value)
+    return _MODEL_ALIASES.get(text, text)
+
+
+def lead_vehicle_map(records_json: Any) -> tuple[dict[str, set[str]], set[str]]:
+    """从 L0 线索记录里取「车型版本 → 车系」与客户的全部车系。
+
+    映射**必须按客户**做：同一车型名称在不同客户下属于不同车系（11-02 批次
+    ``Ultra`` 454 次属 X700、18 次属 M817），全局表必错。键做了大小写与空白归一
+    （``MAX+`` / ``Max+`` 是同一个版本）。
+
+    返回 ``(by_model, series)``：``by_model`` 的键是归一后的车型名称，值是该客户
+    线索里出现过的车系原值；``series`` 是客户全部车系原值。
+    """
+    by_model: dict[str, set[str]] = {}
+    series: set[str] = set()
+    for record in _records(records_json):
+        if _text(record.get("channel")) != LEAD_CHANNEL:
+            continue
+        if _text(record.get("status")) != "ok":
+            continue
+        for block in _lead_blocks(record.get("content")):
+            fields: dict[str, str] = {}
+            for line in block.splitlines():
+                name, sep, raw = line.partition("：")
+                if not sep:
+                    continue
+                fields[name.strip()] = raw.strip()
+            model = fields.get("意向车型")
+            serie = fields.get("意向车系")
+            if serie:
+                series.add(serie)
+            if model and serie:
+                by_model.setdefault(_norm_model(model), set()).add(serie)
+    return by_model, series
+
+
 # ---------------------------------------------------------------- 提示词输入
 
 
@@ -391,6 +480,16 @@ CHANNEL_KEYWORDS: Mapping[str, tuple[str, ...]] = {
 """
 
 
+def channels_in(texts: Iterable[Any]) -> set[str]:
+    """正文里出现了哪些渠道词（判据见 :data:`CHANNEL_KEYWORDS`）。"""
+    joined = "".join(_text(text) for text in texts)
+    return {
+        name
+        for name, words in CHANNEL_KEYWORDS.items()
+        if any(word in joined for word in words)
+    }
+
+
 def channel_conflicts(method: str, texts: Iterable[Any]) -> bool:
     """解码出的沟通方式与正文/小结说的是不是同一件事。
 
@@ -405,14 +504,7 @@ def channel_conflicts(method: str, texts: Iterable[Any]) -> bool:
     method = _text(method)
     if not method:
         return False
-    joined = "".join(_text(text) for text in texts)
-    if not joined:
-        return False
-    mentioned = {
-        name
-        for name, words in CHANNEL_KEYWORDS.items()
-        if any(word in joined for word in words)
-    }
+    mentioned = channels_in(texts)
     return bool(mentioned) and method not in mentioned
 
 
@@ -466,12 +558,12 @@ def fallback_extra(item: Mapping[str, str]) -> dict[str, Any]:
     """从记录字段确定性取 ``extra_info`` 的**开放标签**。
 
     1124-v2 版契约把七项固定属性提成一级字段（:func:`fixed_fields`），这里只留契约
-    没有结构化承载的两项：参与人、战败类型。取不到的键不出现，不留空串。
+    没有结构化承载的战败类型；取不到就整个键不出现，不留空串。
+
+    「参与人」是历史版本自加的编外标签（契约从未有此键），2026-11-24 业务方要求移除，
+    这里不再产出；旧数据里的残留由 :func:`promote_fixed_fields` 剥离。
     """
     extra: dict[str, Any] = {}
-    consultant = _literal(item.get("consultant"))
-    if consultant:
-        extra["参与人"] = [f"销售顾问{consultant}", "客户本人"]
     defeat = _literal(item.get("defeat_type"))
     if defeat:
         extra["战败类型"] = defeat
@@ -571,6 +663,8 @@ def _node(
     name: str,
     summary: Iterable[Any],
     position: int,
+    lead_models: Mapping[str, set[str]] | None = None,
+    lead_series: Iterable[str] = (),
 ) -> dict[str, Any]:
     """构造一个契约形状的节点。
 
@@ -580,6 +674,7 @@ def _node(
     唯一的原文返场：模型对这一组什么都没写时，把组内原文逐字放进来兜底。履历的价值首先
     在于「这一段不能空」——宁可让读者看到一句粗糙的原文，也不要一片空白。
     """
+    lead_series = tuple(series for series in lead_series if series)
     written = _clean_contents(summary)
     if written:
         contents = written
@@ -611,35 +706,58 @@ def _node(
     node.update(fixed_fields(tail))
     extra = fallback_extra(tail)
     # 渠道是**唯一**可能与正文打架的一项：其余键取自记录字段，与措辞无关。
-    # 码值不可信时（见 :func:`channel_conflicts`），宁可不出这个字段，也不让卡片上的
-    # 小图标与节点名写反。
+    # 码值大面积错填 90441（电话）而正文写微信（见 :func:`channel_conflicts`）。
+    # 冲突、且这条记录的正文只提到一个渠道时，以正文为准——正文是销售自己写的；
+    # 正文提到多个渠道（「电话没接，又发了微信」）或没有渠道词时，码值同样拿不准，
+    # 维持旧口径：不出这个标签。
+    tail_text = _text(tail.get("content"))
+    channel = node.get("follow_up_channel")
+    if channel and channel_conflicts(channel, [tail_text]):
+        mentioned = channels_in([tail_text])
+        if len(mentioned) == 1:
+            node["follow_up_channel"] = next(iter(mentioned))[:MAX_FOLLOW_UP_CHANNEL_CHARS]
+        else:
+            node.pop("follow_up_channel")
+    # 兜底后的渠道仍要过节点级守卫：模型写的小结与它冲突时不出这个标签，
+    # 免得卡片上的小图标与节点名写反。
     if "follow_up_channel" in node and channel_conflicts(
-        node["follow_up_channel"],
-        [node["node_name"], *contents, *(item.get("content") for item in members)],
+        node["follow_up_channel"], [node["node_name"], *contents]
     ):
         node.pop("follow_up_channel")
-    # 参与人是个例外：合并节点里每个顾问都参与过，只留最后一位会把前面的人抹掉。
-    consultants = list(
-        dict.fromkeys(
-            value
-            for value in (_literal(item.get("consultant")) for item in members)
-            if value
-        )
-    )
-    if len(consultants) > 1:
-        extra["参与人"] = [f"销售顾问{person}" for person in consultants] + ["客户本人"]
+    # 业务方要车系（X700 / M817），不只是版本名（Ultra / PRO）：见
+    # :func:`lead_vehicle_map`。车型名称在同客户线索里能唯一落到车系时拼接；
+    # 多义时只用版本名，不猜。
+    model = _text(node.get("related_model"))
+    series_values = {_norm_series(value) for value in lead_series if value}
+    if model and lead_models:
+        candidates = lead_models.get(_norm_model(model)) or set()
+        if len({_norm_series(value) for value in candidates}) == 1:
+            node["related_model"] = (
+                f"{sorted(candidates)[0]} {model}"[:MAX_RELATED_MODEL_CHARS]
+            )
+    elif not model and len(series_values) == 1:
+        node["related_model"] = sorted(lead_series)[0][:MAX_RELATED_MODEL_CHARS]
+    if not node.get("related_model"):
+        node.pop("related_model", None)
     if extra:
         node["extra_info"] = extra
     return node
 
 
 def assemble(
-    records: Sequence[Mapping[str, str]], model_output: Any
+    records: Sequence[Mapping[str, str]],
+    model_output: Any,
+    *,
+    lead_models: Mapping[str, set[str]] | None = None,
+    lead_series: Iterable[str] = (),
 ) -> tuple[list[dict[str, Any]], list[int]]:
     """把模型的分组与原始记录装成契约节点列表。
 
     模型覆盖不到或压根没返回时，代码按记录 1:1 补节点——**不丢记录**是这条产线的
     底线（履历的价值首先在于「都在」）。补出来的节点回到时间序里的正确位置。
+
+    ``lead_models`` / ``lead_series`` 来自 :func:`lead_vehicle_map`，用于给
+    ``related_model`` 补车系；不传时行为与旧版一致。
 
     返回 ``(nodes, supplemented)``：``supplemented`` 是被代码补成节点的记录下标（0 基），
     留痕用。
@@ -684,6 +802,8 @@ def assemble(
                 name=name,
                 summary=summary,
                 position=position,
+                lead_models=lead_models,
+                lead_series=lead_series,
             )
         )
     return nodes, supplemented
@@ -720,6 +840,10 @@ def promote_fixed_fields(entry: Mapping[str, Any]) -> dict[str, Any]:
             node.pop(key, None)
 
     if extra is not None:
+        # 历史遗留的编外开放标签（如「参与人」）：契约从未有此键，业务方要求移除。
+        # 回放旧批次与外部调用方给的节点可能仍带着它，一并剥掉。
+        for legacy in _LEGACY_OPEN_TAGS:
+            extra.pop(legacy, None)
         node["extra_info"] = extra
     return node
 
@@ -898,7 +1022,11 @@ async def build(
             error = str(exc)[:200]
             calls = 1
 
-    nodes, supplemented = assemble(records, output)
+    # 车系在同客户线索记录里（``OntologyLeadInfo``）；L0 已经全量在手，不需要改依赖。
+    lead_models, lead_series = lead_vehicle_map(records_json)
+    nodes, supplemented = assemble(
+        records, output, lead_models=lead_models, lead_series=lead_series
+    )
     kept, dropped = sanitize(nodes)
     if not kept:
         return _out([], status="empty_after_sanitize", calls=calls,
@@ -923,6 +1051,7 @@ __all__ = [
     "TEMPLATE_NAME",
     "assemble",
     "build",
+    "channels_in",
     "fallback_extra",
     "fallback_name",
     "fixed_fields",

@@ -59,6 +59,29 @@ def _record(
     }
 
 
+def _lead_record(leads, *, record_id: str = "lead-1") -> dict:
+    """造一条 ``OntologyLeadInfo`` 记录；一条 L0 记录里可含多条线索。"""
+    blocks = []
+    for index, (series, model) in enumerate(leads, start=1):
+        block = "\n".join(
+            [
+                f"线索 ID：{index}",
+                f"意向车型：{model}",
+                f"意向车系：{series}",
+            ]
+        )
+        blocks.append(block if len(leads) == 1 else f"[第 {index} 条]\n{block}")
+    return {
+        "record_id": record_id,
+        "channel": "OntologyLeadInfo",
+        "source_name": "线索信息",
+        "status": "ok",
+        "created_at": "2026-09-10T13:07:42",
+        "content": "\n\n".join(blocks),
+        "source_key": record_id,
+    }
+
+
 def _records_json(*records: dict) -> str:
     return json.dumps(list(records), ensure_ascii=False)
 
@@ -203,7 +226,10 @@ def test_fixed_fields_carries_channel_from_method():
 
 
 def test_extra_info_keeps_only_open_tags():
-    """固定属性提升为一级字段后，``extra_info`` 只留开放标签（渠道也已是固定字段）。"""
+    """固定属性提升为一级字段后，``extra_info`` 只留战败类型。
+
+    「参与人」是历史版本自加的编外标签（契约从未有此键），2026-11-24 起不再产出。
+    """
     extra = fu.fallback_extra(
         {
             "method": "电话",
@@ -216,10 +242,7 @@ def test_extra_info_keeps_only_open_tags():
             "defeat_type": "价格原因",
         }
     )
-    assert extra == {
-        "参与人": ["销售顾问郑伊美", "客户本人"],
-        "战败类型": "价格原因",
-    }
+    assert extra == {"战败类型": "价格原因"}
 
 
 def test_next_follow_up_at_folds_midnight_to_a_date():
@@ -233,6 +256,69 @@ def test_next_follow_up_at_folds_midnight_to_a_date():
     item = {"next_follow": "2026-11-02 15:30:00"}
     assert fu.fixed_fields(item)["next_follow_up_at"] == "2026-11-02T15:30:00"
     assert fu.fixed_fields({"next_follow": "下周"})["next_follow_up_at"] == "下周"
+
+
+# ---------------------------------------------------------------- 车型车系
+
+def test_lead_vehicle_map_reads_every_lead_block():
+    """一条 L0 线索记录里可能有多条线索，按 ``[第 N 条]`` 逐块解析。"""
+    l0 = _records_json(
+        _lead_record([("全新M817", "Ultra"), ("M817", "MAX+"), ("X700", "Max+")])
+    )
+    by_model, series = fu.lead_vehicle_map(l0)
+    assert series == {"全新M817", "M817", "X700"}
+    # 车型名称做大小写归一：MAX+ / Max+ 是同一个版本。
+    assert by_model["ULTRA"] == {"全新M817"}
+    assert by_model["MAX+"] == {"M817", "X700"}
+
+
+def test_related_model_is_prefixed_with_the_customer_series():
+    """业务方要车系（M817 / X700），不只是版本名（Ultra / PRO）。"""
+    records = fu.parse_records(_records_json(_record("到店看车", vehicle="Ultra")))
+    l0 = _records_json(_lead_record([("全新M817", "Ultra"), ("M817", "PRO")]))
+    models, series = fu.lead_vehicle_map(l0)
+    nodes, _ = fu.assemble(records, None, lead_models=models, lead_series=series)
+    assert nodes[0]["related_model"] == "全新M817 Ultra"
+
+
+def test_related_model_keeps_trim_when_two_series_share_it():
+    """同一个版本名落在两个车系下：不猜，保持只出版本名。"""
+    records = fu.parse_records(_records_json(_record("到店看车", vehicle="Ultra")))
+    l0 = _records_json(_lead_record([("X700", "Ultra"), ("全新M817", "Ultra")]))
+    models, series = fu.lead_vehicle_map(l0)
+    nodes, _ = fu.assemble(records, None, lead_models=models, lead_series=series)
+    assert nodes[0]["related_model"] == "Ultra"
+
+
+def test_series_alias_is_not_treated_as_ambiguous():
+    """``全新M817`` 与 ``M817`` 是同一车系的两种写法，不构成歧义。"""
+    records = fu.parse_records(_records_json(_record("到店看车", vehicle="MAX+")))
+    l0 = _records_json(_lead_record([("全新M817", "MAX+"), ("M817", "MAX+")]))
+    models, series = fu.lead_vehicle_map(l0)
+    nodes, _ = fu.assemble(records, None, lead_models=models, lead_series=series)
+    assert "M817" in nodes[0]["related_model"]
+    assert nodes[0]["related_model"].endswith("MAX+")
+
+
+def test_related_model_falls_back_to_the_only_series():
+    """记录没填车型、客户只有一个车系时，车系本身就是最有用的信息。"""
+    records = fu.parse_records(_records_json(_record("到店看车", vehicle="")))
+    l0 = _records_json(_lead_record([("X700", "Ultra")]))
+    models, series = fu.lead_vehicle_map(l0)
+    nodes, _ = fu.assemble(records, None, lead_models=models, lead_series=series)
+    assert nodes[0]["related_model"] == "X700"
+
+
+def test_build_reads_series_from_the_same_l0_payload():
+    """管线只给跟进节点一份 ``records_json``，线索记录也在里面，不需要改依赖。"""
+    import asyncio
+
+    l0 = _records_json(
+        _record("到店看车", vehicle="Ultra"), _lead_record([("X700", "Ultra")])
+    )
+    out = asyncio.run(fu.build(l0, llm=None))
+    node = json.loads(out["follow_up_json"])[0]
+    assert node["related_model"] == "X700 Ultra"
 
 
 # ---------------------------------------------------------------- 装配
@@ -391,13 +477,16 @@ def test_extra_info_reflects_the_latest_record_of_a_merged_node():
     }
     nodes, _ = fu.assemble(records, model)
     assert nodes[0]["intent_level"] == "A 级意向（高）"
-    assert "意向级别" not in nodes[0]["extra_info"]
+    assert "extra_info" not in nodes[0]
     # 时间轴位置仍按首条记录。
     assert nodes[0]["followed_at"] == "2026-10-31T12:54:05"
 
 
 def test_merged_node_keeps_every_consultant_who_took_part():
-    """合并节点里每个顾问都参与过——只留最后一位会把前面的人从卡片上抹掉。"""
+    """合并节点不再把顾问并集写进 ``extra_info``——「参与人」已移除。
+
+    顾问信息由 ``follow_up_by``（取最新一条）承载，见下一个测试。
+    """
     records = fu.parse_records(
         _records_json(
             _record("一", created_at="2026-11-01 09:00:00", consultant="李凡", record_id="a"),
@@ -406,11 +495,7 @@ def test_merged_node_keeps_every_consultant_who_took_part():
     )
     model = {"nodes": [{"records": [1, 2], "node_name": "两次邀约", "summary": "两次电话邀约。"}]}
     nodes, _ = fu.assemble(records, model)
-    assert nodes[0]["extra_info"]["参与人"] == [
-        "销售顾问李凡",
-        "销售顾问王宇昕",
-        "客户本人",
-    ]
+    assert "extra_info" not in nodes[0]
 
 
 def test_model_groups_reject_out_of_range_and_duplicate_indexes():
@@ -567,26 +652,26 @@ def test_node_carries_the_six_fixed_fields_from_the_latest_record():
     assert node["followed_at"] == "2026-10-31T12:54:05"
 
 
-def test_extra_info_no_longer_duplicates_fixed_fields():
-    """固定字段已是一级字段，``extra_info`` 里不再重复——服务端提取后还要去重。"""
+def test_extra_info_is_absent_when_there_are_no_open_tags():
+    """固定属性都已是一级字段；无开放标签时 ``extra_info`` 整个不出键。"""
     records = fu.parse_records(_records_json(_record("电话没接通")))
     nodes, _ = fu.assemble(records, None)
-    extra = nodes[0]["extra_info"]
-    assert set(extra) == {"参与人"}
+    assert "extra_info" not in nodes[0]
     for legacy_key in (
         "跟进渠道",
         "渠道",
+        "参与人",
         "关联车型",
         "跟进结果",
         "意向级别",
         "是否转商机",
         "下一步跟进",
     ):
-        assert legacy_key not in extra
+        assert legacy_key not in nodes[0]
 
 
-def test_merged_node_keeps_every_consultant_but_follow_up_by_takes_the_latest():
-    """``参与人`` 列全所有顾问；``follow_up_by`` 单值，取最新一条的顾问。"""
+def test_merged_node_follow_up_by_takes_the_latest():
+    """``follow_up_by`` 单值，取最新一条的顾问；``extra_info`` 不再承载顾问并集。"""
     records = fu.parse_records(
         _records_json(
             _record("一", created_at="2026-11-01 09:00:00", consultant="李凡", record_id="a"),
@@ -596,11 +681,7 @@ def test_merged_node_keeps_every_consultant_but_follow_up_by_takes_the_latest():
     model = {"nodes": [{"records": [1, 2], "node_name": "两次邀约", "summary": "两次电话邀约。"}]}
     nodes, _ = fu.assemble(records, model)
     assert nodes[0]["follow_up_by"] == "王宇昕"
-    assert nodes[0]["extra_info"]["参与人"] == [
-        "销售顾问李凡",
-        "销售顾问王宇昕",
-        "客户本人",
-    ]
+    assert "extra_info" not in nodes[0]
 
 
 def test_sanitize_promotes_legacy_extra_info_fields():
@@ -630,10 +711,30 @@ def test_sanitize_promotes_legacy_extra_info_fields():
     assert node["converted_to_opportunity"] == "是"
     assert node["next_follow_up_at"] == "2026-05-22"
     assert node["follow_up_channel"] == "到店"
-    assert node["extra_info"] == {
-        "参与人": ["销售顾问张三", "客户本人"],
-        "战败类型": "价格原因",
-    }
+    assert node["extra_info"] == {"战败类型": "价格原因"}
+
+
+def test_sanitize_strips_legacy_participants_from_open_tags():
+    """「参与人」是历史遗留的编外标签：旧批次/外部节点带着它时，自检直接剥掉。"""
+    raw = [
+        {
+            "node_name": "首次到店",
+            "contents": ["客户到店看车。"],
+            "extra_info": {
+                "参与人": ["销售顾问张三", "客户本人"],
+                "战败类型": "价格原因",
+            },
+        },
+        {
+            "node_name": "电话跟进",
+            "contents": ["电话没接通。"],
+            "extra_info": {"参与人": ["客户本人"]},
+        },
+    ]
+    kept, _ = fu.sanitize(raw)
+    assert kept[0]["extra_info"] == {"战败类型": "价格原因"}
+    # 剥离后不剩任何键：与固定字段提升的既有口径一致，保留空对象。
+    assert kept[1]["extra_info"] == {}
 
 
 def test_sanitize_recognizes_our_legacy_next_step_key():
@@ -826,10 +927,11 @@ def test_channel_label_kept_when_text_agrees_or_is_silent():
     assert fu.channel_conflicts("电话", ["电话没接通，后来加了微信发资料。"]) is False
 
 
-def test_node_omits_channel_when_it_contradicts_node_name():
-    """节点名说「微信」、码值说「电话」：装配出的节点不带 ``follow_up_channel``。
+def test_node_takes_channel_from_text_when_code_conflicts():
+    """节点名/正文说「微信」、码值说「电话」：取正文渠道，不再丢弃。
 
-    这是 ``15903771774`` 第 3 条的现场复现。
+    这是 ``15903771774`` 第 3 条与 UAT ``13995570625``（2026-09-13 那条）的现场口径：
+    码值大面积错填 90441（电话），安全通道是「以正文为准」。
     """
     record = _record("微信已经联系说找个时间过来门店看一下具体的权益政策。", method="电话")
     nodes, _ = fu.assemble(
@@ -842,7 +944,35 @@ def test_node_omits_channel_when_it_contradicts_node_name():
     )
     node = nodes[0]
     assert node["node_name"] == "微信邀约到店"
-    assert "follow_up_channel" not in node
-    assert "跟进渠道" not in node["extra_info"]
+    assert node["follow_up_channel"] == "微信"
+    assert "extra_info" not in node
     # 其余标签不受影响。
     assert node["intent_level"] == "A 级意向（高）"
+
+
+def test_channel_is_dropped_when_text_names_several_channels():
+    """正文同时提到两个渠道、码值都不在其中：拿不准，仍不出这个标签。"""
+    record = _record("微信发了消息没回，上门也去过一次。", method="电话")
+    nodes, _ = fu.assemble(
+        fu.parse_records(_records_json(record)),
+        {"nodes": [{
+            "records": [1],
+            "node_name": "多次联系客户",
+            "summary": "销售顾问与客户保持沟通。",
+        }]},
+    )
+    assert "follow_up_channel" not in nodes[0]
+
+
+def test_channel_override_still_yields_to_model_wording():
+    """正文兜底后的渠道仍受节点级守卫管：模型写的小结说电话，就不能挂「微信」标签。"""
+    record = _record("微信推送到店时间持续跟进。", method="电话")
+    nodes, _ = fu.assemble(
+        fu.parse_records(_records_json(record)),
+        {"nodes": [{
+            "records": [1],
+            "node_name": "电话跟进",
+            "summary": "销售顾问电话联系客户确认到店时间。",
+        }]},
+    )
+    assert "follow_up_channel" not in nodes[0]
