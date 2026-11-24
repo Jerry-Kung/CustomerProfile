@@ -180,30 +180,54 @@ def test_fallback_name_uses_method_and_purpose():
     assert fu.fallback_name({}) == "客户跟进"
 
 
-def test_extra_info_drops_placeholders_and_bare_codes():
+def test_fixed_fields_drop_placeholders_and_bare_codes():
     """占位串与未解码的裸字典码不进对客产物（docs/README.md 的对客产出红线）。"""
-    extra = fu.fallback_extra(
+    fields = fu.fixed_fields(
         {
-            "method": "未知",
             "consultant": "无",
             "vehicle": "90463",  # 未登记码会原样漏出
             "result": "仍需后续跟进",
             "level": "-",
         }
     )
-    assert "跟进渠道" not in extra
-    assert "参与人" not in extra
-    assert "关联车型" not in extra
-    assert "意向级别" not in extra
-    assert extra["跟进结果"] == "仍需后续跟进"
+    assert "follow_up_by" not in fields
+    assert "related_model" not in fields
+    assert "intent_level" not in fields
+    assert fields["follow_up_result"] == "仍需后续跟进"
 
 
-def test_extra_info_carries_next_step_as_date_when_midnight():
-    """下次跟进时间大量落在零点（上游按天填），给日期就够了。"""
+def test_extra_info_keeps_only_open_tags():
+    """1124 版契约把六项固定属性提升为一级字段，``extra_info`` 只留开放标签。"""
+    extra = fu.fallback_extra(
+        {
+            "method": "电话",
+            "consultant": "郑伊美",
+            "vehicle": "Max",
+            "result": "仍需后续跟进",
+            "level": "A 级意向（高）",
+            "to_business": "否",
+            "next_follow": "2026-11-02 00:00:00",
+            "defeat_type": "价格原因",
+        }
+    )
+    assert extra == {
+        "跟进渠道": "电话",
+        "参与人": ["销售顾问郑伊美", "客户本人"],
+        "战败类型": "价格原因",
+    }
+
+
+def test_next_follow_up_at_folds_midnight_to_a_date():
+    """下次跟进时间大量落在零点（上游按天填），给日期就够了。
+
+    与 ``followed_at`` 不同，契约对 ``next_follow_up_at`` **不约束格式**，因此解析不了的
+    模糊时间（「下周」）原样保留——它没有 400 回滚风险，丢掉反而少了一条交接信息。
+    """
     item = {"next_follow": "2026-11-02 00:00:00"}
-    assert fu.fallback_extra(item)["下一步跟进"] == "2026-11-02"
+    assert fu.fixed_fields(item)["next_follow_up_at"] == "2026-11-02"
     item = {"next_follow": "2026-11-02 15:30:00"}
-    assert fu.fallback_extra(item)["下一步跟进"] == "2026-11-02T15:30:00"
+    assert fu.fixed_fields(item)["next_follow_up_at"] == "2026-11-02T15:30:00"
+    assert fu.fixed_fields({"next_follow": "下周"})["next_follow_up_at"] == "下周"
 
 
 # ---------------------------------------------------------------- 装配
@@ -337,7 +361,8 @@ def test_extra_info_reflects_the_latest_record_of_a_merged_node():
         ]
     }
     nodes, _ = fu.assemble(records, model)
-    assert nodes[0]["extra_info"]["意向级别"] == "A 级意向（高）"
+    assert nodes[0]["intent_level"] == "A 级意向（高）"
+    assert "意向级别" not in nodes[0]["extra_info"]
     # 时间轴位置仍按首条记录。
     assert nodes[0]["followed_at"] == "2026-10-31T12:54:05"
 
@@ -476,6 +501,184 @@ def test_sanitize_tolerates_non_array_input():
     assert fu.sanitize("不是数组") == ([], [{"index": 0, "reason": "不是数组"}])
 
 
+# ---------------------------------------------------------------- 1124 版固定字段
+
+def test_node_carries_the_six_fixed_fields_from_the_latest_record():
+    """六项固定属性是节点一级字段，全部取组内**最新**那条记录。
+
+    1124 版契约把它们从 ``extra_info`` 提出来单独成列，前端按结构化字段渲染。
+    """
+    records = fu.parse_records(
+        _records_json(
+            _record(
+                "客户忙",
+                created_at="2026-10-31 12:54:05",
+                level="C 级意向（中）",
+                record_id="a",
+            ),
+            _record(
+                "客户没接听",
+                created_at="2026-10-31 12:54:09",
+                level="A 级意向（高）",
+                consultant="李凡",
+                record_id="b",
+            ),
+        )
+    )
+    nodes, _ = fu.assemble(
+        records,
+        {"nodes": [{"records": [1, 2], "node_name": "两次跟进", "summary": "两次电话跟进。"}]},
+    )
+    node = nodes[0]
+    assert node["related_model"] == "Max"
+    assert node["intent_level"] == "A 级意向（高）"
+    assert node["follow_up_result"] == "仍需后续跟进"
+    assert node["converted_to_opportunity"] == "否"
+    assert node["next_follow_up_at"] == "2026-11-02"
+    assert node["followed_at"] == "2026-10-31T12:54:05"
+
+
+def test_extra_info_no_longer_duplicates_fixed_fields():
+    """固定字段已是一级字段，``extra_info`` 里不再重复——服务端提取后还要去重。"""
+    records = fu.parse_records(_records_json(_record("电话没接通")))
+    nodes, _ = fu.assemble(records, None)
+    extra = nodes[0]["extra_info"]
+    assert set(extra) == {"跟进渠道", "参与人"}
+    for legacy_key in ("关联车型", "跟进结果", "意向级别", "是否转商机", "下一步跟进"):
+        assert legacy_key not in extra
+
+
+def test_merged_node_keeps_every_consultant_but_follow_up_by_takes_the_latest():
+    """``参与人`` 列全所有顾问；``follow_up_by`` 单值，取最新一条的顾问。"""
+    records = fu.parse_records(
+        _records_json(
+            _record("一", created_at="2026-11-01 09:00:00", consultant="李凡", record_id="a"),
+            _record("二", created_at="2026-11-01 10:00:00", consultant="王宇昕", record_id="b"),
+        )
+    )
+    model = {"nodes": [{"records": [1, 2], "node_name": "两次邀约", "summary": "两次电话邀约。"}]}
+    nodes, _ = fu.assemble(records, model)
+    assert nodes[0]["follow_up_by"] == "王宇昕"
+    assert nodes[0]["extra_info"]["参与人"] == [
+        "销售顾问李凡",
+        "销售顾问王宇昕",
+        "客户本人",
+    ]
+
+
+def test_sanitize_promotes_legacy_extra_info_fields():
+    """旧形状节点（六项都在 ``extra_info``）经自检后提升为一级字段，并去掉重复键。"""
+    raw = [
+        {
+            "node_name": "首次到店",
+            "contents": ["客户到店看车。"],
+            "extra_info": {
+                "跟进渠道": "到店",
+                "参与人": ["销售顾问张三", "客户本人"],
+                "关联车型": "X700",
+                "意向级别": "B 级意向（中）",
+                "跟进结果": "预约试驾",
+                "是否转商机": "是",
+                "下次跟进时间": "2026-05-22 00:00:00",
+                "战败类型": "价格原因",
+            },
+        }
+    ]
+    kept, dropped = fu.sanitize(raw)
+    assert dropped == []
+    node = kept[0]
+    assert node["related_model"] == "X700"
+    assert node["intent_level"] == "B 级意向（中）"
+    assert node["follow_up_result"] == "预约试驾"
+    assert node["converted_to_opportunity"] == "是"
+    assert node["next_follow_up_at"] == "2026-05-22"
+    assert node["extra_info"] == {
+        "跟进渠道": "到店",
+        "参与人": ["销售顾问张三", "客户本人"],
+        "战败类型": "价格原因",
+    }
+
+
+def test_sanitize_recognizes_our_legacy_next_step_key():
+    """旧版我们把下次跟进写成 ``下一步跟进``，它不在服务端别名表里，自检要认。"""
+    raw = [
+        {
+            "node_name": "电话跟进",
+            "contents": ["电话没接通。"],
+            "extra_info": {"下一步跟进": "2026-11-02"},
+        }
+    ]
+    kept, _ = fu.sanitize(raw)
+    assert kept[0]["next_follow_up_at"] == "2026-11-02"
+    assert "下一步跟进" not in kept[0]["extra_info"]
+
+
+def test_sanitize_caps_fixed_field_lengths():
+    """六项固定字段按契约各自限长，超长截断而不是整条丢弃。"""
+    raw = [
+        {
+            "node_name": "A",
+            "contents": ["x"],
+            "follow_up_by": "人" * 120,
+            "related_model": "车" * 120,
+            "intent_level": "级" * 80,
+            "follow_up_result": "果" * 120,
+            "converted_to_opportunity": "是" * 80,
+            "next_follow_up_at": "日" * 120,
+        }
+    ]
+    kept, _ = fu.sanitize(raw)
+    node = kept[0]
+    assert len(node["follow_up_by"]) == fu.MAX_FOLLOW_UP_BY_CHARS
+    assert len(node["related_model"]) == fu.MAX_RELATED_MODEL_CHARS
+    assert len(node["intent_level"]) == fu.MAX_INTENT_LEVEL_CHARS
+    assert len(node["follow_up_result"]) == fu.MAX_FOLLOW_UP_RESULT_CHARS
+    assert len(node["converted_to_opportunity"]) == fu.MAX_CONVERTED_CHARS
+    assert len(node["next_follow_up_at"]) == fu.MAX_NEXT_FOLLOW_UP_CHARS
+
+
+def test_sanitize_converts_boolean_to_opportunity():
+    """契约允许转商机给布尔值；出口统一成「是/否」，与记录解码后的形态一致。"""
+    raw = [
+        {"node_name": "A", "contents": ["x"], "converted_to_opportunity": True},
+        {"node_name": "B", "contents": ["y"], "converted_to_opportunity": False},
+    ]
+    kept, _ = fu.sanitize(raw)
+    assert kept[0]["converted_to_opportunity"] == "是"
+    assert kept[1]["converted_to_opportunity"] == "否"
+
+
+def test_sanitize_prefers_top_level_over_extra_info():
+    """一级字段与旧别名同时出现时，一级字段说了算，别名一律从 ``extra_info`` 去掉。"""
+    raw = [
+        {
+            "node_name": "A",
+            "contents": ["x"],
+            "intent_level": "A 级意向（高）",
+            "extra_info": {"意向级别": "C 级意向（中）", "跟进渠道": "电话"},
+        }
+    ]
+    kept, _ = fu.sanitize(raw)
+    assert kept[0]["intent_level"] == "A 级意向（高）"
+    assert kept[0]["extra_info"] == {"跟进渠道": "电话"}
+
+
+def test_sanitize_drops_empty_and_placeholder_fixed_fields():
+    """空串与占位串不出键——契约允许缺省，卡片上也不该出现「跟进人：无」。"""
+    raw = [
+        {
+            "node_name": "A",
+            "contents": ["x"],
+            "follow_up_by": "  ",
+            "related_model": "未知",
+            "intent_level": "无",
+        }
+    ]
+    kept, _ = fu.sanitize(raw)
+    for key in ("follow_up_by", "related_model", "intent_level"):
+        assert key not in kept[0]
+
+
 # ---------------------------------------------------------------- 入口（跳过 / 兜底 / 正常）
 
 def test_no_follow_records_short_circuits_before_any_llm_call():
@@ -595,4 +798,4 @@ def test_node_omits_channel_when_it_contradicts_node_name():
     assert node["node_name"] == "微信邀约到店"
     assert "跟进渠道" not in node["extra_info"]
     # 其余标签不受影响。
-    assert node["extra_info"]["意向级别"] == "A 级意向（高）"
+    assert node["intent_level"] == "A 级意向（高）"

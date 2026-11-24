@@ -71,7 +71,7 @@ def test_analysis_result_never_exceeds_the_seven_contract_keys():
     """``analysis_result`` 的键恒是契约七键的子集——多一个键就是契约外的载荷。
 
     「六键」是 v2 初版（四区块 + 两基础键）。2026-11-16 起契约新增
-    ``follow_up_history``（见 ``docs/reference/AI画像回传接口变更说明-客户跟进履历.md``），
+    ``follow_up_history``（见 ``docs/reference/AI画像回传接口变更说明-客户跟进履历-1124.md``），
     因此白名单同步扩到七键。**扩白名单不等于必须出键**：见下面那条「无数据不出键」。
     """
     payload = _build(

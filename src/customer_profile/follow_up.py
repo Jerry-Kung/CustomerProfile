@@ -1,7 +1,8 @@
 """客户跟进履历：把「销售跟进记录」整理成回传体 ``follow_up_history``。
 
-业务契约见 ``docs/reference/AI画像回传接口变更说明-客户跟进履历.md``，方案与本仓库的
-取舍见 ``docs/feature-followup-record/方案设计.md``。这里只记**代码为什么长这样**。
+业务契约见 ``docs/reference/AI画像回传接口变更说明-客户跟进履历-1124.md``；本仓库
+这一版升级的取舍见 ``docs/feature-followup-record/跟进履历固定字段升级-方案.md``。
+这里只记**代码为什么长这样**。
 
 ## 为什么单独一次 LLM 调用（而不是塞进 L1）
 
@@ -27,6 +28,18 @@ L2 兜底裁决同一骨架。
 记录字段确定性取到，交给模型只会引入「把码值抄错」这一种新失败模式。（``next_step``
 是**叙述**而非字段值：它要把结论与约定时间讲成一句连贯的话，这是模型的事；取值仍以
 记录字段为准，提示词已就此立规矩。）
+
+## 六项固定属性是一级字段（1124 版契约）
+
+跟进人、关联车型、意向级别、跟进结果、转商机、下次跟进时间在 1124 版契约里从
+``extra_info`` 提升为节点一级字段。它们仍然**由代码从记录字段确定性取值**（理由同上），
+``extra_info`` 只留开放标签（渠道、参与人、战败类型）。服务端提取固定字段后会从
+``extra_info`` 去重，我们这边先不重复，等于同一事实只发一遍。
+
+:func:`sanitize` 同时承担旧形状的**提升**：历史产物与外部调用方给的节点里，六项可能
+还在 ``extra_info``（别名见 :data:`_FIXED_FIELDS`），自检时提到一级并从 ``extra_info``
+删掉。我们旧版把下次跟进写成 ``下一步跟进``——它不在服务端的别名表里，只有这里的
+提升认得，回放旧批次时靠它保住这个值。
 
 ## ``contents``：跟进小结 + 后续安排，两段都由模型写
 
@@ -74,6 +87,14 @@ MAX_CONTENT_CHARS = 1000
 MAX_NODE_NAME_CHARS = 100
 MAX_EXTRA_BYTES = 64 * 1024
 """契约 §3.3 的字段上限，逐条对应，改这里之前先回看契约。"""
+
+MAX_FOLLOW_UP_BY_CHARS = 100
+MAX_RELATED_MODEL_CHARS = 100
+MAX_INTENT_LEVEL_CHARS = 50
+MAX_FOLLOW_UP_RESULT_CHARS = 100
+MAX_CONVERTED_CHARS = 50
+MAX_NEXT_FOLLOW_UP_CHARS = 100
+"""1124 版契约 §3.2 六项固定属性的上限，逐条对应。"""
 
 MIN_COMPLETION_TOKENS = 30
 """输出量下限。与 L2 兜底同思路：非空输入却只回几 token，等于模型没干活。
@@ -125,6 +146,32 @@ _PROMPT_FIELDS: tuple[tuple[str, str], ...] = (
     ("到店时间", "arrive_time"),
     ("跟进内容", "content"),
 )
+
+_FIXED_FIELDS: tuple[tuple[str, str, int, tuple[str, ...]], ...] = (
+    # (回传字段, 记录里的来源键, 契约上限, extra_info 历史别名)
+    ("follow_up_by", "consultant", MAX_FOLLOW_UP_BY_CHARS, ("跟进人", "销售顾问")),
+    ("related_model", "vehicle", MAX_RELATED_MODEL_CHARS, ("关联车型",)),
+    ("intent_level", "level", MAX_INTENT_LEVEL_CHARS, ("意向级别", "意向等级")),
+    ("follow_up_result", "result", MAX_FOLLOW_UP_RESULT_CHARS, ("跟进结果",)),
+    (
+        "converted_to_opportunity",
+        "to_business",
+        MAX_CONVERTED_CHARS,
+        ("转商机", "是否转商机"),
+    ),
+    # ``下一步跟进`` 是我们 1124 版之前的输出键，只在自检提升时认，不指望服务端认得。
+    (
+        "next_follow_up_at",
+        "next_follow",
+        MAX_NEXT_FOLLOW_UP_CHARS,
+        ("下次跟进时间", "下次跟进", "下一步跟进"),
+    ),
+)
+"""六项固定属性：回传字段、记录来源键、上限、``extra_info`` 里的历史别名。
+
+别名前三组与服务端契约的兼容口径一致（它们决定服务端能否从旧形状里提取），最后一组
+``下一步跟进`` 是本仓库旧版的输出键，服务端不认识，只能在本地自检时提升。
+"""
 
 
 def _text(value: Any) -> str:
@@ -362,8 +409,58 @@ def channel_conflicts(method: str, texts: Iterable[Any]) -> bool:
     return bool(mentioned) and method not in mentioned
 
 
+def _next_follow_up(raw: Any) -> str:
+    """下次跟进时间：能解析就归一，解析不了原样保留。
+
+    ``next_follow_up_at`` 在契约里只是一个 ≤100 字的展示串，没有 ``followed_at`` 那种
+    「格式非法即 400」的约束。因此这里的取舍与时间轴相反：宁可原样展示「下周」，也不要
+    把一条交接信息弄丢。
+    """
+    if not isinstance(raw, str):
+        return ""
+    text = parse_time(raw)
+    if not text:
+        text = _literal(raw)
+    if not text:
+        return ""
+    # 下次跟进时间大量落在零点（上游按天填），给日期就够了。
+    return text[:10] if text.endswith("T00:00:00") else text
+
+
+def _fixed_value(key: str, raw: Any) -> str:
+    """把一项固定属性折成回传值；取不到给空串。
+
+    只认字符串（转商机额外认布尔）——契约的六项都是字符串列，把数字或结构体 ``str()``
+    成 ``"{'key': ...}"`` 等于把内部形态印到卡片上。
+    """
+    if key == "converted_to_opportunity":
+        if isinstance(raw, bool):
+            return "是" if raw else "否"
+        return _literal(raw) if isinstance(raw, str) else ""
+    if key == "next_follow_up_at":
+        return _next_follow_up(raw)
+    return _literal(raw) if isinstance(raw, str) else ""
+
+
+def fixed_fields(item: Mapping[str, Any]) -> dict[str, str]:
+    """从一条记录确定性产出六项固定属性（1124 版契约 §3.2）。
+
+    空值、占位串与未解码的裸码不出键——契约允许缺省，卡片上也不该出现「跟进人：无」。
+    """
+    out: dict[str, str] = {}
+    for key, record_key, limit, _ in _FIXED_FIELDS:
+        value = _fixed_value(key, item.get(record_key))
+        if value:
+            out[key] = value[:limit]
+    return out
+
+
 def fallback_extra(item: Mapping[str, str]) -> dict[str, Any]:
-    """从记录字段确定性取 ``extra_info``。取不到的键不出现，不留空串。"""
+    """从记录字段确定性取 ``extra_info`` 的**开放标签**。
+
+    1124 版契约把六项固定属性提成一级字段（:func:`fixed_fields`），这里只留契约没有
+    结构化承载的三项：渠道、参与人、战败类型。取不到的键不出现，不留空串。
+    """
     extra: dict[str, Any] = {}
     method = _literal(item.get("method"))
     if method:
@@ -371,25 +468,9 @@ def fallback_extra(item: Mapping[str, str]) -> dict[str, Any]:
     consultant = _literal(item.get("consultant"))
     if consultant:
         extra["参与人"] = [f"销售顾问{consultant}", "客户本人"]
-    vehicle = _literal(item.get("vehicle"))
-    if vehicle:
-        extra["关联车型"] = vehicle
-    result = _literal(item.get("result"))
-    if result:
-        extra["跟进结果"] = result
-    level = _literal(item.get("level"))
-    if level:
-        extra["意向级别"] = level
-    to_business = _literal(item.get("to_business"))
-    if to_business:
-        extra["是否转商机"] = to_business
     defeat = _literal(item.get("defeat_type"))
     if defeat:
         extra["战败类型"] = defeat
-    next_follow = parse_time(item.get("next_follow"))
-    if next_follow:
-        # 下次跟进时间大量落在零点（上游按天填），给日期就够了。
-        extra["下一步跟进"] = next_follow[:10] if next_follow.endswith("T00:00:00") else next_follow
     return extra
 
 
@@ -520,10 +601,12 @@ def _node(
         text = readable_time(followed_at)
         if text:
             node["followed_at_text"] = text
-    # ``extra_info`` 取组内**最新**那条记录：一个节点合并了多次跟进时，卡片下方标签要反映
-    # 这组跟进的最终状态（结果、意向级别、下次跟进时间），否则读者会看到正文写「A 级、
-    # 11 月 3 日」而标签写「C 级、11 月 1 日」。时间轴位置仍用首条（``followed_at`` 不动）。
+    # 六项固定属性与 ``extra_info`` 取组内**最新**那条记录：一个节点合并了多次跟进时，
+    # 卡片下方标签要反映这组跟进的最终状态（结果、意向级别、下次跟进时间），否则读者会
+    # 看到正文写「A 级、11 月 3 日」而字段写「C 级、11 月 1 日」。时间轴位置仍用首条
+    # （``followed_at`` 不动）。
     tail = members[-1]
+    node.update(fixed_fields(tail))
     extra = fallback_extra(tail)
     # 渠道标签是**唯一**可能与正文打架的一项：其余键取自记录字段，与措辞无关。
     # 码值不可信时（见 :func:`channel_conflicts`），宁可不出这个键，也不让卡片上的
@@ -609,6 +692,38 @@ def assemble(
 # ---------------------------------------------------------------- 契约自检
 
 
+def promote_fixed_fields(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """把任意形状的节点提升成 1124 版：六项固定属性提到一级，``extra_info`` 去重。
+
+    处理两种来源：
+
+    1. 本仓库旧版的产物（六项在 ``extra_info``，下次跟进叫 ``下一步跟进``）；
+    2. 外部调用方或回放批次给的、服务端兼容口径的节点（别名见 :data:`_FIXED_FIELDS`）。
+
+    一级字段优先于别名；别名无论提没提到值都从 ``extra_info`` 删掉——服务端提取后也会
+    去重，这里先删等于同一事实只发一遍。返回副本，不改入参。
+    """
+    node = dict(entry)
+    raw_extra = node.get("extra_info")
+    extra = dict(raw_extra) if isinstance(raw_extra, Mapping) else None
+
+    for key, _, limit, aliases in _FIXED_FIELDS:
+        value = _fixed_value(key, node.get(key))
+        for alias in aliases:
+            if not value and extra is not None:
+                value = _fixed_value(key, extra.get(alias))
+            if extra is not None:
+                extra.pop(alias, None)
+        if value:
+            node[key] = value[:limit]
+        else:
+            node.pop(key, None)
+
+    if extra is not None:
+        node["extra_info"] = extra
+    return node
+
+
 def _extra_ok(extra: Any) -> bool:
     if not isinstance(extra, dict):
         return False
@@ -679,7 +794,15 @@ def sanitize(nodes: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if text:
             node["followed_at_text"] = text[:MAX_NODE_NAME_CHARS]
 
-        extra = entry.get("extra_info")
+        # 六项固定属性：先提升（旧形状 → 一级字段），再逐项取限长后的值。
+        # 空值与占位串不出键；``extra_info`` 里的同名旧键已在提升时删掉。
+        normalized = promote_fixed_fields(entry)
+        for key, _, _, _ in _FIXED_FIELDS:
+            value = normalized.get(key)
+            if value:
+                node[key] = value
+
+        extra = normalized.get("extra_info")
         if isinstance(extra, Mapping) and _extra_ok(dict(extra)):
             node["extra_info"] = dict(extra)
 
@@ -788,17 +911,25 @@ async def build(
 
 __all__ = [
     "FOLLOW_CHANNEL",
+    "MAX_CONVERTED_CHARS",
     "MAX_CONTENTS",
+    "MAX_FOLLOW_UP_BY_CHARS",
+    "MAX_FOLLOW_UP_RESULT_CHARS",
+    "MAX_INTENT_LEVEL_CHARS",
+    "MAX_NEXT_FOLLOW_UP_CHARS",
     "MAX_NODES",
+    "MAX_RELATED_MODEL_CHARS",
     "TEMPLATE_NAME",
     "assemble",
     "build",
     "fallback_extra",
     "fallback_name",
+    "fixed_fields",
     "model_groups",
     "parse_record_lines",
     "parse_records",
     "parse_time",
+    "promote_fixed_fields",
     "readable_time",
     "render_input",
     "sanitize",
