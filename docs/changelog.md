@@ -2,6 +2,30 @@
 
 按时间倒序记录重大功能与里程碑事件。
 
+## 2026-11-25 — 运行台 500：MySQL 断连不再拖垮读接口
+
+UAT `/runs`、`/runs/count` 连续 500。日志一小时 79 条
+`_mysql_connector.MySQLInterfaceError: Lost connection to MySQL server during query`，
+栈顶落在 `store.py` 里 `work()` 的收尾 `connection.rollback()`——**查询本身已经成功**。
+
+根因三处，互相放大：
+
+- **判据漏了一类异常**。`MySQLInterfaceError` 是 `Error` 的子类但 `errno` 恒为 `None`，
+  只按 errno 判断时它被当成普通业务错误：不重连、不清连接，进程从此每次请求都用
+  同一条死连接，只能靠重启恢复。
+- **清理动作连累结果**。`fetchall` 已拿到行，`rollback` 只为释放快照；这一步断连
+  却把整次读判成失败，FastAPI 直接回 500。
+- **读不重试**。执行中断连一律上抛，而读没有副作用，重试一次几乎没有代价。
+
+改动：`MySqlConnection` 自己维护「已判死」状态（驱动在服务端掐连接后仍说 socket
+正常），`is_disconnect` 增加 errno 缺失时的文本兜底（errno 有值时仍以 errno 为准）；
+`_execute` 先取结果再做清理，清理失败只在断连时降级为告警；只读语句标记
+`safe_to_retry`，断连后重连重试一次（写不设该标记，避免重复提交）；连接空闲超过
+5 秒先 `ping` 一次；工作线程退出时 `Store` 自动重建连接（`close()` 之后不再重连）。
+
+验证：全量测试通过；新增 6 个用例钉住「清理断连不丢结果 / 下次操作重连 /
+读重试一次 / 写不重试 / 线程自愈 / 关闭后不重连」与判据本身。
+
 ## 2026-11-24（追加 4）— 渠道冲突以正文为准，`related_model` 带车系
 
 UAT `13995570625` 现场：节点 `follow_up_channel` 为空而正文/节点名明说微信。定位结论

@@ -44,6 +44,31 @@ _MYSQL_DISCONNECT_ERRNOS = frozenset(
 )
 """断连类错误。只有这些值得重连重试；语法错误、约束冲突重试一万次也一样。"""
 
+_MYSQL_DISCONNECT_MESSAGES = (
+    "lost connection",
+    "gone away",
+    "connection not available",
+    "connection was closed",
+    "reading authorization packet",
+    "broken pipe",
+    "connection reset by peer",
+)
+"""**errno 缺失时的兜底判据。**
+
+``_mysql_connector.MySQLInterfaceError``（C 扩展层）是 ``Error`` 的子类，但它的
+``errno`` 恒为 ``None``——异常只带一句文本。2026-11-25 UAT 的接口 500 就是这一类：
+
+    _mysql_connector.MySQLInterfaceError: Lost connection to MySQL server during query
+
+只按 errno 判断时它被当成「普通业务错误」，于是既不重连也不清连接，进程从此
+每次请求都用同一条死连接，直到重启。**文本匹配只在这一层兜底**：errno 有值时
+仍然以 errno 为唯一依据，避免把语法错误误判成断连。"""
+
+
+def _looks_like_disconnect(message: str) -> bool:
+    text = (message or "").lower()
+    return any(marker in text for marker in _MYSQL_DISCONNECT_MESSAGES)
+
 
 def convert_placeholders(sql: str, target: str) -> str:
     """把 ``?`` 换成目标驱动的占位符，**跳过引号内的内容**。
@@ -211,31 +236,101 @@ class MySqlConnection:
     """``mysql.connector`` 连接的适配。
 
     使用 ``DictCursor`` 让行直接是 ``dict``；``?`` 占位符在这里换成 ``%s``。
+
+    **为什么这里要自己维护 ``_broken``。** ``mysql.connector`` 在「服务端已把连接
+    掐了、客户端 socket 还显示连着」这个窗口里，``is_connected()`` 会说 True，
+    第一次查询才抛 2013。只信驱动的话，上层永远不知道该重连；记一次失败后，
+    ``is_connected()`` 立刻变 False，下一次操作前就会重建连接。
     """
 
     def __init__(self, connection: Any) -> None:
         self._connection = connection
+        self._broken: BaseException | None = None
+        self._broken_at: str | None = None
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> _MySqlCursor:
-        cursor = self._connection.cursor(dictionary=True)
+        try:
+            cursor = self._connection.cursor(dictionary=True)
+        except BaseException as exc:
+            self._note_failure(exc)
+            raise
         try:
             cursor.execute(convert_placeholders(sql, "%s"), tuple(params))
-        except BaseException:
+        except BaseException as exc:
             cursor.close()
+            self._note_failure(exc)
             raise
         return _MySqlCursor(cursor)
 
     def commit(self) -> None:
-        self._connection.commit()
+        try:
+            self._connection.commit()
+        except BaseException as exc:
+            self._note_failure(exc)
+            raise
 
     def rollback(self) -> None:
-        self._connection.rollback()
+        try:
+            self._connection.rollback()
+        except BaseException as exc:
+            self._note_failure(exc)
+            raise
 
     def close(self) -> None:
         try:
             self._connection.close()
         except Exception:  # 已经断了的连接，关闭失败无需上抛
             pass
+
+    # ------------------------------------------------------------ 探活
+
+    def is_connected(self) -> bool:
+        """廉价探活：只看 socket 状态与「是否已判死」。**不发网络包。**"""
+        if self._broken is not None:
+            return False
+        probe = getattr(self._connection, "is_connected", None)
+        if probe is None:
+            return True
+        try:
+            return bool(probe())
+        except Exception:
+            return False
+
+    def ping(self) -> bool:
+        """真探活：发一次 ``COM_PING``。
+
+        用于「连接空闲了很久，服务端可能已经把它回收」的场景——此时 socket 层
+        看着是好的，但下一次查询必然 2013。``reconnect=False``：重连由
+        ``Store`` 统一做（它还要按失败次数退避、并记录 ``db_error``）。
+        """
+        if self._broken is not None:
+            return False
+        ping = getattr(self._connection, "ping", None)
+        if ping is None:
+            return self.is_connected()
+        try:
+            ping(reconnect=False, attempts=1, delay=0)
+            return True
+        except BaseException as exc:
+            self._note_failure(exc)
+            return False
+
+    @property
+    def broken_reason(self) -> str | None:
+        return self._broken_at
+
+    def _note_failure(self, exc: BaseException) -> None:
+        """断连类失败记一笔，让后续 ``is_connected()`` 立刻返回 False。
+
+        非断连错误（语法、约束、超长）不记：那类错误连接本身是好的，记了会让
+        每条坏 SQL 都白重连一次。
+        """
+        if self._broken is not None:
+            return
+        if not MySqlBackend.is_disconnect(exc):
+            return
+        self._broken = exc
+        self._broken_at = f"{type(exc).__name__}: {exc}"[:300]
 
 
 # ---------------------------------------------------------------- 后端
@@ -352,13 +447,18 @@ class MySqlBackend:
     def is_disconnect(exc: BaseException) -> bool:
         try:
             from mysql.connector import Error as MySqlError
-
-            if isinstance(exc, MySqlError):
-                return getattr(exc, "errno", None) in _MYSQL_DISCONNECT_ERRNOS
-            if isinstance(exc, (ConnectionError, OSError)):
-                return True
         except ImportError:  # 驱动不可用时不假装能判断
             return False
+        if isinstance(exc, MySqlError):
+            errno = getattr(exc, "errno", None)
+            if errno is not None:
+                # errno 有值时它就是唯一依据：约束冲突、语法错误不能被文本里的
+                # 「connection」之类字样误判成断连。
+                return errno in _MYSQL_DISCONNECT_ERRNOS
+            # 接口层异常（``MySQLInterfaceError``）没有 errno，只能看文本。
+            return _looks_like_disconnect(str(exc))
+        if isinstance(exc, (ConnectionError, OSError)):
+            return True
         return False
 
     @staticmethod

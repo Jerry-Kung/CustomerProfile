@@ -155,6 +155,13 @@ class _ConnectionThread:
         self._last_ok_at_ms: int | None = None
         self._db_error: str | None = None
         self._reconnect_max_attempts = 3
+        self._keepalive_idle_ms = 5_000
+        """空闲超过这个时长就先 ping 一次再复用连接。
+
+        UAT 实测每小时数十次「Lost connection during query」，说明连接在两次
+        操作之间被服务端或中间层回收。阈值取 5 秒：运行台的查询频率远高于它，
+        正常负载下几乎不额外发 ping；只有真正闲置之后才付那一次往返。
+        """
         self._thread.start()
         self._started.wait()
 
@@ -239,14 +246,16 @@ class _ConnectionThread:
             connection.close()
 
     def _execute_recovering(self, connection: Any, work: Callable[[Any], Any]) -> Any:
-        """执行一次操作；遇到断连就重连并把**同一次**操作重试一次。
+        """执行一次操作；遇到断连就重连，**只读**语句再把同一次操作重试一次。
 
-        为什么可以重试：``work`` 里的写路径都是 upsert 或条件 UPDATE（幂等），
-        纯 INSERT 只有 ``insert_attempt``——它对 ``attempt_id`` 自增，重试会多一行。
-        因此这里判断的是「连接是不是已经死了」：连接在**开始执行前**就是断的，
-        重试是安全的（那次操作根本没发出去）；如果在执行中才断，无法区分「服务端已提交
-        但响应丢了」，此时**不重试**，把异常如实交给调用方（留痕是 fail_soft，不会让
-        业务失败，但会留下错误日志）。
+        为什么写操作不重试：``work`` 里的写路径大多是 upsert 或条件 UPDATE（幂等），
+        但纯 INSERT 只有 ``insert_attempt``——它对 ``attempt_id`` 自增，重试会多一行。
+        执行中断开时无法区分「服务端已提交但响应丢了」，因此写操作只重连不重试，
+        把异常如实交给调用方（留痕是 fail_soft，不会让业务失败，但会留下错误日志）。
+
+        为什么只读要重试：读没有副作用，而「一次 2013 就让整个接口 500」的代价是
+        用户直接看不到运行台。2026-11-25 UAT 的 500 就是把一次可重试的读当成了
+        终态错误。
         """
         if connection is None:
             connection = self._reconnect()
@@ -255,7 +264,17 @@ class _ConnectionThread:
         if not self._connection_alive(connection):
             self._mark_disconnected(ConnectionResetError("连接已失效"))
             connection = self._reconnect()
-        return self._invoke(connection, work)
+
+        try:
+            return self._invoke(connection, work)
+        except BaseException as exc:
+            if not getattr(work, "safe_to_retry", False):
+                raise
+            if not self._backend.is_disconnect(exc):
+                raise
+            logger.warning("只读语句因断连失败，重连后重试一次：{}", exc)
+            connection = self._reconnect()
+            return self._invoke(connection, work)
 
     def _invoke(self, connection: Any, work: Callable[[Any], Any]) -> Any:
         try:
@@ -286,11 +305,36 @@ class _ConnectionThread:
                 time.sleep(min(2.0 ** (attempt - 1), 10.0) * 0.1)
 
     def _connection_alive(self, connection: Any) -> bool:
+        """连接还能不能直接用。
+
+        两级判断，缺一不可：
+
+        1. **socket 层**：``is_connected()``。便宜，但只能发现「客户端已经知道断了」。
+        2. **空闲超过 ``_keepalive_idle_ms`` 时真发一次 ping**。服务端按
+           ``wait_timeout`` 或中间层按空闲时间掐连接时，socket 层仍显示连着，
+           下一次查询才 2013——这正是 UAT 每小时几十次的失败形态。
+
+        ``ping`` 是可选能力（SQLite 连接没有），没有就只做第一级。
+        """
         probe = getattr(connection, "is_connected", None)
-        if probe is None:
+        if probe is not None:
+            try:
+                if not bool(probe()):
+                    return False
+            except Exception:
+                return False
+
+        idle_ms = (
+            None if self._last_ok_at_ms is None else _now_ms() - self._last_ok_at_ms
+        )
+        if idle_ms is not None and idle_ms < self._keepalive_idle_ms:
+            return True
+
+        ping = getattr(connection, "ping", None)
+        if ping is None:
             return True
         try:
-            return bool(probe())
+            return bool(ping())
         except Exception:
             return False
 
@@ -335,6 +379,8 @@ class Store:
         """仅 SQLite 后端有意义；MySQL 上为 ``None``。保留是为了让「基线表在哪」这类
         排障脚本不至于在切库当天全部失效。"""
         self._thread: _ConnectionThread | None = None
+        self._closed = False
+        """``close()`` 之后不再自动重连：进程正在退出，重建连接只会掩盖泄漏。"""
         self.archive_dir = Path(archive_dir) if archive_dir else None
         """运行时数据包目录（存储瘦身）。``None`` 表示不读包——此时 ``packed`` 的
         行会如实返回空载荷并标 ``payload_missing``，不会静默当成「没有输出」。"""
@@ -356,6 +402,7 @@ class Store:
         """连接并按需应用表结构。幂等。"""
         if self._thread is not None and self._thread.alive:
             return
+        self._closed = False
 
         def setup(connection: Any) -> None:
             if self._backend.name == "sqlite":
@@ -393,6 +440,7 @@ class Store:
             raise error
 
     def close(self) -> None:
+        self._closed = True
         if self._thread is not None:
             self._thread.close()
             self._thread = None
@@ -416,11 +464,21 @@ class Store:
         return self._thread.healthy()
 
     def _require_thread(self) -> _ConnectionThread:
-        if self._thread is None or not self._thread.alive:
-            raise RuntimeError(
-                "Store 尚未 connect()（或已关闭）；留痕读写需要活动连接"
-            )
-        return self._thread
+        if self._thread is not None and self._thread.alive:
+            return self._thread
+        if self._closed:
+            raise RuntimeError("Store 已关闭；留痕读写需要活动连接")
+
+        # 工作线程已经退出（写回时撞上取消、或驱动在清理阶段抛出未捕获异常）时
+        # **重建**，而不是让整个进程一直抛「Store 尚未 connect()」。
+        #
+        # 旧行为是只抛错：容器 Up、健康检查通过、接口全 500，只能靠重启恢复。
+        # 重建失败仍然上抛——那说明是库不可达，不是线程状态问题。
+        reason = "尚未 connect()" if self._thread is None else "工作线程已退出"
+        logger.warning("留痕连接不可用（{}），重建连接", reason)
+        self._thread = None
+        self.connect()
+        return self._thread  # type: ignore[return-value]
 
     # ------------------------------------------------------------ 执行
 
@@ -433,17 +491,32 @@ class Store:
         self, sql: str, params: Sequence[Any] = ()
     ) -> Callable[[Any], list[dict[str, Any]]]:
         def work(connection: Any) -> list[dict[str, Any]]:
+            cursor = connection.execute(sql, params)
             try:
-                cursor = connection.execute(sql, params)
-                try:
-                    return cursor.fetchall()
-                finally:
-                    cursor.close()
+                rows = cursor.fetchall()
             finally:
+                # 关闭游标是清理动作。**它的失败不该让已经读到的结果作废**：
+                # 服务端在这个瞬间掐断连接时，``fetchall`` 已经成功、数据在手，
+                # 只有 ``close()`` 会抛 2013；不吞掉就等于「查询成功却返回 500」。
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            if self.backend_name == "mysql":
                 # 结束 MySQL 只读事务，让长连接的下一次查询看到新提交的数据。
-                if self.backend_name == "mysql":
+                # 同上：这一步只是释放快照，失败时结果仍然有效——把连接判死后
+                # 由下一次操作重连，而不是把这次查询判成失败。
+                try:
                     connection.rollback()
+                except BaseException as exc:
+                    if not self._backend.is_disconnect(exc):
+                        raise
+                    logger.warning("读事务释放失败（连接已断，下次操作前重连）：{}", exc)
+            return rows
 
+        # 只读语句可以安全重试：断连时重发一次不会改变任何数据。
+        # ``_execute_write`` 不设这个标记，写操作重试可能重复一次已经生效的提交。
+        work.safe_to_retry = True  # type: ignore[attr-defined]
         return work
 
     @staticmethod
