@@ -91,6 +91,156 @@ async def test_mysql_queue_reads_release_the_transaction_snapshot(monkeypatch):
         reader.close()
 
 
+# ---------------------------------------------------------------- 断连自愈
+#
+# 2026-11-25 UAT：``/runs`` 与 ``/runs/count`` 连续 500，日志里是
+# ``_mysql_connector.MySQLInterfaceError: Lost connection to MySQL server during query``，
+# 且栈顶落在 ``work`` 的收尾 ``connection.rollback()`` 上——**查询本身已经成功**。
+# 下面三个用例分别钉住那次的三个失误：清理失败连累结果、断连不被识别、读不重试。
+
+
+class _FlakyConnection:
+    """可指定「第几次操作开始断」的假 MySQL 连接。"""
+
+    def __init__(self, serial: int, *, drop_on_query: bool = False,
+                 drop_on_rollback: bool = False) -> None:
+        self.serial = serial
+        self.dead = False
+        self.rollback_calls = 0
+        self._drop_on_query = drop_on_query
+        self._drop_on_rollback = drop_on_rollback
+
+    def execute(self, sql, params=()):
+        if self.dead:
+            raise RuntimeError("MySQL Connection not available.")
+        if self._drop_on_query:
+            self.dead = True
+            raise RuntimeError("Lost connection to MySQL server during query")
+        cursor = Mock()
+        cursor.fetchall.return_value = [{"serial": self.serial}]
+        return cursor
+
+    def is_connected(self) -> bool:
+        return not self.dead
+
+    def rollback(self) -> None:
+        self.rollback_calls += 1
+        # 建连时的 setup 也会 rollback 一次，那是第 1 次；从第 2 次起才按计划断。
+        if self._drop_on_rollback and self.rollback_calls > 1:
+            self.dead = True
+            raise RuntimeError("Lost connection to MySQL server during query")
+
+    def commit(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.dead = True
+
+
+class _FlakyBackend:
+    """按顺序产出假连接；``is_disconnect`` 只看文本，和真实后端同口径。"""
+
+    name = "mysql"
+
+    def __init__(self, plans: list[dict]) -> None:
+        self.connects = 0
+        self._plans = plans
+
+    def connect(self):
+        plan = self._plans[min(self.connects, len(self._plans) - 1)]
+        self.connects += 1
+        return _FlakyConnection(self.connects, **plan)
+
+    @staticmethod
+    def is_disconnect(exc: BaseException) -> bool:
+        return "lost connection" in str(exc).lower()
+
+
+def _flaky_store(monkeypatch, plans: list[dict]) -> tuple[Store, _FlakyBackend]:
+    backend = _FlakyBackend(plans)
+    # 建连时的结构校验会被记成一次「读」，让 connect 次数对不上；这里跳过。
+    monkeypatch.setattr(
+        "customer_profile.persistence.mysql_schema.assert_expected_version",
+        lambda connection: None,
+    )
+    store = Store(backend)
+    store.connect()
+    return store, backend
+
+
+async def test_read_result_survives_disconnect_when_releasing_transaction(monkeypatch):
+    """查询成功、只有收尾的 rollback 断连时，**数据必须照样返回**。
+
+    这正是 UAT 的现场：``fetchall`` 已经拿到行，``rollback`` 抛 2013，异常一路
+    传到 FastAPI 变成 500。丢掉一次已经成功的读，没有任何业务理由。
+    """
+    store, backend = _flaky_store(monkeypatch, [{"drop_on_rollback": True}])
+    try:
+        rows = await store._read("SELECT 1")
+    finally:
+        store.close()
+
+    assert rows == [{"serial": 1}]
+    # 连接被判死，下一次操作前必须重连——否则会一直用死连接抛 500。
+    assert backend.connects == 1
+
+
+async def test_next_read_reconnects_after_cleanup_disconnect(monkeypatch):
+    store, backend = _flaky_store(
+        monkeypatch, [{"drop_on_rollback": True}, {}]
+    )
+    try:
+        assert await store._read("SELECT 1") == [{"serial": 1}]
+        assert await store._read("SELECT 1") == [{"serial": 2}]
+    finally:
+        store.close()
+
+    assert backend.connects == 2, "断连后必须重连，而不是继续用死连接"
+
+
+async def test_read_is_retried_once_after_query_disconnect(monkeypatch):
+    """读在查询中途断连：换一条连接重试一次；**写不重试**。"""
+    store, backend = _flaky_store(monkeypatch, [{"drop_on_query": True}, {}])
+    try:
+        assert await store._read("SELECT 1") == [{"serial": 2}]
+        assert backend.connects == 2
+    finally:
+        store.close()
+
+
+async def test_write_is_not_retried_after_disconnect(monkeypatch):
+    """写操作断连可能已经落库，重试会重复写入，因此只重连不重试。"""
+    store, backend = _flaky_store(monkeypatch, [{"drop_on_query": True}, {}])
+    try:
+        with pytest.raises(RuntimeError, match="Lost connection"):
+            await store._write("UPDATE workflow_runs SET status = 'running'")
+    finally:
+        store.close()
+
+    assert backend.connects == 1, "写不得自动重试"
+
+
+async def test_store_rebuilds_the_thread_when_it_is_gone(tmp_path):
+    """工作线程退出后必须自愈，而不是让进程一直抛「尚未 connect()」。"""
+    store = Store(tmp_path / "rebuild.db")
+    store.connect()
+    store._thread = None  # 模拟线程已退出、连接已丢失
+    try:
+        assert await store.count_runs() == 0
+        assert store.connected
+    finally:
+        store.close()
+
+
+async def test_closed_store_does_not_silently_reconnect(tmp_path):
+    """``close()`` 之后不再自动建连：进程正在退出，重连只会掩盖连接泄漏。"""
+    store = Store(tmp_path / "closed.db")
+    store.connect()
+    store.close()
+    with pytest.raises(RuntimeError, match="已关闭"):
+        await store.count_runs()
+
+
 async def test_business_upgrade_preserves_legacy_history_and_adds_attempt_columns(tmp_path):
     """旧卷中的历史入口记录与快照保留，两进程重连后仍能写入新的异常字段。"""
     path = tmp_path / "legacy.db"
