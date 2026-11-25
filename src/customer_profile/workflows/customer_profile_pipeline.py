@@ -4700,6 +4700,8 @@ WORKFLOW = WorkflowDef(
                 "supplemented",
                 "fallback_used",
                 "sanitize_dropped",
+                # 渠道判定留痕：模型原值 / 归一化值 / 最终值 / 依据；不进回传契约。
+                "channel_trace",
             ),
             function="customer_profile.follow_up:build",
         ),

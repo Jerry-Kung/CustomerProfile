@@ -468,44 +468,100 @@ def fallback_name(item: Mapping[str, str]) -> str:
     return "客户跟进"
 
 
-CHANNEL_KEYWORDS: Mapping[str, tuple[str, ...]] = {
-    "电话": ("电话", "致电", "通话", "外呼"),
-    "微信": ("微信",),
-    "上门": ("上门",),
-}
-"""沟通方式码 → 正文里指代该方式的词。
+CHANNEL_VALUES: tuple[str, ...] = ("电话", "微信", "上门", "店内沟通")
+"""本系统既有的渠道词表，与 ``communicationmethods`` 解码值一致。
 
-**不含「到店」**：「邀约到店」是跟进目的，一次电话沟通同样可以邀约到店，
-把它当渠道词会把大量正常记录判成冲突。
+契约是开放串（示例写「电话/到店/试驾/微信」），这里只统一**我们自己的**词表，
+避免模型值与码值解码值出现两套写法。模型给「其他」表示确实判断不了，原样保留。
 """
 
+CHANNEL_ALIASES: Mapping[str, tuple[str, ...]] = {
+    "电话": ("电话", "致电", "外呼", "回电"),
+    "微信": ("微信",),
+    "上门": ("上门",),
+    "店内沟通": ("到店", "到店沟通", "到店洽谈", "门店沟通", "店内沟通"),
+}
+"""规范值 → 可归一的形式。
 
-def channels_in(texts: Iterable[Any]) -> set[str]:
-    """正文里出现了哪些渠道词（判据见 :data:`CHANNEL_KEYWORDS`）。"""
-    joined = "".join(_text(text) for text in texts)
-    return {
-        name
-        for name, words in CHANNEL_KEYWORDS.items()
-        if any(word in joined for word in words)
-    }
+「店内沟通」组只做**精确匹配**：「邀约到店」是跟进目的，不是渠道——子串匹配会把
+大量正常表述判成到店渠道（历史守卫的教训）。
+"""
+
+OTHER_CHANNEL = "其他"
+"""模型确实判断不了时的取值；契约是开放串，允许保留。"""
+
+_NEGATION_WINDOW = 4
+"""渠道词前后多少字内出现否定/计划标记，就视为“没使用/只是计划”。"""
+
+_NEGATION_MARKERS = (
+    "不加", "没加", "未加", "别加", "不用加", "不想加",
+    "不用", "不要", "不需要", "拒绝", "无法",
+    "搜不到", "找不到", "没搜到", "扫不了",
+    "不方便", "本想", "原本想", "下次", "改天", "打算", "计划",
+)
+"""否定/计划语境标记，只用于**归一化**，不用于判断渠道该不该信。
+
+模型已经给出了渠道值，这里只检查渠道词附近有没有把它变成“未使用/只是计划”的标记；
+拿不准时原样保留——归一化只改形式，不改变语义判断。
+"""
+
+_CLAUSE_SPLIT = re.compile(r"[，,。．.；;！!？?\s、]+")
 
 
-def channel_conflicts(method: str, texts: Iterable[Any]) -> bool:
-    """解码出的沟通方式与正文/小结说的是不是同一件事。
+def _channel_candidates(text: str) -> list[tuple[str, str]]:
+    """值里出现了哪些规范渠道：返回 ``(规范值, 命中的写法)``。
 
-    码值不可信是实测出来的：11-02 批次 110 条含「微信」的跟进原文里，99 条的
-    ``communicationmethods`` 是 ``90441``（解作「电话」），涉及 85 个客户。在拿到
-    ``prefix_id = 9044`` 的字典原文之前，只能以正文为准——**正文与码值打架时不给这个
-    标签**。宁可少一行标签，也不让卡片出现与节点名相反的小图标。
-
-    判据有意宽松：正文只要提到别的渠道、而没提到码值那个渠道，就算冲突。
-    正文同时提到两者（「电话联系后又加了微信」）不算冲突——那是同一件事的两个环节。
+    「店内沟通」组只认精确相等，其余组按子串命中（「微信沟通」「微信联系」都算微信）。
     """
-    method = _text(method)
-    if not method:
-        return False
-    mentioned = channels_in(texts)
-    return bool(mentioned) and method not in mentioned
+    found: list[tuple[str, str]] = []
+    for canonical, aliases in CHANNEL_ALIASES.items():
+        for alias in aliases:
+            if canonical == "店内沟通":
+                if text == alias:
+                    found.append((canonical, alias))
+                    break
+            elif alias in text:
+                found.append((canonical, alias))
+                break
+    return found
+
+
+def _occurrences_negated(text: str, alias: str) -> bool:
+    """alias 的所有出现是否都处于否定/计划语境（同一分句、前后 4 字窗口内）。"""
+    seen = False
+    for clause in _CLAUSE_SPLIT.split(text):
+        start = 0
+        while True:
+            index = clause.find(alias, start)
+            if index < 0:
+                break
+            seen = True
+            before = clause[max(0, index - _NEGATION_WINDOW):index]
+            after = clause[index + len(alias):index + len(alias) + _NEGATION_WINDOW]
+            window = before + "|" + after
+            if not any(marker in window for marker in _NEGATION_MARKERS):
+                return False  # 至少一处肯定出现
+            start = index + len(alias)
+    return seen
+
+
+def normalize_channel(value: Any) -> str:
+    """把渠道值归一到本系统词表；拿不准时原样保留（截断到契约上限）。
+
+    只在模型/旧形状**已经给出**渠道值时使用：命中唯一渠道就归一，命中多个、未知渠道、
+    渠道词处于否定/计划语境时一律原样返回。失败方向是“没归上”，不是“标错渠道”。
+    """
+    text = _text(value)
+    if not text or text in PLACEHOLDER_VALUES or _BARE_CODE.match(text):
+        return ""
+    matched: dict[str, str] = {}
+    for canonical, alias in _channel_candidates(text):
+        if _occurrences_negated(text, alias):
+            continue
+        matched.setdefault(canonical, alias)
+    if len(matched) == 1:
+        return next(iter(matched))[:MAX_FOLLOW_UP_CHANNEL_CHARS]
+    return text[:MAX_FOLLOW_UP_CHANNEL_CHARS]
 
 
 def _next_follow_up(raw: Any) -> str:
@@ -538,6 +594,9 @@ def _fixed_value(key: str, raw: Any) -> str:
         return _literal(raw) if isinstance(raw, str) else ""
     if key == "next_follow_up_at":
         return _next_follow_up(raw)
+    if key == "follow_up_channel":
+        # 渠道值来自模型或旧形状，先归一化再到上限（:func:`normalize_channel`）。
+        return normalize_channel(raw) if isinstance(raw, str) else ""
     return _literal(raw) if isinstance(raw, str) else ""
 
 
@@ -648,6 +707,8 @@ def model_groups(model_output: Any, total: int) -> list[dict[str, Any]]:
             {
                 "indexes": sorted(indexes),
                 "name": _text(entry.get("node_name")),
+                "channel": _text(entry.get("channel")),
+                "channel_basis": _text(entry.get("channel_basis")),
                 "summary": _paragraph(entry.get("summary")),
             }
         )
@@ -665,6 +726,9 @@ def _node(
     position: int,
     lead_models: Mapping[str, set[str]] | None = None,
     lead_series: Iterable[str] = (),
+    channel: str = "",
+    channel_basis: str = "",
+    trace: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """构造一个契约形状的节点。
 
@@ -705,25 +769,28 @@ def _node(
     tail = members[-1]
     node.update(fixed_fields(tail))
     extra = fallback_extra(tail)
-    # 渠道是**唯一**可能与正文打架的一项：其余键取自记录字段，与措辞无关。
-    # 码值大面积错填 90441（电话）而正文写微信（见 :func:`channel_conflicts`）。
-    # 冲突、且这条记录的正文只提到一个渠道时，以正文为准——正文是销售自己写的；
-    # 正文提到多个渠道（「电话没接，又发了微信」）或没有渠道词时，码值同样拿不准，
-    # 维持旧口径：不出这个标签。
-    tail_text = _text(tail.get("content"))
-    channel = node.get("follow_up_channel")
-    if channel and channel_conflicts(channel, [tail_text]):
-        mentioned = channels_in([tail_text])
-        if len(mentioned) == 1:
-            node["follow_up_channel"] = next(iter(mentioned))[:MAX_FOLLOW_UP_CHANNEL_CHARS]
-        else:
-            node.pop("follow_up_channel")
-    # 兜底后的渠道仍要过节点级守卫：模型写的小结与它冲突时不出这个标签，
-    # 免得卡片上的小图标与节点名写反。
-    if "follow_up_channel" in node and channel_conflicts(
-        node["follow_up_channel"], [node["node_name"], *contents]
-    ):
-        node.pop("follow_up_channel")
+    # 渠道由模型按语义判定（提示词 §四），代码只做取用与归一化：
+    # - 模型给了值：归一化后采用，不再按正文关键词翻转/丢弃（2026-11-25 起）；
+    # - 模型没给或给了占位/裸码：回落到码值解码值（与 LLM 缺席时的既有行为一致）。
+    decoded_channel = _text(node.get("follow_up_channel"))
+    raw_model_channel = _text(channel)
+    chosen_channel = normalize_channel(raw_model_channel) if raw_model_channel else ""
+    if chosen_channel:
+        node["follow_up_channel"] = chosen_channel
+    elif decoded_channel:
+        node["follow_up_channel"] = decoded_channel[:MAX_FOLLOW_UP_CHANNEL_CHARS]
+    else:
+        node.pop("follow_up_channel", None)
+    if trace is not None:
+        trace.append(
+            {
+                "id": node["id"],
+                "model_channel": raw_model_channel,
+                "normalized_channel": chosen_channel,
+                "final_channel": _text(node.get("follow_up_channel")),
+                "basis": _text(channel_basis),
+            }
+        )
     # 业务方要车系（X700 / M817），不只是版本名（Ultra / PRO）：见
     # :func:`lead_vehicle_map`。车型名称在同客户线索里能唯一落到车系时拼接；
     # 多义时只用版本名，不猜。
@@ -750,6 +817,7 @@ def assemble(
     *,
     lead_models: Mapping[str, set[str]] | None = None,
     lead_series: Iterable[str] = (),
+    channel_trace: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[int]]:
     """把模型的分组与原始记录装成契约节点列表。
 
@@ -759,6 +827,9 @@ def assemble(
     ``lead_models`` / ``lead_series`` 来自 :func:`lead_vehicle_map`，用于给
     ``related_model`` 补车系；不传时行为与旧版一致。
 
+    ``channel_trace`` 是可选的留痕列表：模型原值、归一化值、最终值与依据逐节点追加，
+    供生产抽检与离线评测使用；不进回传契约。
+
     返回 ``(nodes, supplemented)``：``supplemented`` 是被代码补成节点的记录下标（0 基），
     留痕用。
     """
@@ -766,7 +837,9 @@ def assemble(
     groups = model_groups(model_output, total)
     covered = {index for group in groups for index in group["indexes"]}
 
-    slots: list[tuple[str, int, list[Mapping[str, str]], str, list[str]]] = []
+    slots: list[
+        tuple[str, int, list[Mapping[str, str]], str, list[str], str, str]
+    ] = []
     for group in groups:
         indexes = group["indexes"]
         members = [records[index] for index in indexes]
@@ -777,6 +850,8 @@ def assemble(
                 members,
                 group["name"],
                 group["summary"],
+                group["channel"],
+                group["channel_basis"],
             )
         )
 
@@ -786,14 +861,14 @@ def assemble(
             continue
         supplemented.append(index)
         # 代码补出来的节点没有模型措辞，``_node`` 会退回组内原文。
-        slots.append((_text(item.get("created_at")), index, [item], "", []))
+        slots.append((_text(item.get("created_at")), index, [item], "", [], "", ""))
 
     # 跨组补充的记录按「本条记录的创建时间」定位，与模型分组共用同一时间轴；
     # 同一时刻再比记录下标，保证顺序稳定。
     slots.sort(key=lambda slot: (slot[0], slot[1]))
 
     nodes: list[dict[str, Any]] = []
-    for position, (_, _, members, name, summary) in enumerate(
+    for position, (_, _, members, name, summary, channel, channel_basis) in enumerate(
         slots[:MAX_NODES], start=1
     ):
         nodes.append(
@@ -804,6 +879,9 @@ def assemble(
                 position=position,
                 lead_models=lead_models,
                 lead_series=lead_series,
+                channel=channel,
+                channel_basis=channel_basis,
+                trace=channel_trace,
             )
         )
     return nodes, supplemented
@@ -955,6 +1033,7 @@ def _out(
     record_count: int,
     supplemented: Sequence[int],
     dropped: Sequence[Mapping[str, Any]],
+    channel_trace: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     return {
         "follow_up_json": _dump(list(nodes)),
@@ -970,6 +1049,8 @@ def _out(
         "fallback_used": "true" if (record_count and (status != "ok" or supplemented)) else "false",
         # 自检丢掉了什么，直接进节点出参，排查时不必回看日志。
         "sanitize_dropped": _dump(list(dropped)) if dropped else "",
+        # 渠道判定留痕：模型原值 / 归一化值 / 最终值 / 依据。不进回传契约，只供抽检。
+        "channel_trace": _dump(list(channel_trace)) if channel_trace else "",
     }
 
 
@@ -1024,17 +1105,24 @@ async def build(
 
     # 车系在同客户线索记录里（``OntologyLeadInfo``）；L0 已经全量在手，不需要改依赖。
     lead_models, lead_series = lead_vehicle_map(records_json)
+    channel_trace: list[dict[str, Any]] = []
     nodes, supplemented = assemble(
-        records, output, lead_models=lead_models, lead_series=lead_series
+        records,
+        output,
+        lead_models=lead_models,
+        lead_series=lead_series,
+        channel_trace=channel_trace,
     )
     kept, dropped = sanitize(nodes)
     if not kept:
         return _out([], status="empty_after_sanitize", calls=calls,
                     error=error or "全部节点未通过契约自检", record_count=len(records),
-                    supplemented=supplemented, dropped=dropped)
+                    supplemented=supplemented, dropped=dropped,
+                    channel_trace=channel_trace)
 
     return _out(kept, status=status, calls=calls, error=error,
-                record_count=len(records), supplemented=supplemented, dropped=dropped)
+                record_count=len(records), supplemented=supplemented, dropped=dropped,
+                channel_trace=channel_trace)
 
 
 __all__ = [
@@ -1051,11 +1139,11 @@ __all__ = [
     "TEMPLATE_NAME",
     "assemble",
     "build",
-    "channels_in",
     "fallback_extra",
     "fallback_name",
     "fixed_fields",
     "model_groups",
+    "normalize_channel",
     "parse_record_lines",
     "parse_records",
     "parse_time",

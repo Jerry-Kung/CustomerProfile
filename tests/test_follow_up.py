@@ -710,7 +710,7 @@ def test_sanitize_promotes_legacy_extra_info_fields():
     assert node["follow_up_result"] == "预约试驾"
     assert node["converted_to_opportunity"] == "是"
     assert node["next_follow_up_at"] == "2026-05-22"
-    assert node["follow_up_channel"] == "到店"
+    assert node["follow_up_channel"] == "店内沟通"
     assert node["extra_info"] == {"战败类型": "价格原因"}
 
 
@@ -904,75 +904,174 @@ def test_prompt_carries_records_and_excludes_internal_ids():
     assert "MSCHUB023" not in prompt
 
 
-# ---------------------------------------------------------------- 渠道标签与正文打架
+# ---------------------------------------------------------------- 渠道：模型判定 + 归一化
 
-def test_channel_field_dropped_when_record_text_says_another_channel():
-    """UAT ``15903771774``：正文写「微信已经联系」，沟通方式码却是「电话」。
-
-    码值不可信是实测出来的（11-02 批次 110 条含「微信」的原文里 99 条标「电话」）。
-    卡片上宁可少一个「跟进渠道」，也不能出现与节点名相反的小图标。
-    """
-    item = {"method": "电话", "content": "微信已经联系说找个时间过来门店看一下具体的权益政策。"}
-    assert fu.channel_conflicts(item["method"], [item["content"]]) is True
-    # 取值层照常解出「电话」——守卫在装配层，不在取值层。
-    assert fu.fixed_fields(item)["follow_up_channel"] == "电话"
-
-
-def test_channel_label_kept_when_text_agrees_or_is_silent():
-    """正文同意、或压根没提渠道时，标签照常输出——这是绝大多数记录。"""
-    assert fu.channel_conflicts("电话", ["顾客说，等车子稳定之后再看吧，不着急。"]) is False
-    assert fu.channel_conflicts("电话", ["电话联系客户邀请试驾。"]) is False
-    assert fu.channel_conflicts("微信", ["微信沟通了价格。"]) is False
-    # 两者都提到（电话没接通、改加微信）不算冲突。
-    assert fu.channel_conflicts("电话", ["电话没接通，后来加了微信发资料。"]) is False
-
-
-def test_node_takes_channel_from_text_when_code_conflicts():
-    """节点名/正文说「微信」、码值说「电话」：取正文渠道，不再丢弃。
-
-    这是 ``15903771774`` 第 3 条与 UAT ``13995570625``（2026-09-13 那条）的现场口径：
-    码值大面积错填 90441（电话），安全通道是「以正文为准」。
-    """
-    record = _record("微信已经联系说找个时间过来门店看一下具体的权益政策。", method="电话")
+def _assemble_one(record: dict, node: dict) -> dict:
     nodes, _ = fu.assemble(
         fu.parse_records(_records_json(record)),
-        {"nodes": [{
+        {"nodes": [node]},
+    )
+    return nodes[0]
+
+
+def test_model_channel_is_adopted_over_decoded_code():
+    """模型给出渠道时直接采用；码值只作缺省。
+
+    UAT ``15903771774``：正文写「微信已经联系」，沟通方式码却是「电话」。
+    2026-11-25 起渠道由模型判定，代码不再按正文关键词翻转。
+    """
+    node = _assemble_one(
+        _record("微信已经联系说找个时间过来门店看一下具体的权益政策。", method="电话"),
+        {
             "records": [1],
             "node_name": "微信邀约到店",
-            "summary": "销售顾问通过微信联系客户，邀请其到门店了解具体权益政策，约定11月18日再次跟进。",
-        }]},
+            "channel": "微信",
+            "channel_basis": "微信已经联系说找个时间过来门店",
+            "summary": "销售顾问通过微信联系客户，邀请其到门店了解具体权益政策。",
+        },
     )
-    node = nodes[0]
-    assert node["node_name"] == "微信邀约到店"
     assert node["follow_up_channel"] == "微信"
-    assert "extra_info" not in node
-    # 其余标签不受影响。
     assert node["intent_level"] == "A 级意向（高）"
+    assert "channel_basis" not in node
 
 
-def test_channel_is_dropped_when_text_names_several_channels():
-    """正文同时提到两个渠道、码值都不在其中：拿不准，仍不出这个标签。"""
-    record = _record("微信发了消息没回，上门也去过一次。", method="电话")
-    nodes, _ = fu.assemble(
-        fu.parse_records(_records_json(record)),
-        {"nodes": [{
+def test_negated_record_text_does_not_override_model_channel():
+    """UAT 18620663489 回归：正文「不加微信」、模型判「电话」→ 输出电话。
+
+    旧守卫会把码值「电话」翻转成「微信」；守卫已移除，代码不再对正文做关键词改判。
+    """
+    node = _assemble_one(
+        _record("不加微信，周末有时间来看看，周五联系。", method="电话"),
+        {
             "records": [1],
-            "node_name": "多次联系客户",
-            "summary": "销售顾问与客户保持沟通。",
-        }]},
+            "node_name": "电话邀约到店",
+            "channel": "电话",
+            "channel_basis": "不加微信，周末有时间来看看",
+            "summary": "销售顾问电话联系客户邀请试驾，客户表示不加微信，周末有时间来看看。",
+        },
     )
-    assert "follow_up_channel" not in nodes[0]
+    assert node["follow_up_channel"] == "电话"
 
 
-def test_channel_override_still_yields_to_model_wording():
-    """正文兜底后的渠道仍受节点级守卫管：模型写的小结说电话，就不能挂「微信」标签。"""
-    record = _record("微信推送到店时间持续跟进。", method="电话")
-    nodes, _ = fu.assemble(
-        fu.parse_records(_records_json(record)),
-        {"nodes": [{
+def test_missing_model_channel_falls_back_to_decoded_method():
+    """模型没给渠道时，用码值解码值兜底（与 LLM 缺席时的既有行为一致）。"""
+    node = _assemble_one(
+        _record("电话联系客户邀请试驾。", method="电话"),
+        {"records": [1], "node_name": "邀约试驾", "summary": "销售顾问电话联系客户邀请试驾。"},
+    )
+    assert node["follow_up_channel"] == "电话"
+
+
+def test_model_channel_placeholder_falls_back_to_decoded_method():
+    """模型给占位串等于没给：回落码值解码。"""
+    node = _assemble_one(
+        _record("电话联系客户邀请试驾。", method="电话"),
+        {
             "records": [1],
-            "node_name": "电话跟进",
-            "summary": "销售顾问电话联系客户确认到店时间。",
-        }]},
+            "node_name": "邀约试驾",
+            "channel": "未知",
+            "summary": "销售顾问电话联系客户邀请试驾。",
+        },
     )
-    assert "follow_up_channel" not in nodes[0]
+    assert node["follow_up_channel"] == "电话"
+
+
+def test_model_channel_alias_is_normalized_before_use():
+    """语义正确但非规范枚举：归一化后采用，不回落码值。"""
+    node = _assemble_one(
+        _record("微信已经联系。", method="电话"),
+        {
+            "records": [1],
+            "node_name": "微信沟通",
+            "channel": "微信沟通",
+            "summary": "销售顾问微信联系客户。",
+        },
+    )
+    assert node["follow_up_channel"] == "微信"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("微信", "微信"),
+        ("微信沟通", "微信"),
+        ("微信联系", "微信"),
+        ("微信语音", "微信"),
+        ("电话", "电话"),
+        ("电话联系", "电话"),
+        ("致电", "电话"),
+        ("外呼", "电话"),
+        ("上门", "上门"),
+        ("上门拜访", "上门"),
+        ("到店", "店内沟通"),
+        ("到店沟通", "店内沟通"),
+        ("门店沟通", "店内沟通"),
+        ("店内沟通", "店内沟通"),
+        ("其他", "其他"),
+        # 拿不准的一律原样保留：不猜、不丢、不改判
+        ("电话和微信沟通", "电话和微信沟通"),
+        ("邀约到店", "邀约到店"),
+        ("未加微信", "未加微信"),
+        ("本想加微信", "本想加微信"),
+        ("下次再加微信", "下次再加微信"),
+        ("客户说微信不方便", "客户说微信不方便"),
+        ("短信沟通", "短信沟通"),
+        ("", ""),
+    ],
+)
+def test_normalize_channel_aliases(raw: str, expected: str):
+    assert fu.normalize_channel(raw) == expected
+
+
+def test_normalize_channel_is_idempotent():
+    for raw in ("微信沟通", "致电", "到店沟通", "邀约到店", "未加微信", "其他"):
+        once = fu.normalize_channel(raw)
+        assert fu.normalize_channel(once) == once
+
+
+def test_normalize_channel_respects_contract_length():
+    raw = "短信" + "说明" * 40
+    out = fu.normalize_channel(raw)
+    assert len(out) <= fu.MAX_FOLLOW_UP_CHANNEL_CHARS
+    assert out.startswith("短信")
+
+
+def test_build_records_channel_trace_for_audit():
+    """模型原值、归一化值、最终值与依据进留痕，便于抽检。"""
+    import asyncio
+
+    payload = json.dumps(
+        {
+            "nodes": [
+                {
+                    "records": [1],
+                    "node_name": "微信沟通",
+                    "channel": "微信沟通",
+                    "channel_basis": "微信已经联系",
+                    "summary": "销售顾问微信联系客户。",
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    llm = _FakeLLM(payload)
+    out = asyncio.run(fu.build(_records_json(_record("微信已经联系。")), llm=llm))
+    trace = json.loads(out["channel_trace"])
+    assert trace[0]["model_channel"] == "微信沟通"
+    assert trace[0]["normalized_channel"] == "微信"
+    assert trace[0]["final_channel"] == "微信"
+    assert trace[0]["basis"] == "微信已经联系"
+
+
+def test_prompt_asks_model_for_channel_and_basis():
+    """提示词必须给出渠道字段、语义口径与反例。"""
+    import asyncio
+
+    llm = _FakeLLM({"nodes": []})
+    asyncio.run(fu.build(_records_json(_record("电话没接通")), llm=llm))
+    prompt = llm.calls[0]["prompt"]
+    assert '"channel"' in prompt
+    assert "channel_basis" in prompt
+    assert "不加微信" in prompt
+    assert "秒挂" in prompt
+
