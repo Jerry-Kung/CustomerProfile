@@ -445,11 +445,21 @@ class MySqlBackend:
 
     @staticmethod
     def is_disconnect(exc: BaseException) -> bool:
+        candidates: tuple[type, ...] = ()
         try:
             from mysql.connector import Error as MySqlError
+            candidates += (MySqlError,)
         except ImportError:  # 驱动不可用时不假装能判断
-            return False
-        if isinstance(exc, MySqlError):
+            pass
+        try:
+            # mysql-connector 9.7 起，C 扩展层的``MySQLInterfaceError``不再挂在
+            # ``mysql.connector.Error`` 下，而真实断连（2013/2006）抛的恰恰是它；
+            # 只认前者会让这条判据在新驱动上失效。
+            from _mysql_connector import MySQLInterfaceError
+            candidates += (MySQLInterfaceError,)
+        except ImportError:
+            pass
+        if candidates and isinstance(exc, candidates):
             errno = getattr(exc, "errno", None)
             if errno is not None:
                 # errno 有值时它就是唯一依据：约束冲突、语法错误不能被文本里的

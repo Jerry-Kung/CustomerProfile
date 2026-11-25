@@ -34,10 +34,20 @@ def test_ordinary_sql_error_is_not_a_disconnect():
 
 
 def test_interface_error_without_errno_is_a_disconnect():
-    """C 扩展层的 2013 没有 errno，必须靠文本兜底。"""
-    errors = pytest.importorskip("mysql.connector.errors")
+    """C 扩展层的 2013 没有 errno，必须靠文本兜底。
 
-    exc = errors.MySQLInterfaceError("Lost connection to MySQL server during query")
+    mysql-connector 9.7 起 ``MySQLInterfaceError`` 不再挂在
+    ``mysql.connector.errors`` 下，只由 C 扩展导出；判据与测试都按真实来源取类。
+    """
+    driver = pytest.importorskip("_mysql_connector")
+    exc_type = getattr(driver, "MySQLInterfaceError", None)
+    if exc_type is None:
+        errors = pytest.importorskip("mysql.connector.errors")
+        exc_type = getattr(errors, "MySQLInterfaceError", None)
+    if exc_type is None:
+        pytest.skip("当前驱动没有 MySQLInterfaceError")
+
+    exc = exc_type("Lost connection to MySQL server during query")
     assert getattr(exc, "errno", None) is None, "前提：这类异常没有 errno"
     assert MySqlBackend.is_disconnect(exc) is True
 
